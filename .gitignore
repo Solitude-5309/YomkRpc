@@ -1,69 +1,85 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+# This file is used to ignore files which are generated
+# ----------------------------------------------------------------------------
+build/
+bin/
+.vscode/
+*~
+*.autosave
+*.a
+*.core
+*.moc
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
+*.orig
+*.rej
 *.so
-*.dylib
-*.dll
 *.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
+*_pch.h.cpp
+*_resource.rc
+*.qm
+.#*
+*.*#
+core
+!core/
+tags
+.DS_Store
+.directory
+*.debug
+Makefile*
+*.prl
 *.app
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+Thumbs.db
+*.res
+*.rc
+/.qmake.cache
+/.qmake.stash
 
-# Build directories
+# qtcreator generated files
+*.pro.user*
+
+# xemacs temporary files
+*.flc
+
+# Vim temporary files
+.*.swp
+
+# Visual Studio generated files
+*.ib_pdb_index
+*.idb
+*.ilk
+*.pdb
+*.sln
+*.suo
+*.vcproj
+*vcproj.*.*.user
+*.ncb
+*.sdf
+*.opensdf
+*.vcxproj
+*vcxproj.*
+
+# MinGW generated files
+*.Debug
+*.Release
+
+# Python byte code
+*.pyc
+
+# Binaries
+# --------
+*.dll
+*.exe
+
+# ros2
 build/
-Build/
-build-*/
+install/
+log/
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
-
-# Temporary files
-*.tmp
-*.log
-*.bak
-*.swp
-
-# vcpkg
-vcpkg_installed/
-
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+# custom
+# 第三方库目录：取消忽略其中被通用规则(如 *.so、bin/)排除的文件。
+# 注意：否定目录本身不会递归包含内部文件，须用 `**` 显式重新包含；
+# 而被 bin/ 等规则排除的目录，内部文件无法直接重新包含，需先取消忽略目录本身。
+!thirdparty/**

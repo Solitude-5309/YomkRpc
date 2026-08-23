@@ -1,0 +1,264 @@
+module YomkRpc{
+
+    struct MBool
+    {
+        boolean data;
+    };
+
+    struct MByte
+    {
+        octet data;
+    };
+
+    struct MChar
+    {
+        char data;
+    };
+
+    struct MUChar
+    {
+        octet data;
+    };
+
+    struct MInt8
+    {
+        char data;
+    };
+
+    struct MUInt8
+    {
+        octet data;
+    };
+
+    struct MInt16
+    {
+        short data;
+    };
+
+    struct MUInt16
+    {
+        unsigned short data;
+    };
+
+    struct MInt32
+    {
+        long data;
+    };
+
+    struct MUInt32
+    {
+        unsigned long data;
+    };
+
+    struct MInt64
+    {
+        long long data;
+    };
+
+    struct MUInt64
+    {
+        unsigned long long data;
+    };
+
+    struct MFloat32
+    {
+        float data;
+    };
+
+    struct MFloat64
+    {
+        double data;
+    };
+
+    struct MString
+    {
+        string data;
+    };
+
+    struct MultiArrayDimension
+    {
+        string label;           
+        unsigned long size;     
+        unsigned long stride;   
+    };
+
+    struct MultiArrayLayout
+    {
+        sequence<MultiArrayDimension> dim;  
+        unsigned long data_offset;         
+    };
+
+    struct MUCharArray
+    {
+        sequence<octet> data;
+    };
+
+    struct MUCharMultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<octet> data;
+    };
+
+    struct MByteArray
+    {
+        sequence<octet> data;
+    };
+
+    struct MByteMultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<octet> data;
+    };
+
+    struct MInt8Array
+    {
+        sequence<char>   data;
+    };
+
+    struct MInt8MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<char>   data;
+    };
+
+    struct MUInt8Array
+    {
+        sequence<octet>   data;
+    };
+
+    struct MUInt8MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<octet>   data;
+    };
+
+    struct MInt16Array
+    {
+        sequence<short>   data;
+    };
+
+    struct MInt16MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<short>   data;
+    };
+
+    struct MUInt16Array
+    {
+        sequence<unsigned short>   data;
+    };
+
+    struct MUInt16MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<unsigned short>   data;
+    };
+
+    struct MInt32Array
+    {
+        sequence<long>   data;
+    };
+
+    struct MInt32MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<long>   data;
+    };
+
+    struct MUInt32Array
+    {
+        sequence<unsigned long>   data;
+    };
+
+    struct MUInt32MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<unsigned long>   data;
+    };
+
+    struct MInt64Array
+    {
+        sequence<long long>   data;
+    };
+
+    struct MInt64MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<long long>   data;
+    };
+
+    struct MUInt64Array
+    {
+        sequence<unsigned long long>   data;
+    };
+
+    struct MUInt64MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<unsigned long long>   data;
+    };
+
+    struct MFloat32Array
+    {
+        sequence<float>   data;
+    };
+
+    struct MFloat32MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<float>   data;
+    };
+
+    struct MFloat64Array
+    {
+        sequence<double>   data;
+    };
+
+    struct MFloat64MultiArray
+    {
+        MultiArrayLayout  layout;
+        sequence<double>   data;
+    };
+
+    struct MColorRGBA
+    {
+        float r;
+        float g;
+        float b;
+        float a;
+    };
+
+    struct MTime
+    {
+        long sec;
+        unsigned long nanosec;
+    };
+
+    struct MDuration
+    {
+        long sec;
+        unsigned long nanosec;
+    };
+
+    struct MHeader
+    {
+        MTime stamp;
+        string frame_id;
+    };
+    
+    struct RequestPkg {
+        @key string id;
+        string client;
+        unsigned long size;             
+        sequence<octet> data; 
+    };
+
+    struct ResponsePkg {
+        @key string id;
+        string client;
+        int32 code;
+        string msg;
+        unsigned long size; 
+        sequence<octet> data;
+    };
+};
