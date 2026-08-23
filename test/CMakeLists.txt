@@ -6,16 +6,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(YomkServer REQUIRED)
 find_package(YomkRpc REQUIRED)
-message(STATUS "YomkServer version: ${YomkServer_VERSION}")  
-message(STATUS "YomkServer include dirs: ${YomkServer_INCLUDE_DIRS}")  
-message(STATUS "YomkServer lib dir: ${YomkServer_LIB_DIR}")  
-message(STATUS "YomkServer libraries: ${YomkServer_LIBRARIES}") 
+
+message(STATUS "YomkServer version: ${YomkServer_VERSION}")
+message(STATUS "YomkServer include dirs: ${YomkServer_INCLUDE_DIRS}")
+message(STATUS "YomkServer lib dir: ${YomkServer_LIB_DIR}")
+message(STATUS "YomkServer libraries: ${YomkServer_LIBRARIES}")
 message(STATUS "YomkRpc version: ${YomkRpc_VERSION}")
 message(STATUS "YomkRpc include dirs: ${YomkRpc_INCLUDE_DIRS}")
 message(STATUS "YomkRpc lib dir: ${YomkRpc_LIB_DIR}")
 message(STATUS "YomkRpc libraries: ${YomkRpc_LIBRARIES}")
-include_directories(${YomkServer_INCLUDE_DIRS})
-link_directories(${YomkServer_LIB_DIR})
+
+# 导出 target 不含库搜索路径是设计如此，此处由扩展 Config 提供的 lib 目录补齐：
+# YomkRpcMsg 无导出包、以裸库名链接，仅能靠 -L 解析（fastdds 已由 Config 的 find_dependency 解析为全路径）
+link_directories(${YomkRpc_LIB_DIR})
 
 add_executable(TestRpcTopic TestRpcTopic.cpp)
 target_link_libraries(TestRpcTopic PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
@@ -29,3 +32,13 @@ target_link_libraries(RpcPubHelloWorld PRIVATE YomkRpc::YomkRpc YomkServer::Yomk
 
 add_executable(RpcSubHelloWorld RpcSubHelloWorld.cpp)
 target_link_libraries(RpcSubHelloWorld PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+
+# 测试程序随扩展一并安装到 <安装路径>/bin，供用户在任意终端直接运行验证
+# 测试程序可能有多个，此处显式列出全部测试目标名（不能用 ${PROJECT_NAME} 占位）
+install(TARGETS
+    TestRpcTopic
+    TestRpcTopicLoan
+    RpcPubHelloWorld
+    RpcSubHelloWorld
+    RUNTIME DESTINATION bin
+)

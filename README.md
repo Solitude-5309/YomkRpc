@@ -21,20 +21,16 @@
 
 - C++17 编译器
 - CMake >= 3.14
-- YomkServer 已安装
+- YomkServer 已安装（通过 `build_ubuntu.sh` 安装后会自动配置环境变量 `YOMK_PREFIX_PATH` 指向安装路径）
 - swig 与 python3-dev（msg 类型库 SWIG Python 绑定编译依赖）
 
 ## 编译
 
 ```bash
-# 默认安装到 YomkRpc/install/
-source build.sh -DCMAKE_PREFIX_PATH=~/YomkServer/install
-
-# 自定义安装目录
-source build.sh -DCMAKE_PREFIX_PATH=~/YomkServer/install -DCMAKE_INSTALL_PREFIX=~/YomkServer/install
+source build_ubuntu.sh
 ```
 
-脚本启动时先执行环境检查：自动检测 gcc / swig / python3-dev / build-essential / cmake 等编译依赖，缺失时提示一键 `sudo apt install` 补齐。随后按三步流程执行：先编译安装主库（YomkRpc），再编译安装 msg 类型库（YomkRpcMsg，固定安装至 ~/YomkServer/install），最后编译并依次运行 `TestRpcTopic`（服务接口端到端测试）与 `TestRpcTopicLoan`（loan 借出机制专项测试），并设置好 LD_LIBRARY_PATH/PATH 环境变量。示例程序 `RpcPubHelloWorld`/`RpcSubHelloWorld` 随测试工程一起编译，不参与自动测试。
+> 交互式编译：依次询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取 `$YOMK_PREFIX_PATH`，可修改。扩展库与 YomkServer 安装到一起（头文件由 `YomkServer::YomkServer` 的 INTERFACE include 统一提供）。脚本启动时先自动检测 gcc / swig / python3-dev / build-essential / cmake 等编译依赖，缺失时提示一键 `sudo apt install` 补齐；随后按三步流程编译安装主库（YomkRpc）、msg 类型库（YomkRpcMsg，含 SWIG Python 绑定）与测试程序，并将 `${安装路径}/lib` 幂等注册到 `/etc/ld.so.conf.d/yomk.conf`、执行 `sudo ldconfig` 刷新缓存（新开任意终端即可找到扩展 so）。测试程序随扩展安装到 `<安装路径>/bin`，安装后可在任意终端直接运行 `TestRpcTopic`（服务接口端到端测试）与 `TestRpcTopicLoan`（loan 借出机制专项测试）验证；示例程序 `RpcPubHelloWorld`/`RpcSubHelloWorld` 一并安装，不参与自动测试。
 
 ## 工程结构
 
@@ -59,7 +55,7 @@ YomkRpc/
 ├── cmake/
 │   └── ProjectConfig.cmake.in  # CMake 导出配置模板
 ├── CMakeLists.txt            # CMake 构建配置
-├── build.sh                  # 一键编译脚本
+├── build_ubuntu.sh           # 一键编译脚本（交互式）
 └── README.md
 ```
 
@@ -202,7 +198,7 @@ int main(int argc, char *argv[])
 - `RpcPubHelloWorld`：创建 `pub_node`，注册 `hello_world` 主题（MString），每隔 1s 发布一次，持续 60 秒后自行干净退出
 - `RpcSubHelloWorld`：创建 `sub_node`，订阅 `hello_world`，收到每条消息打印 `[RECV]` 内容，Ctrl+C 退出并打印累计接收条数
 
-另开两个终端分别运行即可观察跨进程发布/订阅（运行前需 export LD_LIBRARY_PATH 含 YomkRpc/install/lib 与 ~/YomkServer/install/lib）：
+另开两个终端分别运行即可观察跨进程发布/订阅（安装脚本已将扩展 lib 注册进系统动态库缓存，无需手动设置 LD_LIBRARY_PATH）：
 
 ```bash
 # 终端 1（先启动订阅端）
