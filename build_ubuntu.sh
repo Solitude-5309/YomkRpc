@@ -214,6 +214,6 @@ unset _ORIG_DIR
 echo "编译完成，扩展库已注册到系统动态库缓存，新开任意终端即可使用"
 ldconfig -p | grep -i "${PROJECT_NAME}" || true
 if [ "${BUILD_TEST}" = "ON" ]; then
-    echo "测试程序已安装到 ${INSTALL_DIR}/bin，可直接运行 TestRpcTopic / TestRpcTopicLoan 验证；"
-    echo "示例程序 RpcPubHelloWorld/RpcSubHelloWorld 可另开两个终端分别运行观察跨进程发布/订阅"
+    echo "测试程序已安装到 ${INSTALL_DIR}/bin，可直接运行 TestYomkRpcTopic / TestYomkRpcTopicLoan 验证；"
+    echo "示例程序 TestYomkRpcPub/TestYomkRpcSub 可另开两个终端分别运行观察跨进程发布/订阅"
 fi

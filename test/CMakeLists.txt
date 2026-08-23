@@ -20,25 +20,25 @@ message(STATUS "YomkRpc libraries: ${YomkRpc_LIBRARIES}")
 # YomkRpcMsg 无导出包、以裸库名链接，仅能靠 -L 解析（fastdds 已由 Config 的 find_dependency 解析为全路径）
 link_directories(${YomkRpc_LIB_DIR})
 
-add_executable(TestRpcTopic TestRpcTopic.cpp)
-target_link_libraries(TestRpcTopic PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+add_executable(TestYomkRpcTopic TestYomkRpcTopic.cpp)
+target_link_libraries(TestYomkRpcTopic PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
-add_executable(TestRpcTopicLoan TestRpcTopicLoan.cpp)
-target_link_libraries(TestRpcTopicLoan PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+add_executable(TestYomkRpcTopicLoan TestYomkRpcTopicLoan.cpp)
+target_link_libraries(TestYomkRpcTopicLoan PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
 # 发布/订阅示例程序（用户参考，非断言测试）：另开终端分别运行
-add_executable(RpcPubHelloWorld RpcPubHelloWorld.cpp)
-target_link_libraries(RpcPubHelloWorld PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+add_executable(TestYomkRpcPub TestYomkRpcPub.cpp)
+target_link_libraries(TestYomkRpcPub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
-add_executable(RpcSubHelloWorld RpcSubHelloWorld.cpp)
-target_link_libraries(RpcSubHelloWorld PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+add_executable(TestYomkRpcSub TestYomkRpcSub.cpp)
+target_link_libraries(TestYomkRpcSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
 # 测试程序随扩展一并安装到 <安装路径>/bin，供用户在任意终端直接运行验证
 # 测试程序可能有多个，此处显式列出全部测试目标名（不能用 ${PROJECT_NAME} 占位）
 install(TARGETS
-    TestRpcTopic
-    TestRpcTopicLoan
-    RpcPubHelloWorld
-    RpcSubHelloWorld
+    TestYomkRpcTopic
+    TestYomkRpcTopicLoan
+    TestYomkRpcPub
+    TestYomkRpcSub
     RUNTIME DESTINATION bin
 )

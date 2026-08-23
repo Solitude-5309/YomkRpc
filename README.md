@@ -30,7 +30,7 @@
 source build_ubuntu.sh
 ```
 
-> 交互式编译：依次询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取 `$YOMK_PREFIX_PATH`，可修改。扩展库与 YomkServer 安装到一起（头文件由 `YomkServer::YomkServer` 的 INTERFACE include 统一提供）。脚本启动时先自动检测 gcc / swig / python3-dev / build-essential / cmake 等编译依赖，缺失时提示一键 `sudo apt install` 补齐；随后按三步流程编译安装主库（YomkRpc）、msg 类型库（YomkRpcMsg，含 SWIG Python 绑定）与测试程序，并将 `${安装路径}/lib` 幂等注册到 `/etc/ld.so.conf.d/yomk.conf`、执行 `sudo ldconfig` 刷新缓存（新开任意终端即可找到扩展 so）。测试程序随扩展安装到 `<安装路径>/bin`，安装后可在任意终端直接运行 `TestRpcTopic`（服务接口端到端测试）与 `TestRpcTopicLoan`（loan 借出机制专项测试）验证；示例程序 `RpcPubHelloWorld`/`RpcSubHelloWorld` 一并安装，不参与自动测试。
+> 交互式编译：依次询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取 `$YOMK_PREFIX_PATH`，可修改。扩展库与 YomkServer 安装到一起（头文件由 `YomkServer::YomkServer` 的 INTERFACE include 统一提供）。脚本启动时先自动检测 gcc / swig / python3-dev / build-essential / cmake 等编译依赖，缺失时提示一键 `sudo apt install` 补齐；随后按三步流程编译安装主库（YomkRpc）、msg 类型库（YomkRpcMsg，含 SWIG Python 绑定）与测试程序，并将 `${安装路径}/lib` 幂等注册到 `/etc/ld.so.conf.d/yomk.conf`、执行 `sudo ldconfig` 刷新缓存（新开任意终端即可找到扩展 so）。测试程序随扩展安装到 `<安装路径>/bin`，安装后可在任意终端直接运行 `TestYomkRpcTopic`（服务接口端到端测试）与 `TestYomkRpcTopicLoan`（loan 借出机制专项测试）验证；示例程序 `TestYomkRpcPub`/`TestYomkRpcSub` 一并安装，不参与自动测试。
 
 ## 工程结构
 
@@ -48,10 +48,10 @@ YomkRpc/
 │   └── ...                 # fastddsgen 生成代码（独立类型库，含 SWIG Python 绑定）
 ├── test/
 │   ├── CMakeLists.txt        # 测试程序构建
-│   ├── TestRpcTopic.cpp      # 服务接口端到端测试
-│   ├── TestRpcTopicLoan.cpp  # loan 借出机制专项测试
-│   ├── RpcPubHelloWorld.cpp  # 发布端示例程序（每 1s 发布 hello world，持续 60 秒）
-│   └── RpcSubHelloWorld.cpp  # 订阅端示例程序（订阅 hello world，Ctrl+C 退出）
+│   ├── TestYomkRpcTopic.cpp      # 服务接口端到端测试
+│   ├── TestYomkRpcTopicLoan.cpp  # loan 借出机制专项测试
+│   ├── TestYomkRpcPub.cpp        # 发布端示例程序（每 1s 发布 hello world，持续 60 秒）
+│   └── TestYomkRpcSub.cpp        # 订阅端示例程序（订阅 hello world，Ctrl+C 退出）
 ├── cmake/
 │   └── ProjectConfig.cmake.in  # CMake 导出配置模板
 ├── CMakeLists.txt            # CMake 构建配置
@@ -195,16 +195,16 @@ int main(int argc, char *argv[])
 
 `test/` 下提供两个独立进程的参考程序（纯宏 API，编译后可直接运行）：
 
-- `RpcPubHelloWorld`：创建 `pub_node`，注册 `hello_world` 主题（MString），每隔 1s 发布一次，持续 60 秒后自行干净退出
-- `RpcSubHelloWorld`：创建 `sub_node`，订阅 `hello_world`，收到每条消息打印 `[RECV]` 内容，Ctrl+C 退出并打印累计接收条数
+- `TestYomkRpcPub`：创建 `pub_node`，注册 `hello_world` 主题（MString），每隔 1s 发布一次，持续 60 秒后自行干净退出
+- `TestYomkRpcSub`：创建 `sub_node`，订阅 `hello_world`，收到每条消息打印 `[RECV]` 内容，Ctrl+C 退出并打印累计接收条数
 
 另开两个终端分别运行即可观察跨进程发布/订阅（安装脚本已将扩展 lib 注册进系统动态库缓存，无需手动设置 LD_LIBRARY_PATH）：
 
 ```bash
 # 终端 1（先启动订阅端）
-RpcSubHelloWorld
+TestYomkRpcSub
 # 终端 2（再启动发布端）
-RpcPubHelloWorld
+TestYomkRpcPub
 ```
 
 ## 开发状态
@@ -214,7 +214,7 @@ RpcPubHelloWorld
 - ✅ FastDDS 集成（FastDDSNode 发布订阅）
 - ✅ YomkRpcService DDS 接口（节点管理/主题注册/发布）
 - ✅ Loan 借出机制（订阅端透明自动切换，发布端 loan/discard 接口）
-- ✅ 跨进程通信验证（RpcPubHelloWorld/RpcSubHelloWorld 双进程示例）
+- ✅ 跨进程通信验证（TestYomkRpcPub/TestYomkRpcSub 双进程示例）
 - 🚧 更多数据类型支持
 
 ## License
