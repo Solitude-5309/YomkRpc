@@ -118,7 +118,7 @@ int MyBoot::after()
     }
     YOMK_INFO_TAG("MyBoot::after", "ProjectName started successfully.");
 
-    resp = YOMK_REQUEST("/ConfigService/get", YomkMkPtr(YConfigKey, ConfigKey{"name"}));
+    resp = YOMK_REQUEST("/ConfigService/get", YomkMkPtr(ConfigKey, ConfigKey{"name"}));
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("MyBoot::after", "get config name failed: ", resp.m_msg);
@@ -139,7 +139,7 @@ int MyBoot::after()
     YomkUnPackPkg(resp.m_data, String, version);
     YOMK_INFO_TAG("MyBoot::after", "project version: ", version->d);
 
-    resp = YOMK_REQUEST("/ConfigService/get", YomkMkPtr(YConfigKey, ConfigKey{"description"}));
+    resp = YOMK_REQUEST("/ConfigService/get", YomkMkPtr(ConfigKey, ConfigKey{"description"}));
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("MyBoot::after", "get config description failed: ", resp.m_msg);
@@ -181,8 +181,8 @@ struct ConfigKeyValue
 };
 
 // clang-format off
-YomkMsg(ConfigKey, YConfigKey, req)
-YomkMsg(ConfigKeyValue, YConfigKeyValue, req)
+YomkMsg(ConfigKey, ConfigKey, req)
+YomkMsg(ConfigKeyValue, ConfigKeyValue, req)
 ```
 
 ### services/ConfigService.h
@@ -276,7 +276,7 @@ YomkResponse ConfigService::loadConfig(YomkPkgPtr pkg)
 
 YomkResponse ConfigService::getConfig(YomkPkgPtr pkg)
 {
-    YomkUnPackPkgResponse(pkg, YConfigKey, data);
+    YomkUnPackPkgResponse(pkg, ConfigKey, data);
 
     auto it = m_configMap.find(data->req.key);
     if (it == m_configMap.end())
@@ -287,7 +287,7 @@ YomkResponse ConfigService::getConfig(YomkPkgPtr pkg)
 
 YomkResponse ConfigService::setConfig(YomkPkgPtr pkg)
 {
-    YomkUnPackPkgResponse(pkg, YConfigKeyValue, data);
+    YomkUnPackPkgResponse(pkg, ConfigKeyValue, data);
 
     m_configMap[data->req.key] = data->req.value;
     YOMK_INFO_TAG("ConfigService::setConfig", "set ", data->req.key, " = ", data->req.value);
@@ -484,8 +484,8 @@ struct UserInfo
 };
 
 // clang-format off
-YomkMsg(UserQuery, YUserQuery, req)
-YomkMsg(UserInfo, YUserInfo, d)
+YomkMsg(UserQuery, UserQuery, req)
+YomkMsg(UserInfo, UserInfo, d)
 ```
 
 ### 2. 创建服务（services/UserService.h）
@@ -529,22 +529,22 @@ int UserService::init()
 
 YomkResponse UserService::getUser(YomkPkgPtr pkg)
 {
-    YomkUnPackPkgResponse(pkg, YUserQuery, query);
+    YomkUnPackPkgResponse(pkg, UserQuery, query);
     YOMK_INFO_TAG("UserService::getUser", "query user: ", query->req.userId);
 
     // 业务逻辑...
     UserInfo info{query->req.userId, "Alice", 25};
-    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(YUserInfo, info));
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(UserInfo, info));
 }
 
 YomkResponse UserService::createUser(YomkPkgPtr pkg)
 {
-    YomkUnPackPkgResponse(pkg, YUserInfo, user);
+    YomkUnPackPkgResponse(pkg, UserInfo, user);
     YOMK_INFO_TAG("UserService::createUser", "create user: ", user->d.name);
 
     // 跨服务调用示例：读取配置
     YomkResponse cfgResp = YOMK_REQUEST("/ConfigService/get",
-        YomkMkPtr(YConfigKey, ConfigKey{"server.name"}));
+        YomkMkPtr(ConfigKey, ConfigKey{"server.name"}));
 
     return YomkResponse(YomkResponse::eOk, "user created");
 }
@@ -674,7 +674,133 @@ void MyService::deinit() {
 }
 ```
 
-## 示例5：文件日志
+## 示例5：服务内省（调试）
+
+内省类型元数据由 `YomkInstallFunc` 三参形式声明（不参与运行时校验，两参旧写法零改动）：
+
+```cpp
+int DemoService::init()
+{
+    YomkInstallFunc("/with_type", DemoService::withType, String);  // 内省可见类型 String
+    YomkInstallFunc("/no_type", DemoService::noType);              // 旧写法兼容，内省无类型
+    return 0;
+}
+
+// 服务列表（返回 StringArray）
+YomkResponse resp = YOMK_SERVER_INFO_SERVICES();
+YomkUnPackPkg(resp.m_data, StringArray, arr);  // arr->d: ["/DemoService", "/YomkServerInfo", ...]
+
+// 指定服务的函数列表（每行 "funcName [msgName]"）
+resp = YOMK_SERVER_INFO_FUNCTIONS("/DemoService");
+// arr->d: ["/no_type", "/with_type [String]"]
+
+// 单函数类型查询（service type）
+resp = YOMK_SERVER_INFO_FUNCTION("/DemoService/with_type");  // eOk, msg = "String"
+resp = YOMK_SERVER_INFO_FUNCTION("/DemoService/no_type");    // eOk, msg 为空串（未声明）
+resp = YOMK_SERVER_INFO_FUNCTION("/DemoService/not_exist");  // eNo
+
+// 全量 dump：服务名行 + 缩进的 "srvName + funcName [msgName]" 行
+resp = YOMK_SERVER_INFO_ALL();
+```
+
+说明：FunctionPool 动态注册的函数无类型信息，内省显示为空；模块内层内省由各模块自行实现（四个内置模块均已完成，见下）。完整验证见 `Test/YomkServer/TestYomkServerInfo.cpp`。
+
+### Context 模块内省
+
+`/YomkContext` 服务自身提供 key 级内省（既有功能函数均已用三参宏补齐类型名，服务器层内省同步可见）：
+
+```cpp
+YOMK_CONTEXT_CREATE("str_key", YomkMkPtr(String, "v1"));
+YOMK_CONTEXT_SET_CHECKER("str_key", myChecker);
+YOMK_CONTEXT_SET_MONITOR("str_key", myMonitor, true);
+
+// key 列表（返回 StringArray）
+YomkResponse resp = YOMK_CONTEXT_INFO_KEYS();   // arr->d: ["str_key"]
+
+// 单 key 元信息：key [类型名] checker:on|off monitors:N(async:M)
+resp = YOMK_CONTEXT_INFO_KEY("str_key");        // eOk, msg: "str_key [String] checker:on monitors:1(async:1)"
+resp = YOMK_CONTEXT_INFO_KEY("not_exist");      // eNo
+
+// 全量 dump：每行同单 key 元信息格式
+resp = YOMK_CONTEXT_INFO_ALL();
+```
+
+注意：`YOMK_CONTEXT_CREATE(key, nullptr)` 值为空时创建被拒绝（eNo），该 key 不会出现在内省结果中；内省只读，取实际值仍走 `YOMK_CONTEXT_GET`。完整验证见 `Test/YomkServer/TestYomkContextInfo.cpp`。
+
+### EventLoop 模块内省
+
+`/YomkEventLoop` 服务自身提供循环级内省（既有功能函数均已用三参宏补齐类型名，服务器层内省同步可见）。Event 可携带 tag 标记（POST 末位可选参数，缺省空，旧调用零改动）；启动时也可用三参宏声明默认处理函数期望的消息类型：
+
+```cpp
+YOMK_EVENTLOOP_START("loop_a", nullptr);
+YOMK_EVENTLOOP_START("loop_b", defaultHandle, String);  // 声明默认处理函数期望类型，内省可见 [String]
+
+// 投递事件时可选打 tag（tag 仅作内省标记，不参与路由/处理）
+YOMK_EVENTLOOP_POST("loop_a", YomkMkPtr(String, "data"), myHandle, "tag1");
+YOMK_EVENTLOOP_POST("loop_a", YomkMkPtr(String, "data"), myHandle);  // 不打 tag，旧写法直接编译
+
+// 循环名列表（返回 StringArray）
+YomkResponse resp = YOMK_EVENTLOOP_INFO_LOOPS();   // arr->d: ["loop_a", "loop_b"]
+
+// 单循环元信息：name running:on|off pending:N defaultFunc:on|off [类型名] nextNEventTag(n): tag1, ...
+// 默认处理函数声明过类型时附加 [类型名]，未声明无括号后缀
+resp = YOMK_EVENTLOOP_INFO_LOOP("loop_a");          // n 缺省 3
+resp = YOMK_EVENTLOOP_INFO_LOOP("loop_a", 5);       // 队列不足 5 个时全部列出，空 tag 显示 -
+resp = YOMK_EVENTLOOP_INFO_LOOP("not_exist");       // eNo
+
+// 全量 dump：每行同单循环元信息格式
+resp = YOMK_EVENTLOOP_INFO_ALL();
+```
+
+注意：自动生成的事件 id 对用户无意义，内省不展示；内省只读，`stop()` 会清空队列，观察排队 tag 需保持循环运行。完整验证见 `Test/YomkServer/TestYomkEventLoopInfo.cpp`。
+
+### FunctionPool 模块内省
+
+`/YomkFunctionPool` 服务自身提供注册表级内省（既有功能函数均已用三参宏补齐类型名，服务器层内省同步可见）。注册时可用三参宏声明期望消息类型（与 `YomkInstallFunc` 同款，字符串化后仅作内省元数据，不参与运行时校验）：
+
+```cpp
+YOMK_FUNCTIONPOOL_REGISTER("func_a", funcA, String);  // 声明期望类型，内省可见 [String]
+YOMK_FUNCTIONPOOL_REGISTER("func_b", funcB);          // 两参旧写法零改动，内省无括号后缀
+
+// 注册函数名列表（返回 StringArray）
+YomkResponse resp = YOMK_FUNCTIONPOOL_INFO_NAMES();    // arr->d: ["func_a", "func_b"]
+
+// 单函数存在性查询：命中 eOk 且 msg 为 funcName [类型名]，未注册 eNo
+resp = YOMK_FUNCTIONPOOL_INFO_NAME("func_a");           // eOk, msg: "func_a [String]"
+resp = YOMK_FUNCTIONPOOL_INFO_NAME("func_b");           // eOk, msg: "func_b"
+resp = YOMK_FUNCTIONPOOL_INFO_NAME("not_exist");        // eNo
+
+// 全量 dump：首行 functions:N，其余每行 funcName [类型名]
+resp = YOMK_FUNCTIONPOOL_INFO_ALL();
+```
+
+注意：内省只读；注销后函数立即从内省结果中消失。完整验证见 `Test/YomkServer/TestYomkFunctionPoolInfo.cpp`。
+
+### Logger 模块内省
+
+`/YomkLogger` 服务自身提供日志器级内省（既有功能函数均已用三参宏补齐类型名，服务器层内省同步可见）：
+
+```cpp
+YOMK_FILE_LOG_CREATE("/tmp", "info_logger");                          // 创建文件日志器
+YomkAPI::CONSOLE_LOG_INFO_TAG("auto_logger", "hello");                // 按需自动创建控制台日志器
+
+// 日志器列表（返回 StringArray，控制台在前、文件在后）
+YomkResponse resp = YOMK_LOGGER_INFO_LOGGERS();
+// arr->d: ["MainLogger [console]", "auto_logger [console]", "info_logger [file] dir:/tmp"]
+
+// 单日志器元信息：命中 eOk 且 msg 为元信息行，未注册 eNo
+resp = YOMK_LOGGER_INFO_LOGGER("MainLogger");      // eOk, msg: "MainLogger [console]"
+resp = YOMK_LOGGER_INFO_LOGGER("info_logger");     // eOk, msg: "info_logger [file] dir:/tmp"
+resp = YOMK_LOGGER_INFO_LOGGER("not_exist");       // eNo
+
+// 全量 dump：首行为控制台级别开关与代理状态，其余为日志器行
+resp = YOMK_LOGGER_INFO_ALL();
+// 首行: "console:debug:on info:on warn:on error:on proxy:off"
+```
+
+注意：内省只读；`YOMK_INFO_TAG(tag, ...)` 宏的 tag 会追加行号后缀，按需创建的控制台日志器名为 `tag:行号`；级别开关用既有 `YOMK_ON/OFF_CONSOLE_LOG_*()` 切换后立即在 `/all` 首行生效。完整验证见 `Test/YomkServer/TestYomkLoggerInfo.cpp`。
+
+## 示例6：文件日志
 
 ```cpp
 YOMK_FILE_LOG_CREATE("/var/log/myapp", "app_log");
@@ -692,7 +818,7 @@ YOMK_SET_CONSOLE_LOG_PROXY(myLogProxy);
 
 ---
 
-## 示例6：标准扩展模板（创建新扩展时必须生成）
+## 示例7：标准扩展模板（创建新扩展时必须生成）
 
 将 `ExtensionName` 替换为用户指定的扩展名，所有文件必须完整生成。
 
@@ -712,6 +838,8 @@ ExtensionName/
 ├── CMakeLists.txt
 └── README.md
 ```
+
+头文件分层（推荐规则，默认遵循，不强制）：`include/` 只放导出给下游的对外接口头文件（服务类声明）；内部头文件（辅助类、内部数据结构等实现细节）直接放 `src/`，`install(DIRECTORY include/ ...)` 只安装 `include/` 内容，内部头文件天然不安装、对下游不可见。
 
 ### include/XxxService.h
 ```cpp
@@ -1074,7 +1202,7 @@ source build_ubuntu.sh
 ```
 ExtensionName/
 ├── include/
-│   └── XxxService.h        # 服务头文件（类声明）
+│   └── XxxService.h        # 对外接口头文件（服务类声明；内部头文件放 src/）
 ├── src/
 │   └── XxxService.cpp      # 服务实现
 ├── CMakeLists.txt            # CMake 构建配置

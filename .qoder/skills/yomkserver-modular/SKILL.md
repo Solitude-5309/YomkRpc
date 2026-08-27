@@ -91,7 +91,7 @@ ProjectName/
 1. **定义消息包**（`msgs/YomkMsgs.h`）：
 ```cpp
 struct MyData { std::string field1; int field2; };
-YomkMsg(MyData, YMyData, d)  // 参数：数据类, 消息名称, 成员变量名
+YomkMsg(MyData, MyData, d)  // 参数：数据类, 消息名称, 成员变量名
 ```
 
 2. **创建服务文件**（`services/XxxService.h` + `services/XxxService.cpp`）：
@@ -114,7 +114,7 @@ int XxxService::init() {
     return 0;
 }
 YomkResponse XxxService::myFunc(YomkPkgPtr pkg) {
-    YomkUnPackPkgResponse(pkg, YMyData, data);  // 解包（失败自动返回eNo）
+    YomkUnPackPkgResponse(pkg, MyData, data);  // 解包（失败自动返回eNo）
     // 业务逻辑...
     return YomkResponse(YomkResponse::eOk, "success");
 }
@@ -142,9 +142,9 @@ add_executable(${PROJECT_NAME}
 
 ```cpp
 // 同步
-YomkResponse resp = YOMK_REQUEST("/XxxService/my_func", YomkMkPtr(YMyData, MyData{"hello", 1}));
+YomkResponse resp = YOMK_REQUEST("/XxxService/my_func", YomkMkPtr(MyData, MyData{"hello", 1}));
 // 异步
-YOMK_ASYNC_REQUEST("/XxxService/my_func", YomkMkPtr(YMyData, MyData{"hello", 1}), [](YomkResponse resp) { });
+YOMK_ASYNC_REQUEST("/XxxService/my_func", YomkMkPtr(MyData, MyData{"hello", 1}), [](YomkResponse resp) { });
 ```
 
 ### 服务删除与弱绑定回调
@@ -175,6 +175,28 @@ int XxxService::init() {
 
 需要停止自身线程/注销外部资源的服务覆写 `virtual void deinit()`，删除服务时由框架自动调用。
 
+### 服务内省（调试）
+
+框架内置 `/YomkServerInfo` 服务（随 `YOMK_INIT` 自动启动），提供调试内省：服务列表、函数列表、单函数类型查询。功能函数安装时用三参宏声明期望消息类型（仅作内省元数据，不参与运行时校验；两参旧写法零改动）：
+
+```cpp
+int XxxService::init() {
+    YomkInstallFunc("/my_func", XxxService::myFunc, MyData);  // 内省可见类型 MyData
+    return 0;
+}
+
+// 服务列表（返回 StringArray）
+YomkResponse resp = YOMK_SERVER_INFO_SERVICES();
+// 指定服务的函数列表（每行 "funcName [msgName]"）
+resp = YOMK_SERVER_INFO_FUNCTIONS("/XxxService");
+// 单函数类型查询（命中返回 msg 为类型名）
+resp = YOMK_SERVER_INFO_FUNCTION("/XxxService/my_func");
+// 全量 dump（服务名行 + 缩进函数行）
+resp = YOMK_SERVER_INFO_ALL();
+```
+
+服务器层内省之外，模块内层内省由模块自身实现：YomkContext 已提供 `YOMK_CONTEXT_INFO_KEYS()`（key 列表）、`YOMK_CONTEXT_INFO_KEY(key)`（单 key 元信息：`key [类型名] checker:on|off monitors:N(async:M)`）、`YOMK_CONTEXT_INFO_ALL()`（全量 dump）；YomkEventLoop 已提供 `YOMK_EVENTLOOP_INFO_LOOPS()`（循环名列表）、`YOMK_EVENTLOOP_INFO_LOOP(name)` / `(name, n)`（单循环元信息：`name running:on|off pending:N defaultFunc:on|off [类型名] nextNEventTag(n): tag1, ...`，Event 可携带 tag 标记，启动时可用三参宏声明默认处理函数期望类型）、`YOMK_EVENTLOOP_INFO_ALL()`（全量 dump）；YomkFunctionPool 已提供 `YOMK_FUNCTIONPOOL_INFO_NAMES()`（注册函数名列表）、`YOMK_FUNCTIONPOOL_INFO_NAME(name)`（单函数存在性查询，命中 msg 为函数名）、`YOMK_FUNCTIONPOOL_INFO_ALL()`（全量 dump，首行 `functions:N`）；YomkLogger 已提供 `YOMK_LOGGER_INFO_LOGGERS()`（日志器列表，控制台行 `name [console]`、文件行 `name [file] dir:路径`）、`YOMK_LOGGER_INFO_LOGGER(name)`（单日志器元信息）、`YOMK_LOGGER_INFO_ALL()`（全量 dump，首行为控制台级别开关与代理状态）。至此四个内置模块（Context/EventLoop/FunctionPool/Logger）的模块内层内省全部完成。
+
 ## 任务三：创建扩展库
 
 当用户要求创建独立扩展时，**必须**生成完整可编译运行的扩展骨架。扩展编译为共享库（`.so`），支持 CMake `find_package()` 被其他工程引用。
@@ -184,7 +206,7 @@ int XxxService::init() {
 ```
 ExtensionName/
 ├── include/
-│   └── XxxService.h        // 服务头文件（类声明）
+│   └── XxxService.h        // 对外接口头文件（服务类声明；内部头文件放 src/）
 ├── src/
 │   └── XxxService.cpp      // 服务实现
 ├── test/
@@ -199,8 +221,8 @@ ExtensionName/
 
 ### 关键约定
 
-1. 编译为 `SHARED` 库，头文件放 `include/`，实现放 `src/`
-2. CMake 使用 `configure_package_config_file` + `install(EXPORT ...)` 导出配置。**Config 模板防污染**：`ProjectConfig.cmake.in` 必须在 `find_dependency()` **之前**用 `@PACKAGE_INCLUDE_INSTALL_DIR@`/`@PACKAGE_LIB_INSTALL_DIR@` 把路径固化到私有变量，路径检查用内联 `foreach` 而非 `set_and_check` 宏——否则依赖包配置会覆盖全局 `PACKAGE_PREFIX_DIR` 与同名宏，导致 `find_package` 报路径不存在或静默指向错误前缀（模板见 examples.md 示例6）。**第三方依赖传递**：若扩展以 PUBLIC 链接了额外第三方库（导出接口中仅记录裸名），模板必须在 `find_dependency(YomkServer)` 后追加 `find_dependency(<第三方包>)`，否则下游链接扩展 target 时会因找不到库而失败；无导出包的伴生库（裸库名链接）由测试工程用 `link_directories(${ExtensionName_LIB_DIR})` 补 -L
+1. 编译为 `SHARED` 库，实现放 `src/`。**头文件分层（推荐规则，默认遵循，不强制）**：`include/` 只放导出给下游使用的对外接口头文件（服务类声明）；内部头文件（辅助类、内部数据结构等实现细节）直接放 `src/`——`install(DIRECTORY include/ ...)` 只安装 `include/` 内容，内部头文件天然不安装、对下游不可见，既减轻用户负担又隐藏内部细节；若项目习惯统一放 `include/` 也可接受
+2. CMake 使用 `configure_package_config_file` + `install(EXPORT ...)` 导出配置。**Config 模板防污染**：`ProjectConfig.cmake.in` 必须在 `find_dependency()` **之前**用 `@PACKAGE_INCLUDE_INSTALL_DIR@`/`@PACKAGE_LIB_INSTALL_DIR@` 把路径固化到私有变量，路径检查用内联 `foreach` 而非 `set_and_check` 宏——否则依赖包配置会覆盖全局 `PACKAGE_PREFIX_DIR` 与同名宏，导致 `find_package` 报路径不存在或静默指向错误前缀（模板见 examples.md 示例7）。**第三方依赖传递**：若扩展以 PUBLIC 链接了额外第三方库（导出接口中仅记录裸名），模板必须在 `find_dependency(YomkServer)` 后追加 `find_dependency(<第三方包>)`，否则下游链接扩展 target 时会因找不到库而失败；无导出包的伴生库（裸库名链接）由测试工程用 `link_directories(${ExtensionName_LIB_DIR})` 补 -L
 3. 安装后其他工程可通过 `find_package(ExtensionName)` 引用。**编译验证必须用 README 中的命令**：`source build_ubuntu.sh`（交互式询问前置路径与安装路径，默认均取 `$YOMK_PREFIX_PATH`，把扩展安装进 YomkServer 的安装目录）——导出 target 不含 include 路径是设计如此，头文件路径由 `YomkServer::YomkServer` 的 INTERFACE include 统一提供；若把扩展安装到扩展自己的 install/，测试程序会因 `#include <ExtensionName/XxxService.h>` 找不到头文件而编译失败。README 编译章节只保留这条交互式命令，不得提供非交互式的单路径安装命令
 4. `build_ubuntu.sh` 支持可选编译测试程序（`test/` 有独立 CMakeLists）
 5. **扩展库注册系统动态库缓存**：`build_ubuntu.sh` 安装完成后必须将 `${INSTALL_DIR}/lib` 幂等注册到 `/etc/ld.so.conf.d/yomk.conf`（扩展属于 yomk，复用同一 conf 文件，`grep -qxF` 判重后追加）并执行 `sudo ldconfig` 刷新缓存——新增的 so 不会自动进入 ld.so.cache，不刷新则新开任意终端都找不到扩展 so；禁止只用会话级 `export LD_LIBRARY_PATH` 代替（新终端即失效）；写 `/etc` 与 `ldconfig` 永远需要 sudo，与 `INSTALL_DIR` 是否可写无关
@@ -219,7 +241,7 @@ ExtensionName/
 
 ### 生成规则
 
-- 完整文件内容参见 [examples.md](examples.md) 示例6
+- 完整文件内容参见 [examples.md](examples.md) 示例7
 - 将 `ExtensionName` 替换为用户指定名称
 - 所有文件必须完整生成，确保 `source build_ubuntu.sh` 可直接编译运行
 
@@ -227,7 +249,7 @@ ExtensionName/
 
 在已有扩展中添加新功能：
 
-1. **头文件添加消息包 + 方法声明**（`include/XxxService.h`）
+1. **对外接口头文件添加消息包 + 方法声明**（`include/XxxService.h`；仅内部使用的声明放 `src/` 内部头文件）
 2. **实现添加功能函数**（`src/XxxService.cpp`）：`YomkInstallFunc` + 实现
 3. **测试程序添加测试用例**（`test/TestXxx.cpp`）
 
@@ -238,10 +260,13 @@ ExtensionName/
 ```cpp
 YomkMsg(数据类, 消息名称, 成员名)  // 在命名空间外定义
 ```
+消息名称由用户自定义（PascalCase），无固定前缀要求，可与数据类同名（如 `YomkMsg(MyData, MyData, d)`）。
 - `YomkMkPtr(消息名称, 数据类实例)` — 创建消息包
 - `YomkUnPackPkgResponse(pkg, 消息名称, ptr)` — 解包，失败自动返回 eNo
 - `YomkUnPackPkgVoid(pkg, 消息名称, ptr)` — 解包，失败自动 return
 - `YomkUnPackPkg(pkg, 消息名称, ptr)` — 解包，不自动 return，需手动判空
+
+注意：消息名称是“宏词汇”而非“类型词汇”——只能在 `Yomk()` / `YomkPtr()` / `YomkMkPtr()` / `YomkUnPackPkg*` / `YomkInstallFunc` 第三参等宏的参数位置出现，不能当裸类型名使用（`YomkMsg` 展开生成的真实类型是带后缀的 `yomk::消息名称_` 与 `yomk::消息名称Ptr`，裸写消息名会报 not declared）。
 
 内置标准类型（成员名均为 `d`）：`String`, `Bool`, `Int32`, `Int64`, `Float64` 及对应 Array 类型。
 
