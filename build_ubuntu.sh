@@ -211,9 +211,22 @@ fi
 cd "${_ORIG_DIR}"
 unset _ORIG_DIR
 
-echo "编译完成，扩展库已注册到系统动态库缓存，新开任意终端即可使用"
+# ========== 安装结果 ==========
+echo "==========================================="
+echo " ${PROJECT_NAME} 扩展安装成功!"
+echo "-------------------------------------------"
+echo " 安装路径:       ${INSTALL_DIR}"
+echo " YomkServer 路径: ${YOMK_SERVER_PATH}"
+echo " 动态库缓存:"
 ldconfig -p | grep -i "${PROJECT_NAME}" || true
 if [ "${BUILD_TEST}" = "ON" ]; then
-    echo "测试程序已安装到 ${INSTALL_DIR}/bin，可直接运行 TestYomkRpcTopic / TestYomkRpcTopicLoan 验证；"
-    echo "示例程序 TestYomkRpcPub/TestYomkRpcSub 可另开两个终端分别运行观察跨进程发布/订阅"
+    echo " 测试程序列表（安装于 ${INSTALL_DIR}/bin）:"
+    for _BIN in "${INSTALL_DIR}"/bin/TestYomkRpc*; do
+        [ -x "${_BIN}" ] && echo "   - $(basename "${_BIN}")"
+    done
+    unset _BIN
+    echo " 可直接运行 TestYomkRpcTopic / TestYomkRpcTopicLoan 验证；"
+    echo " 示例程序 TestYomkRpcPub/TestYomkRpcSub 可另开两个终端分别运行观察跨进程发布/订阅"
 fi
+echo "==========================================="
+echo "编译完成，扩展库已注册到系统动态库缓存，新开任意终端即可使用"
