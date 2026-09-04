@@ -139,3 +139,5 @@ endif()
 enable_testing()
 # MC0：基座自检（零 DDS，验证 CHECK/testReport 与被测目标链接）
 add_subdirectory(Harness)
+# MC1：服务层契约（DDS-free，验证 invoke 白盒入口与 8 端点输入校验/错误码）
+add_subdirectory(YomkRpcService)
