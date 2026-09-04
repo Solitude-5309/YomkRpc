@@ -1,0 +1,15 @@
+# LeakSanitizer 抑制清单（仅抑制第三方与框架的进程级永生分配，绝不抑制 YomkRpc 自有源码）
+#
+# 原则（用户决策）：第三方库（FastDDS / foonathan / YomkServer）默认正确，只链接不插桩不修改；
+# 本文件仅抑制其进程生命周期内故意不释放的单例/内存池，以免掩盖 YomkRpc 自有源码的真实泄漏。
+# 若某条抑制被证实掩盖了 YomkRpc 自有源码缺陷，应删除该条并修复源码。
+
+# ---- YomkServer 框架：YomkAPI 永生单例（mtx()/holder() 堆分配故意泄漏，规避静态析构窗口）----
+leak:YomkAPI::mtx()
+leak:YomkAPI::holder()
+
+# ---- FastDDS / foonathan：进程级内存池与工厂单例（第三方，默认正确）----
+leak:foonathan::memory
+leak:eprosima::fastdds::DomainParticipantFactory
+leak:eprosima::fastdds::rtps::RTPSDomain
+leak:eprosima::fastdds::rtps::IPayloadPool
