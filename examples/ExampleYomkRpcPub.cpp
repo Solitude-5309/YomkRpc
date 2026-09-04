@@ -9,7 +9,7 @@
 using namespace yomk;
 
 // YomkRpc 发布端示例程序（用户参考）：每隔 1s 发布一次 hello world，
-// 持续 60 秒后自行干净退出；与 TestYomkRpcSub（订阅端示例）配合
+// 持续 60 秒后自行干净退出；与 ExampleYomkRpcSub（订阅端示例）配合
 // 可演示真实跨进程发布/订阅通信
 int main(int argc, char *argv[])
 {
@@ -20,7 +20,7 @@ int main(int argc, char *argv[])
     auto resp = YOMKRPC_NODE(0, "pub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
-        YOMK_ERROR_TAG("TestYomkRpcPub", "create node failed: ", resp.m_msg);
+        YOMK_ERROR_TAG("ExampleYomkRpcPub", "create node failed: ", resp.m_msg);
         return 1;
     }
 
@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     resp = YOMKRPC_PUB_TOPIC("pub_node", "hello_world", new YomkRpc::MStringPubSubType());
     if (resp.m_status != YomkResponse::eOk)
     {
-        YOMK_ERROR_TAG("TestYomkRpcPub", "register pub topic failed: ", resp.m_msg);
+        YOMK_ERROR_TAG("ExampleYomkRpcPub", "register pub topic failed: ", resp.m_msg);
         YOMKRPC_DEL_NODE("pub_node");
         return 1;
     }
@@ -44,21 +44,21 @@ int main(int argc, char *argv[])
         if (resp.m_status != YomkResponse::eOk)
         {
             failCount++;
-            YOMK_ERROR_TAG("TestYomkRpcPub", "[SEND] publish failed: ", msg.data(), " status=", static_cast<int>(resp.m_status));
+            YOMK_ERROR_TAG("ExampleYomkRpcPub", "[SEND] publish failed: ", msg.data(), " status=", static_cast<int>(resp.m_status));
         }
         else
         {
-            YOMK_INFO_TAG("TestYomkRpcPub", "[SEND] ", msg.data());
+            YOMK_INFO_TAG("ExampleYomkRpcPub", "[SEND] ", msg.data());
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
     // 4. 退出前显式销毁节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理
-    YOMK_INFO_TAG("TestYomkRpcPub", "publish done: total=60 failed=", failCount);
+    YOMK_INFO_TAG("ExampleYomkRpcPub", "publish done: total=60 failed=", failCount);
     resp = YOMKRPC_DEL_NODE("pub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
-        YOMK_ERROR_TAG("TestYomkRpcPub", "delete node failed: ", resp.m_msg);
+        YOMK_ERROR_TAG("ExampleYomkRpcPub", "delete node failed: ", resp.m_msg);
         return 1;
     }
     return failCount > 0 ? 1 : 0;

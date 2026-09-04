@@ -8,8 +8,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="YomkRpc"
 BUILD_DIR="${SCRIPT_DIR}/build"
-TEST_DIR="${SCRIPT_DIR}/test"
-TEST_BUILD_DIR="${TEST_DIR}/build"
+EXAMPLES_DIR="${SCRIPT_DIR}/examples"
+EXAMPLES_BUILD_DIR="${EXAMPLES_DIR}/build"
 MSG_DIR="${SCRIPT_DIR}/msg"
 MSG_BUILD_DIR="${MSG_DIR}/build"
 _ORIG_DIR="$(pwd)"
@@ -117,15 +117,6 @@ if [ $? -ne 0 ]; then
     return 1
 fi
 
-# 询问是否编译 test
-read -p "编译测试程序? [Y/n]: " BUILD_TEST
-BUILD_TEST=${BUILD_TEST:-y}
-if [[ "${BUILD_TEST}" =~ ^[Yy]$ ]]; then
-    BUILD_TEST="ON"
-else
-    BUILD_TEST="OFF"
-fi
-
 # 步骤 1/3: 编译安装主库
 echo ""
 echo "步骤 1/3: 编译 ${PROJECT_NAME} 主库"
@@ -186,26 +177,24 @@ if [ $? -ne 0 ]; then
     return 1
 fi
 
-# 步骤 3/3: 编译测试程序（随扩展一并安装到 ${INSTALL_DIR}/bin）
-if [ "${BUILD_TEST}" = "ON" ]; then
-    echo ""
-    echo "步骤 3/3: 编译测试程序"
-    mkdir -p "${TEST_BUILD_DIR}"
-    cd "${TEST_BUILD_DIR}" || return 1
+# 步骤 3/3: 编译示例程序（默认直接编译安装，随扩展一并安装到 ${INSTALL_DIR}/bin）
+echo ""
+echo "步骤 3/3: 编译示例程序"
+mkdir -p "${EXAMPLES_BUILD_DIR}"
+cd "${EXAMPLES_BUILD_DIR}" || return 1
 
-    cmake "${TEST_DIR}" -DCMAKE_PREFIX_PATH="${INSTALL_DIR};${YOMK_SERVER_PATH}" -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
-    if [ $? -ne 0 ]; then
-        echo "测试程序 cmake 配置失败"
-        cd "${_ORIG_DIR}"
-        return 1
-    fi
+cmake "${EXAMPLES_DIR}" -DCMAKE_PREFIX_PATH="${INSTALL_DIR};${YOMK_SERVER_PATH}" -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
+if [ $? -ne 0 ]; then
+    echo "示例程序 cmake 配置失败"
+    cd "${_ORIG_DIR}"
+    return 1
+fi
 
-    ${SUDO} cmake --build . --config Release --target install
-    if [ $? -ne 0 ]; then
-        echo "测试程序编译失败"
-        cd "${_ORIG_DIR}"
-        return 1
-    fi
+${SUDO} cmake --build . --config Release --target install
+if [ $? -ne 0 ]; then
+    echo "示例程序编译失败"
+    cd "${_ORIG_DIR}"
+    return 1
 fi
 
 cd "${_ORIG_DIR}"
@@ -219,14 +208,12 @@ echo " 安装路径:       ${INSTALL_DIR}"
 echo " YomkServer 路径: ${YOMK_SERVER_PATH}"
 echo " 动态库缓存:"
 ldconfig -p | grep -i "${PROJECT_NAME}" || true
-if [ "${BUILD_TEST}" = "ON" ]; then
-    echo " 测试程序列表（安装于 ${INSTALL_DIR}/bin）:"
-    for _BIN in "${INSTALL_DIR}"/bin/TestYomkRpc*; do
-        [ -x "${_BIN}" ] && echo "   - $(basename "${_BIN}")"
-    done
-    unset _BIN
-    echo " 可直接运行 TestYomkRpcTopic / TestYomkRpcTopicLoan 验证；"
-    echo " 示例程序 TestYomkRpcPub/TestYomkRpcSub 可另开两个终端分别运行观察跨进程发布/订阅"
-fi
+echo " 示例程序列表（安装于 ${INSTALL_DIR}/bin）:"
+for _BIN in "${INSTALL_DIR}"/bin/ExampleYomkRpc*; do
+    [ -x "${_BIN}" ] && echo "   - $(basename "${_BIN}")"
+done
+unset _BIN
+echo " 可直接运行 ExampleYomkRpcTopic（发布订阅流程演示）/ ExampleYomkRpcTopicLoan（loan 借出机制演示）；"
+echo " 示例程序 ExampleYomkRpcPub/ExampleYomkRpcSub 可另开两个终端分别运行观察跨进程发布/订阅"
 echo "==========================================="
 echo "编译完成，扩展库已注册到系统动态库缓存，新开任意终端即可使用"
