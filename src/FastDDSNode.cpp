@@ -8,6 +8,32 @@
 
 using namespace eprosima::fastdds::dds;
 
+namespace
+{
+    // F1：registerSubTopic 异常安全守卫。data(create_data) 与 reader(create_datareader) 在所有权
+    // 成功移交 subTopics_ 前，若后续任一步骤抛异常(make_unique / map 节点分配 bad_alloc)或走失败
+    // return，均由本守卫释放，消除原实现仅在 reader==nullptr 分支手动 delete_data、而 make_unique
+    // 抛出时 data 泄漏的缺陷。析构顺序与 ~FastDDSNode 一致：先 delete_datareader 后 delete_data。
+    struct SubResGuard
+    {
+        eprosima::fastdds::dds::Subscriber *subscriber = nullptr;
+        eprosima::fastdds::dds::DataReader *reader = nullptr;
+        eprosima::fastdds::dds::TopicDataType *type = nullptr;
+        void *data = nullptr;
+        ~SubResGuard()
+        {
+            if (subscriber != nullptr && reader != nullptr)
+            {
+                subscriber->delete_datareader(reader);
+            }
+            if (type != nullptr && data != nullptr)
+            {
+                type->delete_data(data);
+            }
+        }
+    };
+} // namespace
+
 class FastDDSNode::SubListener : public DataReaderListener
 {
 public:
@@ -228,6 +254,24 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
 
     // 由 type 内部创建数据缓冲，无需用户传入
     void *data = topicType->create_data();
+    if (data == nullptr)
+    {
+        // 防御性校验（罕见 OOM）：create_data 失败则回滚本次新建主题后返回，
+        // 避免后续 legacyTake 以 nullptr 缓冲调用 take_next_sample
+        if (!topicExisted)
+        {
+            participant_->delete_topic(topic);
+            topics_.erase(topicName);
+        }
+        return false;
+    }
+
+    // F1：data/reader 所有权成功移交 subTopics_ 前的异常安全守卫，覆盖 make_unique 或
+    // map 节点分配抛 bad_alloc 时的资源释放（消除原 create_data 裸指针异常路径泄漏缺陷）
+    SubResGuard guard;
+    guard.type = topicType;
+    guard.data = data;
+    guard.subscriber = subscriber_;
 
     SubInfo info;
     info.type = ts;
@@ -238,8 +282,7 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
     info.reader = subscriber_->create_datareader(topic, DATAREADER_QOS_DEFAULT, info.listener.get());
     if (info.reader == nullptr)
     {
-        // 清理已创建的数据缓冲
-        topicType->delete_data(data);
+        // data 由 guard 释放（不再手动 delete_data，避免双重释放）
         // 本次新创建的主题需回滚
         if (!topicExisted)
         {
@@ -248,8 +291,11 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
         }
         return false;
     }
+    guard.reader = info.reader; // reader 纳入守卫，覆盖 map 分配抛出时 reader 泄漏
 
     subTopics_[topicName] = std::move(info);
+    guard.reader = nullptr; // 所有权已入 map，解除守卫（后续由 ~FastDDSNode 释放）
+    guard.data = nullptr;
     return true;
 }
 

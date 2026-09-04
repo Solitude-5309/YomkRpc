@@ -1,6 +1,13 @@
 #include "YomkRpcService.h"
 #include "FastDDSNode.h"
 
+namespace
+{
+    // FastDDS 合法域 ID 上限（PortParameters.hpp：domainId over 232 触发端口溢出错误）；
+    // DDSNode.domainId 为 uint32_t，create_participant 接受 int32_t，越界会回绕为负致创建失败。
+    constexpr uint32_t kMaxDomainId = 232;
+} // namespace
+
 YomkRpcService::YomkRpcService(YomkServer *server)
     : YomkService(server)
 {
@@ -31,6 +38,20 @@ YomkResponse YomkRpcService::getVersion(YomkPkgPtr pkg)
 YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSNode, p);
+
+    // O2：拒绝空 nodeName（空名作 map key 无意义、与“未设置”不可区分）
+    if (p->msg.nodeName.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcService::createNode", "node name is empty");
+        return YomkResponse(YomkResponse::eNo, "node name is empty");
+    }
+    // O1：domainId 合法范围 [0,232]，越界即拒绝（避免 uint32→int32 回绕深入 setDomainId 才失败）
+    if (p->msg.domainId > kMaxDomainId)
+    {
+        YOMK_ERROR_TAG("YomkRpcService::createNode", "domainId [", p->msg.domainId, "] out of valid range [0,232]");
+        return YomkResponse(YomkResponse::eNo,
+                            "domainId [" + std::to_string(p->msg.domainId) + "] out of valid range [0,232]");
+    }
 
     std::lock_guard<std::mutex> lock(mtx_);
     if (nodes_.find(p->msg.nodeName) != nodes_.end())

@@ -9,7 +9,7 @@
 | URL | 功能 | 说明 |
 |-----|------|------|
 | `/YomkRpcService/version` | 版本查询 | 返回 YomkRpc 扩展版本信息 |
-| `/YomkRpcService/create_node` | 创建节点 | 传入 `DDSNode{domainId, nodeName}`，每节点一个独立 DDS 参与者 |
+| `/YomkRpcService/create_node` | 创建节点 | 传入 `DDSNode{domainId, nodeName}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误 |
 | `/YomkRpcService/delete_node` | 删除节点 | 销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
 | `/YomkRpcService/register_pub_topic` | 注册发布主题 | 传入 `DDSTopic{nodeName, topicName, type}`，type 为 PubSubType 实例指针 |
 | `/YomkRpcService/register_sub_topic` | 注册订阅主题 | 传入 `DDSSubRequest{nodeName, topicName, type, callback}`，data 由内部自动创建 |
