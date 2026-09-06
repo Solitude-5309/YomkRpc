@@ -37,3 +37,16 @@ add_test(NAME TestYomkRpcTopic COMMAND TestYomkRpcTopic)
 set_tests_properties(TestYomkRpcTopic PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
 )
+
+# =============================================================================
+# MC4：loan 借出/归还（plain 类型免序列化路径）
+# 白盒验证 loan/discardLoan 的 plain(MInt32) 借出成功、非 plain(MString) 回退、
+# loan→池内填值→publish 免序列化端到端、discard 归还与守卫；loan sample 为 writer 池借出。
+# =============================================================================
+add_executable(TestYomkRpcLoan TestYomkRpcLoan.cpp)
+target_link_libraries(TestYomkRpcLoan PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestYomkRpcLoan COMMAND TestYomkRpcLoan)
+set_tests_properties(TestYomkRpcLoan PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+)
