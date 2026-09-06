@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(YomkRpc VERSION 0.1.10 LANGUAGES CXX)
+project(YomkRpc VERSION 0.1.11 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,7 +28,9 @@ add_library(${PROJECT_NAME} SHARED
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE YomkServer::YomkServer)
 target_link_libraries(${PROJECT_NAME} PUBLIC fastdds)
-target_compile_definitions(${PROJECT_NAME} PRIVATE YOMKRPC_VERSION="${PROJECT_VERSION}")
+# MC9：版本号对象宏改名 YOMKRPC_VERSION→YOMKRPC_VERSION_STRING，消除与 YomkRpcAPI.h 公共 API 宏
+# YOMKRPC_VERSION() 的同名冲突（clang-tidy 报 clang-diagnostic-macro-redefined）。
+target_compile_definitions(${PROJECT_NAME} PRIVATE YOMKRPC_VERSION_STRING="${PROJECT_VERSION}")
 
 # 安装规则
 set(INCLUDE_INSTALL_DIR "include")

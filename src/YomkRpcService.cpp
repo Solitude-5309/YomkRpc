@@ -31,7 +31,7 @@ int YomkRpcService::init()
 
 YomkResponse YomkRpcService::getVersion(YomkPkgPtr pkg)
 {
-    std::string version = "YomkRpc v" YOMKRPC_VERSION " (WIP)";
+    std::string version = "YomkRpc v" YOMKRPC_VERSION_STRING " (WIP)";
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(String, version));
 }
 

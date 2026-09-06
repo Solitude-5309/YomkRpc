@@ -236,8 +236,13 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
     // F1：data/reader 所有权成功移交 subTopics_ 前的异常安全守卫，覆盖 make_unique 或
     // map 节点分配抛 bad_alloc 时的资源释放（消除原 create_data 裸指针异常路径泄漏缺陷）
     SubResGuard guard;
+    // MC9 cppcheck 抑制：guard 成员登记后正常路径从不读取（所有权成功入 map），仅在异常/失败路径
+    // （make_unique 抛 bad_alloc、create_datareader 失败 return）由 ~SubResGuard 读取并清理；cppcheck
+    // 只走正常路径数据流、未建模 EH 析构读，故误报“未使用”。
+    // cppcheck-suppress unreadVariable
     guard.type = topicType;
     guard.data = data;
+    // cppcheck-suppress unreadVariable
     guard.subscriber = subscriber_;
 
     SubInfo info;
@@ -262,7 +267,8 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
 
     subTopics_[topicName] = std::move(info);
     guard.reader = nullptr; // 所有权已入 map，解除守卫（后续由 ~FastDDSNode 释放）
-    guard.data = nullptr;
+    // cppcheck-suppress redundantAssignment
+    guard.data = nullptr; // 解除 data 守卫：正常路径覆盖登记值，异常/失败路径该值由 ~SubResGuard 读并 delete_data
     return true;
 }
 
@@ -274,7 +280,9 @@ bool FastDDSNode::publish(const std::string &topicName, const void *data)
     {
         return false;
     }
-    return it->second.writer->write(const_cast<void *>(data)) == RETCODE_OK;
+    // MC9 clang-tidy 抑制：FastDDS DataWriter::write(void*) 签名要求非 const 指针，但 write 仅序列化
+    // 读取、不修改 sample；publish(const void* data) 承诺不改 data，故此处 const_cast 去 const 桥接安全。
+    return it->second.writer->write(const_cast<void *>(data)) == RETCODE_OK; // NOLINT(cppcoreguidelines-pro-type-const-cast)
 }
 
 bool FastDDSNode::loan(const std::string &topicName, void *&sample)

@@ -80,6 +80,8 @@ struct DDSLoanResult
 };
 
 // clang-format off
+// YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
+// cppcheck-suppress unknownMacro
 YomkMsg(DDSNode, DDSNode, msg)
 YomkMsg(DDSTopic, DDSTopic, msg)
 YomkMsg(DDSSubRequest, DDSSubRequest, msg)
