@@ -138,24 +138,25 @@ namespace
         return s;
     }
 
-    // asan 编译期探测：本项目工具链为 GCC 11.4，-fsanitize=address 时定义 __SANITIZE_ADDRESS__。
-    // （Clang 需改用 __has_feature(address_sanitizer)，且须置于嵌套 #if 内——单行 defined(__has_feature)&&__has_feature(...)
-    //   在 GCC 上会因整个表达式先宏展开为 0(0) 而报语法错误。）
-#if defined(__SANITIZE_ADDRESS__)
+    // sanitizer 编译期探测：本项目工具链为 GCC 11.4，-fsanitize=address 定义 __SANITIZE_ADDRESS__、
+    // -fsanitize=thread 定义 __SANITIZE_THREAD__。（Clang 需改用 __has_feature(...)，且须置于嵌套 #if 内——
+    //   单行 defined(__has_feature)&&__has_feature(...) 在 GCC 上会因整个表达式先宏展开为 0(0) 而报语法错误。）
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
     constexpr bool kSanitizerActive = true;
 #else
     constexpr bool kSanitizerActive = false;
 #endif
 
-    // RSS 容差（模式感知）：off 紧界（RSS delta 是无界增长有效粗信号）；asan 宽界（shadow/redzone/
-    // quarantine 使 RSS 数倍膨胀脱钩真实分配，精确泄漏由退出时 lsan 判定 0 泄漏，此处仅捕获灾难性增长）。
+    // RSS 容差（模式感知）：off 紧界（RSS delta 是无界增长有效粗信号）；asan/tsan 宽界（asan shadow/redzone/
+    // quarantine、tsan 每线程 shadow 栈+同步记账均使 RSS 数倍膨胀脱钩真实分配，精确泄漏由退出时 lsan 判定
+    // 0 泄漏，此处仅捕获灾难性增长）。
     long rssToleranceKB(long baseKB)
     {
         if (kSanitizerActive)
         {
-            const long asanFloorKB = 256 * 1024;
-            const long asanPropKB = (baseKB > 0) ? baseKB * 3 : asanFloorKB;
-            return std::max(asanFloorKB, asanPropKB);
+            const long sanFloorKB = 256 * 1024;
+            const long sanPropKB = (baseKB > 0) ? baseKB * 3 : sanFloorKB;
+            return std::max(sanFloorKB, sanPropKB);
         }
         const long floorKB = 32 * 1024;
         const long propKB = (baseKB > 0) ? baseKB / 2 : floorKB;

@@ -20,3 +20,15 @@ mutex:eprosima::fastdds::rtps::ResourceEvent
 # ---- FastDDS SharedMemWatchdog：共享内存看门狗 shared_ptr 析构期 double-lock ----
 deadlock:eprosima::fastdds::rtps::SharedMemWatchdog
 mutex:eprosima::fastdds::rtps::SharedMemWatchdog
+
+# ---- FastDDS RTPS reader teardown：并发 delete_node 时 FastDDS UDP 传输线程(dds.udp.*)在
+#      ReaderProxy::stop() 内 operator delete 释放内部对象，与应用线程经 ~FastDDSNode→delete_datareader
+#      触发的 BaseReader::local_actions_on_reader_removed() 加锁同一 FastDDS 内部地址冲突。
+#      MC11 tsan 首跑 stress(c2_concurrentNodeChurn) 实测：两侧真实内存访问 100% 在 libfastdds 内部
+#      （自有帧 deleteNode:103 仅为 nodes_.erase 合法触发 ~FastDDSNode），冲突 mutex 标注 already
+#      destroyed；同测试 fd/threads 完整回落基线、asan 跑同套件 0 泄漏 0 UB → 无真实 UAF/泄漏，
+#      属 FastDDS 异步传输线程 vs 实体删除的内部生命周期竞态（与上方 ResourceEvent 同类）。
+#      窄化到这两个 FastDDS teardown 函数：不在方向2 on_data_available 交付路径出现，
+#      故不屏蔽 reader 回调侧自有源码 race 灵敏度。
+race:eprosima::fastdds::rtps::ReaderProxy::stop
+race:eprosima::fastdds::rtps::BaseReader::local_actions_on_reader_removed

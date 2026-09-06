@@ -144,10 +144,11 @@ namespace
         return s;
     }
 
-    // asan 编译期探测：本项目工具链为 GCC 11.4，-fsanitize=address 时定义 __SANITIZE_ADDRESS__。
-    // （Clang 需改用 __has_feature(address_sanitizer)，且须置于嵌套 #if 内——单行 defined(__has_feature)&&__has_feature(...)
+    // sanitizer 编译期探测：本项目工具链为 GCC 11.4，-fsanitize=address 定义 __SANITIZE_ADDRESS__、
+    // -fsanitize=thread 定义 __SANITIZE_THREAD__。（Clang 需改用 __has_feature(address_sanitizer)/
+    //   __has_feature(thread_sanitizer)，且须置于嵌套 #if 内——单行 defined(__has_feature)&&__has_feature(...)
     //   在 GCC 上会因整个表达式先宏展开为 0(0) 而报语法错误。）
-#if defined(__SANITIZE_ADDRESS__)
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
     constexpr bool kSanitizerActive = true;
 #else
     constexpr bool kSanitizerActive = false;
@@ -155,16 +156,17 @@ namespace
 
     // RSS 容差（模式感知）：
     //  - off：RSS delta 是“无内存无界增长”的有效粗信号，用紧界（32MB 地板 / 基线 50%）捕获单调增长；
-    //  - asan：shadow memory + redzone + 释放隔离区(quarantine)使 RSS 数倍膨胀且随分配累计增长，与真实
-    //    存活分配脱钩；精确泄漏改由退出时 lsan 判定（0 泄漏即无缺陷），此处仅以宽松界（256MB 地板 /
-    //    基线 3×）捕获灾难性无界增长，避免 asan 内存模型导致 RSS 假阳性。
+    //  - asan/tsan：sanitizer 运行时使 RSS 数倍膨胀且脱钩真实存活分配——asan 因 shadow/redzone/释放隔离区
+    //    (quarantine) 随分配累计增长；tsan 因每线程 shadow 栈 + 同步对象记账，高量创建/销毁线程（S3 达 214
+    //    线程）后内部结构不归还 RSS。精确泄漏改由退出时 lsan 判定（0 泄漏即无缺陷），此处仅以宽松界
+    //    （256MB 地板 / 基线 3×）捕获灾难性无界增长，避免 sanitizer 内存模型导致 RSS 假阳性。
     long rssToleranceKB(long baseKB)
     {
         if (kSanitizerActive)
         {
-            const long asanFloorKB = 256 * 1024;
-            const long asanPropKB = (baseKB > 0) ? baseKB * 3 : asanFloorKB;
-            return std::max(asanFloorKB, asanPropKB);
+            const long sanFloorKB = 256 * 1024;
+            const long sanPropKB = (baseKB > 0) ? baseKB * 3 : sanFloorKB;
+            return std::max(sanFloorKB, sanPropKB);
         }
         const long floorKB = 32 * 1024;                          // off：32MB 地板
         const long propKB = (baseKB > 0) ? baseKB / 2 : floorKB; // 或基线 50%
