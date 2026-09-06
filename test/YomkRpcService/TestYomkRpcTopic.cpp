@@ -12,6 +12,8 @@
  *   T10 register 守卫：重复注册同名 pub 主题（pubTopics_.count>0）、type==nullptr；
  *   T11 publish → on_data_available → callback 本地回环（同 participant 内 pub+sub 同主题）；
  *   +   publish 守卫：主题未注册（pubTopics_.find 失败）、data==nullptr；
+ *   MC8 覆盖率补测：register_sub type==nullptr 守卫（对称 pub 侧）、空回调 sub + 数据到达
+ *       （on_data_available L52 的 callback_==false 防御性跳过分支，MC3 原空回调 sub 从未收数据）；
  *   P1  type 所有权回归：register_pub/sub_topic 失败路径（节点不存在/重复注册）无条件接管并
  *       释放 caller 的 type（修复前 T10 重复注册泄漏 MStringPubSubType，asan 退出码 1）。
  *
@@ -78,6 +80,13 @@ namespace
                           YomkMkPtr(DDSSubRequest, DDSSubRequest{"topic_node", "t_mm", new YomkRpc::MInt32PubSubType(), nullptr}))
                       .m_status == YomkResponse::eNo,
               "T9 register_sub_topic t_mm(MInt32) → eNo（getOrCreateTopic 类型名 MString≠MInt32 返回 nullptr）");
+
+        // MC8 覆盖率补测：register_sub type==nullptr 守卫（对称上方 register_pub type=null），触达
+        // FastDDSNode::registerSubTopic L201 复合守卫的 type==nullptr 分支（MC3 原仅覆盖 pub 侧 type=null）。
+        CHECK(svc->invoke("/register_sub_topic",
+                          YomkMkPtr(DDSSubRequest, DDSSubRequest{"topic_node", "s_null", nullptr, nullptr}))
+                      .m_status == YomkResponse::eNo,
+              "MC8 register_sub_topic type=nullptr → eNo（type==null 守卫，delete nullptr 安全）");
 
         CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "topic_node")).m_status == YomkResponse::eOk,
               "删除 topic_node → eOk");
@@ -200,6 +209,48 @@ namespace
         CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "own_node")).m_status == YomkResponse::eOk,
               "删除 own_node → eOk");
     }
+
+    // MC8 覆盖率补测：空回调订阅 + 数据到达 → 触达 FastDDSNode::on_data_available L52 复合条件的
+    // callback_==false 分支（防御性跳过空调用，避免 bad_function_call）。MC3 原 e2e 均带有效回调，
+    // 空回调 sub（testTypeOwnershipOnFailure 的 s_dup）从未收到数据，故此分支恒 taken 0。
+    // 本地回环：同 node 内 pub+sub 同 topic，发布数据触发 sub 的 on_data_available，callback_ 空则跳过。
+    void testEmptyCallbackSub(YomkRpcService *svc)
+    {
+        CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN, "ecb_node")).m_status == YomkResponse::eOk,
+              "创建 ecb_node → eOk");
+        CHECK(svc->invoke("/register_pub_topic",
+                          YomkMkPtr(DDSTopic, DDSTopic{"ecb_node", "ecb_topic", new YomkRpc::MInt32PubSubType()}))
+                      .m_status == YomkResponse::eOk,
+              "register_pub_topic ecb_topic(MInt32) → eOk");
+        // 空回调订阅：callback=nullptr，注册应成功（SubListener 持有空 std::function，收数据时防御性跳过）
+        CHECK(svc->invoke("/register_sub_topic",
+                          YomkMkPtr(DDSSubRequest, DDSSubRequest{"ecb_node", "ecb_topic", new YomkRpc::MInt32PubSubType(), nullptr}))
+                      .m_status == YomkResponse::eOk,
+              "MC8 register_sub_topic ecb_topic(空callback) → eOk");
+
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待 discovery
+
+        // 发布数据 → sub 的 on_data_available 触发：valid_data && ALIVE 真，但 callback_ 空 → 防御性跳过（不崩溃）
+        constexpr int N = 5;
+        int pubOk = 0;
+        for (int i = 0; i < N; ++i)
+        {
+            YomkRpc::MInt32 msg;
+            msg.data(i);
+            if (svc->invoke("/publish", YomkMkPtr(DDSPublish, DDSPublish{"ecb_node", "ecb_topic", &msg}))
+                    .m_status == YomkResponse::eOk)
+            {
+                pubOk++;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        CHECK(pubOk == N, "MC8 publish ecb_topic 5 条 → 全部 eOk（数据到达空回调 sub）");
+
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待投递触发 on_data_available（callback_ 空跳过）
+
+        CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "ecb_node")).m_status == YomkResponse::eOk,
+              "删除 ecb_node → eOk（空回调路径无崩溃/UAF，析构 reader 停止回调）");
+    }
 } // namespace
 
 int main()
@@ -214,6 +265,7 @@ int main()
     testEndToEndPubSub(svc);
     testPublishGuards(svc);
     testTypeOwnershipOnFailure(svc);
+    testEmptyCallbackSub(svc);
 
     return testReport("TestYomkRpcTopic");
 }
