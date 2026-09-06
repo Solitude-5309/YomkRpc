@@ -159,6 +159,14 @@ if(YOMKRPC_TEST_STATIC_ANALYZE)
     endif()
 endif()
 
+# ----------------------------- 压力/soak 旋钮（MC7）-----------------------------
+# STRESS_ITERS：廉价 op（publish/loan/discard）的量级，可上调至 10 万级做 soak；
+# STRESS_CYCLES：node 生命周期 churn 轮数，每轮含 discovery 周期（秒级），故有界、非 10 万级。
+# 经 compile definitions 注入 stress exe；改值需重配置+重编 stress 目标（仅 2 个 TU，快）。
+set(STRESS_ITERS 5000 CACHE STRING "Stress iterations for cheap ops (publish/loan); raise to 100000 for soak")
+set(STRESS_CYCLES 30 CACHE STRING "Stress node create/delete churn cycles (discovery-bound, not 100k-scale)")
+message(STATUS "[test] STRESS_ITERS=${STRESS_ITERS}, STRESS_CYCLES=${STRESS_CYCLES}")
+
 # ----------------------------- 测试主题子目录 -----------------------------
 enable_testing()
 # MC0：基座自检（零 DDS，验证 CHECK/testReport 与被测目标链接）

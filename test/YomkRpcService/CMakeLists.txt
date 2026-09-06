@@ -77,3 +77,38 @@ add_test(NAME TestYomkRpcConcurrency COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_F
 set_tests_properties(TestYomkRpcConcurrency PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
+
+# =============================================================================
+# MC7-S：单线程压力/soak（node 生命周期 churn / 持续 publish+loan / 实体增长完整回收）
+# 资源采样器（Linux /proc VmRSS/Threads/fd）量化负载前后基线，实证无泄漏/池不耗尽/吞吐稳定/句柄稳定。
+# LABELS stress：快反馈套件经 `ctest -LE stress` 排除；压力套件 `ctest -L stress` 选中。
+# 旋钮 STRESS_ITERS/STRESS_CYCLES（父 CACHE 选项）经 compile definitions 注入；TIMEOUT 放宽兜底 asan 10 万级。
+# =============================================================================
+add_executable(TestYomkRpcStressSerial TestYomkRpcStressSerial.cpp)
+target_link_libraries(TestYomkRpcStressSerial PRIVATE yomkrpc_under_test YomkRpcMsg)
+target_compile_definitions(TestYomkRpcStressSerial PRIVATE
+    STRESS_ITERS=${STRESS_ITERS} STRESS_CYCLES=${STRESS_CYCLES})
+
+add_test(NAME TestYomkRpcStressSerial COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcStressSerial>)
+set_tests_properties(TestYomkRpcStressSerial PROPERTIES
+    LABELS stress
+    TIMEOUT 1800
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)
+
+# =============================================================================
+# MC7-C：多线程高量压力/soak（并发 publish/loan / 并发 node churn / 并发 pub-sub 活跃回调）
+# N=4 线程（nproc=2 适度超订）并发驱动 + 资源采样器，实证并发负载下池不耗尽/teardown 完整回收/
+# 方向2 reader 高量无撕裂/句柄稳定；与 serial 独立进程隔离。LABELS stress（同上）。
+# =============================================================================
+add_executable(TestYomkRpcStressConcurrent TestYomkRpcStressConcurrent.cpp)
+target_link_libraries(TestYomkRpcStressConcurrent PRIVATE yomkrpc_under_test YomkRpcMsg)
+target_compile_definitions(TestYomkRpcStressConcurrent PRIVATE
+    STRESS_ITERS=${STRESS_ITERS} STRESS_CYCLES=${STRESS_CYCLES})
+
+add_test(NAME TestYomkRpcStressConcurrent COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcStressConcurrent>)
+set_tests_properties(TestYomkRpcStressConcurrent PROPERTIES
+    LABELS stress
+    TIMEOUT 1800
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)
