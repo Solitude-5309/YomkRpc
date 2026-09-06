@@ -6,10 +6,10 @@
 add_executable(TestYomkRpcServiceContract TestYomkRpcServiceContract.cpp)
 target_link_libraries(TestYomkRpcServiceContract PRIVATE yomkrpc_under_test)
 
-# 注册到 CTest；LSAN 抑制文件经环境变量注入（仅 asan 模式生效，off 模式无副作用）
-add_test(NAME TestYomkRpcServiceContract COMMAND TestYomkRpcServiceContract)
+# 注册到 CTest；LSAN/TSAN 抑制文件经环境变量注入（各自仅在 asan/tsan 模式生效，其它模式无副作用）
+add_test(NAME TestYomkRpcServiceContract COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcServiceContract>)
 set_tests_properties(TestYomkRpcServiceContract PROPERTIES
-    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
 
 # =============================================================================
@@ -20,9 +20,9 @@ set_tests_properties(TestYomkRpcServiceContract PROPERTIES
 add_executable(TestYomkRpcNodeLifecycle TestYomkRpcNodeLifecycle.cpp)
 target_link_libraries(TestYomkRpcNodeLifecycle PRIVATE yomkrpc_under_test)
 
-add_test(NAME TestYomkRpcNodeLifecycle COMMAND TestYomkRpcNodeLifecycle)
+add_test(NAME TestYomkRpcNodeLifecycle COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcNodeLifecycle>)
 set_tests_properties(TestYomkRpcNodeLifecycle PROPERTIES
-    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
 
 # =============================================================================
@@ -33,9 +33,9 @@ set_tests_properties(TestYomkRpcNodeLifecycle PROPERTIES
 add_executable(TestYomkRpcTopic TestYomkRpcTopic.cpp)
 target_link_libraries(TestYomkRpcTopic PRIVATE yomkrpc_under_test YomkRpcMsg)
 
-add_test(NAME TestYomkRpcTopic COMMAND TestYomkRpcTopic)
+add_test(NAME TestYomkRpcTopic COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcTopic>)
 set_tests_properties(TestYomkRpcTopic PROPERTIES
-    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
 
 # =============================================================================
@@ -46,9 +46,9 @@ set_tests_properties(TestYomkRpcTopic PROPERTIES
 add_executable(TestYomkRpcLoan TestYomkRpcLoan.cpp)
 target_link_libraries(TestYomkRpcLoan PRIVATE yomkrpc_under_test YomkRpcMsg)
 
-add_test(NAME TestYomkRpcLoan COMMAND TestYomkRpcLoan)
+add_test(NAME TestYomkRpcLoan COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcLoan>)
 set_tests_properties(TestYomkRpcLoan PROPERTIES
-    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
 
 # =============================================================================
@@ -60,7 +60,20 @@ set_tests_properties(TestYomkRpcLoan PROPERTIES
 add_executable(TestYomkRpcTypes TestYomkRpcTypes.cpp)
 target_link_libraries(TestYomkRpcTypes PRIVATE yomkrpc_under_test YomkRpcMsg)
 
-add_test(NAME TestYomkRpcTypes COMMAND TestYomkRpcTypes)
+add_test(NAME TestYomkRpcTypes COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcTypes>)
 set_tests_properties(TestYomkRpcTypes PROPERTIES
-    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)
+
+# =============================================================================
+# MC6：并发安全 + TSan 基线（多线程 invoke 锁正确性 / 并发收发 / teardown 竞态）
+# 从多线程并发驱动 svc->invoke()，实证双层锁(service mtx_ + node mtx_)正确性、方向2 reader
+# 回调路径并发下数据完整性、delete_node 与活跃回调 teardown 竞态安全；off/asan/tsan 三模式验证。
+# =============================================================================
+add_executable(TestYomkRpcConcurrency TestYomkRpcConcurrency.cpp)
+target_link_libraries(TestYomkRpcConcurrency PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestYomkRpcConcurrency COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcConcurrency>)
+set_tests_properties(TestYomkRpcConcurrency PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )

@@ -1,0 +1,22 @@
+# ThreadSanitizer 抑制清单（仅抑制第三方 FastDDS 的死锁检测器噪声，绝不抑制 YomkRpc 自有源码）
+#
+# 原则（用户决策）：第三方库（FastDDS / YomkServer / YomkRpcMsg）默认正确，只链接不插桩不修改。
+# libfastdds.so 未经 TSan 插桩，其内部异步事件系统 ResourceEvent（dds.ev.* 线程）在并发创建/销毁
+# participant 时，被 TSan 死锁检测器（启发式）判为 lock-order-inversion 与 double-lock。
+#
+# 已核验（MC6 tsan 实测）：这些报告的冲突加锁栈 100% 落在 eprosima::fastdds::rtps::ResourceEvent
+# 与 SharedMemWatchdog 内部；YomkRpc 帧仅出现在"线程创建来源"段（createNode 合法创建 participant →
+# FastDDS 派生其内部事件线程），非 YomkRpc 的锁获取。YomkRpc 自有源码 data race 计数为 0。
+#
+# 抑制范围刻意收窄：仅用 deadlock:/mutex: 类型（死锁检测器），不用 called_from_lib: 或 race:——
+# 以完整保留对 YomkRpc 自有源码的数据竞争检测灵敏度，尤其是方向2 reader 回调 on_data_available
+# （由 libfastdds 线程回调，若用 called_from_lib:libfastdds.so 会连同其栈一并屏蔽，抹掉核心验证）。
+# 若某条抑制被证实掩盖 YomkRpc 自有源码缺陷，应删除该条并修复源码。
+
+# ---- FastDDS ResourceEvent：异步事件线程内部锁序（lock-order-inversion / double-lock）----
+deadlock:eprosima::fastdds::rtps::ResourceEvent
+mutex:eprosima::fastdds::rtps::ResourceEvent
+
+# ---- FastDDS SharedMemWatchdog：共享内存看门狗 shared_ptr 析构期 double-lock ----
+deadlock:eprosima::fastdds::rtps::SharedMemWatchdog
+mutex:eprosima::fastdds::rtps::SharedMemWatchdog

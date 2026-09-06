@@ -77,6 +77,22 @@ if(NOT YOMKRPC_TEST_SANITIZER STREQUAL "off")
     message(STATUS "[test] YOMKRPC_TEST_SANITIZER=${YOMKRPC_TEST_SANITIZER}, flags=${_YOMKRPC_SAN_FLAGS}")
 endif()
 
+# ----------------------------- TSan 运行启动器（ASLR 兼容）-----------------------------
+# GCC 11.4 libtsan 与高 ASLR 熵内核(Ubuntu 22.04 vm.mmap_rnd_bits 偏高)不兼容：TSan 运行时在
+# main 之前 FATAL("unexpected memory mapping")、进程 EXIT=66(非 race、非 YomkRpc 缺陷)。
+# 非 root 标准解法：setarch <arch> -R 仅对该测试进程禁用 ASLR(每进程级、无系统副作用)。
+# 以启动器前缀注入各 add_test；off/asan 模式变量为空 → COMMAND 退化为原 exe 路径(行为零变化)。
+set(YOMKRPC_TEST_LAUNCHER "")
+if(YOMKRPC_TEST_SANITIZER STREQUAL "tsan")
+    find_program(SETARCH_EXE NAMES setarch)
+    if(SETARCH_EXE)
+        set(YOMKRPC_TEST_LAUNCHER ${SETARCH_EXE} ${CMAKE_SYSTEM_PROCESSOR} -R)
+        message(STATUS "[test] tsan launcher(ASLR off): ${YOMKRPC_TEST_LAUNCHER}")
+    else()
+        message(WARNING "[test] setarch not found; tsan tests may FATAL on high-ASLR kernels")
+    endif()
+endif()
+
 # ----------------------------- Coverage 开关 -----------------------------
 # 仅对自有源码统计覆盖率；生成报告时用 gcov 解析并限定 ../src/*.cpp，
 # 不可达的第三方失败分支出具书面豁免（见测试报告），覆盖率上限据此标注。
