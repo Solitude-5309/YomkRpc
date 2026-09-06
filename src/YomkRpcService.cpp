@@ -6,6 +6,24 @@ namespace
     // FastDDS 合法域 ID 上限（PortParameters.hpp：domainId over 232 触发端口溢出错误）；
     // DDSNode.domainId 为 uint32_t，create_participant 接受 int32_t，越界会回绕为负致创建失败。
     constexpr uint32_t kMaxDomainId = 232;
+
+    // MC10 异常安全：loan 响应构造守卫（见 YomkRpcService::loan）。sample 从 writer 池借出后、响应包
+    // 构造完成前若抛 bad_alloc，未归还的 sample 滞留池（反复 OOM 致池耗尽）。守卫异常路径 discardLoan
+    // 归还池，成功构造响应后解除（sample=nullptr）。存 const std::string* 而非拷贝，避免守卫自身构造
+    // 再分配（OOM 场景下二次抛出）；node/topicName 在本函数持服务锁期间稳定有效。
+    struct LoanGuard
+    {
+        FastDDSNode *node = nullptr;
+        const std::string *topicName = nullptr;
+        void *sample = nullptr;
+        ~LoanGuard()
+        {
+            if (node != nullptr && sample != nullptr && topicName != nullptr)
+            {
+                node->discardLoan(*topicName, sample);
+            }
+        }
+    };
 } // namespace
 
 YomkRpcService::YomkRpcService(YomkServer *server)
@@ -170,7 +188,12 @@ YomkResponse YomkRpcService::loan(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo,
                             "loan [" + p->msg.topicName + "] failed on node [" + p->msg.nodeName + "]");
     }
-    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(DDSLoanResult, DDSLoanResult{sample}));
+    // MC10 异常安全：sample 已从 writer 池借出，响应包构造若抛 bad_alloc 须归还池（否则借出样本
+    // 滞留、反复 OOM 致池耗尽）。守卫成功构造响应后解除（所有权路径转由 caller 经 write/discard 管理）。
+    LoanGuard loanGuard{it->second.get(), &p->msg.topicName, sample};
+    YomkResponse resp(YomkResponse::eOk, "ok", YomkMkPtr(DDSLoanResult, DDSLoanResult{sample}));
+    loanGuard.sample = nullptr; // 响应已持有 sample，解除守卫
+    return resp;
 }
 
 YomkResponse YomkRpcService::discardLoan(YomkPkgPtr pkg)

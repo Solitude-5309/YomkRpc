@@ -147,7 +147,17 @@ Topic *FastDDSNode::getOrCreateTopic(
     Topic *topic = participant_->create_topic(topicName, typeName, TOPIC_QOS_DEFAULT);
     if (topic != nullptr)
     {
-        topics_[topicName] = topic;
+        // MC10 异常安全：topics_ 节点分配若抛 bad_alloc，已建 topic 未入表 → ~FastDDSNode 不会 delete_topic，
+        // 且残留于 participant 会阻断后续同名 create_topic（强保证破坏）。catch 内 delete_topic 回滚后重抛。
+        try
+        {
+            topics_[topicName] = topic;
+        }
+        catch (...)
+        {
+            participant_->delete_topic(topic);
+            throw;
+        }
     }
     return topic;
 }
@@ -190,7 +200,23 @@ bool FastDDSNode::registerPubTopic(const std::string &topicName, void *type)
         return false;
     }
 
-    pubTopics_[topicName] = std::move(info);
+    // MC10 异常安全：pubTopics_ 节点分配若抛 bad_alloc，已建 writer 未入表 → ~FastDDSNode 不会
+    // delete_datawriter（orphan writer 滞留至 participant 销毁）；本次新建 topic 亦须回滚（与上方
+    // writer==nullptr 分支对称），提供强异常保证。catch 内 delete_datawriter + 回滚新建 topic 后重抛。
+    try
+    {
+        pubTopics_[topicName] = std::move(info);
+    }
+    catch (...)
+    {
+        publisher_->delete_datawriter(info.writer);
+        if (!topicExisted)
+        {
+            participant_->delete_topic(topic);
+            topics_.erase(topicName);
+        }
+        throw;
+    }
     return true;
 }
 
