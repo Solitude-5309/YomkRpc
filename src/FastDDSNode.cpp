@@ -1,6 +1,5 @@
 #include "FastDDSNode.h"
 
-#include <fastdds/dds/core/LoanableSequence.hpp>
 #include <fastdds/dds/core/status/StatusMask.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
@@ -44,50 +43,13 @@ public:
 
     void on_data_available(DataReader *reader) override
     {
-        // 优先走 reader loan 路径（零拷贝）：任意类型均可用，回调指针仅回调期间有效
-        if (loanSupported_)
-        {
-            while (true)
-            {
-                LoanableSequence<void *> dataSeq; // max_len=0 → 借出
-                SampleInfoSeq infoSeq;
-                ReturnCode_t ret = reader->take(dataSeq, infoSeq, LENGTH_UNLIMITED);
-                if (ret == RETCODE_OK)
-                {
-                    for (LoanableCollection::size_type i = 0; i < infoSeq.length(); ++i)
-                    {
-                        if (infoSeq[i].valid_data &&
-                            infoSeq[i].instance_state == ALIVE_INSTANCE_STATE && callback_)
-                        {
-                            callback_(dataSeq.buffer()[i]);
-                        }
-                    }
-                    reader->return_loan(dataSeq, infoSeq);
-                    continue;
-                }
-                if (ret != RETCODE_NO_DATA)
-                {
-                    // loan 路径不可用（如类型不支持），置标志永久回退传统路径
-                    loanSupported_ = false;
-                    legacyTake(reader);
-                }
-                break;
-            }
-        }
-        else
-        {
-            legacyTake(reader);
-        }
-    }
-
-private:
-    // 传统路径：反序列化进内部缓冲后回调
-    void legacyTake(DataReader *reader)
-    {
+        // 方向2修复：始终以对齐的 data_ 交付回调——take_next_sample 反序列化进 create_data() 分配的对齐缓冲，
+        // 消除 plain 8字节类型(MFloat64/MInt64)零拷贝 loan 指针 base+4 欠对齐在严格对齐架构上的 UB/崩溃。
+        // 代价：放弃 reader 零拷贝（每样本一次反序列化拷贝）；x86-64 功能等价，严格对齐 ARM 由崩溃转为正确。
         SampleInfo info;
         while (RETCODE_OK == reader->take_next_sample(data_, &info))
         {
-            if (info.instance_state == ALIVE_INSTANCE_STATE && info.valid_data && callback_)
+            if (info.valid_data && info.instance_state == ALIVE_INSTANCE_STATE && callback_)
             {
                 callback_(data_);
             }
@@ -97,7 +59,6 @@ private:
 private:
     void *data_;
     DataCallback callback_;
-    bool loanSupported_ = true;
 };
 
 FastDDSNode::FastDDSNode() = default;
@@ -325,6 +286,10 @@ bool FastDDSNode::loan(const std::string &topicName, void *&sample)
     {
         return false;
     }
+    // 严格对齐架构告诫：loan_sample 返回待发 CDR payload 的 body 指针(base+4，4=RTPS 规范表示头)。
+    // plain 且 alignof>4 的类型(MFloat64/MInt64)该指针仅 4 字节对齐，调用方直接类型化写入在严格对齐
+    // 架构(ARM)上触发 SIGBUS(x86-64 良性)。此为 FastDDS 零拷贝 loan 固有特性(doc 未承诺对齐)，
+    // YomkRpc 透传该指针、无法在不牺牲零拷贝发布下对齐它；跨严格对齐平台由调用方按对齐安全方式写入。
     return it->second.writer->loan_sample(sample) == RETCODE_OK;
 }
 

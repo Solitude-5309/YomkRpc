@@ -31,6 +31,9 @@ private:
     std::mutex mtx_;
 };
 
+// 订阅回调：交付的 const void* 指向反序列化后的消息对象，始终按消息类型对齐，可安全 static_cast 后解引用
+// （所有架构，含严格对齐 ARM）；指针仅回调期间有效，须同步消费、勿跨调用持有。
+// 注：订阅端以对齐反序列化交付（方向2修复），不再使用零拷贝 reader loan。
 using DDSCallbackFunc = std::function<void(const void *)>;
 
 struct DDSNode
@@ -70,6 +73,9 @@ struct DDSLoan
 
 struct DDSLoanResult
 {
+    // /loan 借出的待发样本指针（FastDDS loan_sample 透传）。严格对齐架构告诫：该指针指向 CDR payload
+    // body(base+4)，对 plain 且 alignof>4 的类型(MFloat64/MInt64)仅 4 字节对齐，直接类型化写入在严格
+    // 对齐架构(ARM)上触发 SIGBUS(x86-64 良性)；跨严格对齐平台须按对齐安全方式写入。
     void *sample;
 };
 

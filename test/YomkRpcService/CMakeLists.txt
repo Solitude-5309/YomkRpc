@@ -50,3 +50,17 @@ add_test(NAME TestYomkRpcLoan COMMAND TestYomkRpcLoan)
 set_tests_properties(TestYomkRpcLoan PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
 )
+
+# =============================================================================
+# MC5：主题/类型分支深化 + 多类型边界 payload 端到端
+# 补齐 registerPubTopic 侧类型冲突(FastDDSNode.cpp L215)、getOrCreateTopic 复用从 pub 侧
+# 进入(L183)，并系统验证 6 类型(MFloat32/64/MInt64/MBool/MString/MByteArray)边界特殊值
+# (NaN/±Inf/整数极值/空超长串/空大 sequence)经 publish 端到端的透传健壮性与数据完整回环。
+# =============================================================================
+add_executable(TestYomkRpcTypes TestYomkRpcTypes.cpp)
+target_link_libraries(TestYomkRpcTypes PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestYomkRpcTypes COMMAND TestYomkRpcTypes)
+set_tests_properties(TestYomkRpcTypes PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+)
