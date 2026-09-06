@@ -95,6 +95,9 @@ YomkResponse YomkRpcService::registerPubTopic(YomkPkgPtr pkg)
     if (it == nodes_.end())
     {
         YOMK_ERROR_TAG("YomkRpcService::registerPubTopic", "node [", p->msg.nodeName, "] not exists");
+        // P1 所有权契约：register_pub_topic 无条件接管 type；节点不存在时未委托到 FastDDSNode，
+        // 须在此释放 caller 的 type（与节点层守卫释放对称），避免泄漏。delete nullptr 安全。
+        delete static_cast<eprosima::fastdds::dds::TopicDataType *>(p->msg.type);
         return YomkResponse(YomkResponse::eNo, "node [" + p->msg.nodeName + "] not exists");
     }
     if (!it->second->registerPubTopic(p->msg.topicName, p->msg.type))
@@ -115,6 +118,9 @@ YomkResponse YomkRpcService::registerSubTopic(YomkPkgPtr pkg)
     if (it == nodes_.end())
     {
         YOMK_ERROR_TAG("YomkRpcService::registerSubTopic", "node [", p->msg.nodeName, "] not exists");
+        // P1 所有权契约：register_sub_topic 无条件接管 type；节点不存在时未委托到 FastDDSNode，
+        // 须在此释放 caller 的 type，避免泄漏。delete nullptr 安全。
+        delete static_cast<eprosima::fastdds::dds::TopicDataType *>(p->msg.type);
         return YomkResponse(YomkResponse::eNo, "node [" + p->msg.nodeName + "] not exists");
     }
     if (!it->second->registerSubTopic(p->msg.topicName, p->msg.type, p->msg.callback))

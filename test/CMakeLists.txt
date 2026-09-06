@@ -35,6 +35,14 @@ list(APPEND CMAKE_PREFIX_PATH "${THIRD_PARTY_DIR}/Fast-DDS-3.6.1/install")
 find_package(fastdds 3 REQUIRED)
 message(STATUS "[test] fastdds found")
 
+# MC3+ 端到端收发需 YomkRpcMsg 真实类型（MString/MInt32 等 PubSubType）；
+# YomkRpcMsg 无导出包，沿用 examples 已验证方式：find_package(YomkRpc) 取 lib 目录后裸库名链接。
+# 置于 vendored fastdds 之后：仅取 ${YomkRpc_LIB_DIR} 供 link_directories，不链接 YomkRpc::YomkRpc
+# 导入目标（被测目标从源码重编），避免其 interface 依赖干扰已解析的 vendored fastdds。
+find_package(YomkRpc REQUIRED)
+link_directories(${YomkRpc_LIB_DIR})
+message(STATUS "[test] YomkRpc lib dir: ${YomkRpc_LIB_DIR}")
+
 # ----------------------------- 被测目标 -----------------------------
 # 仅编译自有源码两个 TU；第三方以 IMPORTED/已安装库形式链接，不参与插桩
 add_library(yomkrpc_under_test STATIC

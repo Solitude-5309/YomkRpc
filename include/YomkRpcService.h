@@ -43,14 +43,14 @@ struct DDSTopic
 {
     std::string nodeName;
     std::string topicName;
-    void *type;
+    void *type; // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
 };
 
 struct DDSSubRequest
 {
     std::string nodeName;
     std::string topicName;
-    void *type;
+    void *type; // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
     DDSCallbackFunc callback;
 };
 
@@ -58,7 +58,7 @@ struct DDSPublish
 {
     std::string nodeName;
     std::string topicName;
-    void *data;
+    void *data; // 借用（非所有权）：publish 同步写入，caller 保留并在调用后自行管理 data 生命周期
 };
 
 struct DDSLoan

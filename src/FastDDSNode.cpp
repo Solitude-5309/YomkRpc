@@ -196,6 +196,10 @@ bool FastDDSNode::registerPubTopic(const std::string &topicName, void *type)
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ == nullptr || publisher_ == nullptr || type == nullptr || pubTopics_.count(topicName) > 0)
     {
+        // P1 所有权契约：本方法无条件接管 caller 传入的 type；守卫拒绝（重复注册/节点未就绪）时
+        // 尚未构造 TypeSupport，须在此释放，否则 caller new 出的 TopicDataType 泄漏（与 F1 同类缺陷）。
+        // TopicDataType 有虚析构，经基类指针 delete 安全；delete nullptr 亦安全（type==null 分支无副作用）。
+        delete static_cast<TopicDataType *>(type);
         return false;
     }
 
@@ -235,6 +239,8 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ == nullptr || subscriber_ == nullptr || type == nullptr || subTopics_.count(topicName) > 0)
     {
+        // P1 所有权契约：同 registerPubTopic，守卫拒绝时释放 caller 的 type，避免失败路径泄漏。
+        delete static_cast<TopicDataType *>(type);
         return false;
     }
 

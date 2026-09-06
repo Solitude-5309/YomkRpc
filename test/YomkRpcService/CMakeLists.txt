@@ -24,3 +24,16 @@ add_test(NAME TestYomkRpcNodeLifecycle COMMAND TestYomkRpcNodeLifecycle)
 set_tests_properties(TestYomkRpcNodeLifecycle PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
 )
+
+# =============================================================================
+# MC3：主题注册 + 端到端发布订阅（真实 DDS + YomkRpcMsg 真实类型指针）
+# 首次功能触达 registerPubTopic/registerSubTopic/getOrCreateTopic/publish/on_data_available
+# 与 F1 SubResGuard 所在的 registerSubTopic happy-path；首次引入 YomkRpcMsg 依赖。
+# =============================================================================
+add_executable(TestYomkRpcTopic TestYomkRpcTopic.cpp)
+target_link_libraries(TestYomkRpcTopic PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestYomkRpcTopic COMMAND TestYomkRpcTopic)
+set_tests_properties(TestYomkRpcTopic PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0"
+)
