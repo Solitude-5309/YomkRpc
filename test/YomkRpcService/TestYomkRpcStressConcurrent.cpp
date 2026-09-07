@@ -2,10 +2,10 @@
  * @file TestYomkRpcStressConcurrent.cpp
  * @brief MC7-C：多线程高量压力/soak（并发 publish/loan / 并发 node churn / 并发 pub-sub 活跃回调）
  *
- * 范围：MC6 在"小量级"（8 线程 × 200 轮混合、4 线程 × 250 条收发）验证了双层锁与方向2 reader 路径的
+ * 范围：MC6 在"小量级"（8 线程 × 200 轮混合、4 线程 × 250 条收发）验证了双层锁与通用 take() reader 路径的
  *       并发正确性，但未在 10 万级负载 + 资源维度验证并发下的稳定性。本用例经 svc->invoke() 从 N=4
  *       线程（nproc=2 适度超订）并发驱动，配合 Linux /proc 零依赖资源采样器，实证并发负载下：
- *       loan 池不耗尽、node churn 并发 teardown 完整回收、方向2 reader 路径高量无数据撕裂、句柄稳定。
+ *       loan 池不耗尽、node churn 并发 teardown 完整回收、通用 take() reader 路径高量无数据撕裂、句柄稳定。
  *       与 TestYomkRpcStressSerial 独立进程隔离（用户决策：多种线程模型各自独立测试，尽可能暴露问题）。
  * 覆盖：
  *   C1 并发持续 publish/loan 量：N 线程聚合 STRESS_ITERS ops（loan→填值→publish|discard 交替）on
@@ -16,9 +16,9 @@
  *      pub+sub→loan/publish/discard→delete）；断言每轮全 eOk、终态 RSS/fd/Threads 回落基线（并发
  *      teardown 完整回收，无每实体泄漏）、无崩溃/UAF。
  *   C3 并发 pub/sub + 活跃回调 at volume：N 发布线程持续发 MInt32（值编码 tid*1000000+seq，可解码）
- *      给同一 writer 的活跃 subscriber；回调（方向2 reader 路径 on_data_available）在 atomic 下计数 +
+ *      给同一 writer 的活跃 subscriber；回调（通用 take() reader 路径 on_data_available）在 atomic 下计数 +
  *      on-the-fly 校验可解码（tid∈[0,N)、seq∈[0,perThread)）；断言无崩溃/UAF、received>0、invalid==0
- *      （高量下 data_ 无撕裂/串值）、RSS/fd/Threads 有界。抗抖动：不断言精确投递计数（RELIABLE 流控/
+ *      （高量下借出缓冲无撕裂/串值）、RSS/fd/Threads 有界。抗抖动：不断言精确投递计数（RELIABLE 流控/
  *      BEST_EFFORT 丢样致 received<=published 抖动），只断言完整性/资源/无崩溃。
  *
  * 关键设计约束（承 MC6）：
@@ -405,13 +405,13 @@ namespace
         std::atomic<long> received{0}, invalid{0};
         auto cb = [&](const void *d)
         {
-            // 方向2：reader 线程 take_next_sample 进对齐 data_ 后交付；d 已按 MInt32 对齐，可安全 deref
+            // 通用 take()：reader 线程 take()+return_loan 借出交付；MInt32 alignof≤4，base+4 仍 4 字节对齐，可安全 deref
             auto *m = static_cast<const YomkRpc::MInt32 *>(d);
             const int32_t v = m->data();
             const long tid = v / 1000000;
             const long seq = v % 1000000;
             received.fetch_add(1, std::memory_order_relaxed);
-            // on-the-fly 校验（不存 vector，10 万级）：越界即 data_ 撕裂/串值信号
+            // on-the-fly 校验（不存 vector，10 万级）：越界即借出缓冲撕裂/串值信号
             if (tid < 0 || tid >= P || seq < 0 || seq >= perThread)
             {
                 invalid.fetch_add(1, std::memory_order_relaxed);
@@ -458,8 +458,8 @@ namespace
 
         const long rec = received.load(), inv = invalid.load(), po = pubOk.load();
         CHECK(po > 0, "C3 发布线程确有成功 publish（并发写同一 writer，node mtx_ 序列化）");
-        CHECK(rec > 0, "C3 回调在活跃负载下确有触发（方向2 reader 路径命中，非空跑）");
-        CHECK(inv == 0, "C3 所有收到值可解码(tid∈[0,P),seq∈[0,perThread))→ 高量下 data_ 无撕裂/串值");
+        CHECK(rec > 0, "C3 回调在活跃负载下确有触发（通用 take() reader 路径命中，非空跑）");
+        CHECK(inv == 0, "C3 所有收到值可解码(tid∈[0,P),seq∈[0,perThread))→ 高量下借出缓冲无撕裂/串值");
         CHECK(after.threads <= base.threads + 2, "C3 线程数有界（<=base+2）");
         CHECK(after.fds <= base.fds + 8, "C3 fd 有界（<=base+8，高量收发不泄漏 fd）");
         CHECK(after.rssKB <= base.rssKB + rssToleranceKB(base.rssKB),

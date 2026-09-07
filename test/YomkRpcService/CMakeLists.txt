@@ -67,7 +67,7 @@ set_tests_properties(TestYomkRpcTypes PROPERTIES
 
 # =============================================================================
 # MC6：并发安全 + TSan 基线（多线程 invoke 锁正确性 / 并发收发 / teardown 竞态）
-# 从多线程并发驱动 svc->invoke()，实证双层锁(service mtx_ + node mtx_)正确性、方向2 reader
+# 从多线程并发驱动 svc->invoke()，实证双层锁(service mtx_ + node mtx_)正确性、通用 take() reader
 # 回调路径并发下数据完整性、delete_node 与活跃回调 teardown 竞态安全；off/asan/tsan 三模式验证。
 # =============================================================================
 add_executable(TestYomkRpcConcurrency TestYomkRpcConcurrency.cpp)
@@ -99,7 +99,7 @@ set_tests_properties(TestYomkRpcStressSerial PROPERTIES
 # =============================================================================
 # MC7-C：多线程高量压力/soak（并发 publish/loan / 并发 node churn / 并发 pub-sub 活跃回调）
 # N=4 线程（nproc=2 适度超订）并发驱动 + 资源采样器，实证并发负载下池不耗尽/teardown 完整回收/
-# 方向2 reader 高量无撕裂/句柄稳定；与 serial 独立进程隔离。LABELS stress（同上）。
+# 通用 take() reader 高量无撕裂/句柄稳定；与 serial 独立进程隔离。LABELS stress（同上）。
 # =============================================================================
 add_executable(TestYomkRpcStressConcurrent TestYomkRpcStressConcurrent.cpp)
 target_link_libraries(TestYomkRpcStressConcurrent PRIVATE yomkrpc_under_test YomkRpcMsg)

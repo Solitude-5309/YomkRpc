@@ -40,6 +40,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -47,6 +48,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -124,7 +126,7 @@ namespace
             std::lock_guard<std::mutex> lk(mtx);
             lv = lastValue;
         }
-        CHECK(r > 0 && lv == 777, "A2 复用 topic pub→sub 连通（received>0 且 lastValue==777，走对齐反序列化交付）");
+        CHECK(r > 0 && lv == 777, "A2 复用 topic pub→sub 连通（received>0 且 lastValue==777，走通用 take() 交付）");
         std::cout << "[OBSERVE] A2 reuse received=" << r << "/" << N << " lastValue=" << lv << std::endl;
 
         CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "tb_node")).m_status == YomkResponse::eOk,
@@ -163,9 +165,38 @@ namespace
                   label + " register_pub → eOk");
             auto cb = [this](const void *d)
             {
-                auto *m = static_cast<const MsgT *>(d);
+                // [LOAN-DIAG] 借出触发实证：alignof>4 plain(MFloat64/MInt64) 零拷贝借出指针=base+4 → mod8==4；
+                // 若 take() 退化反序列化拷贝 → 对齐实例 mod8==0。取模是纯地址运算、不解引用，恒安全。
+                uintptr_t p = reinterpret_cast<uintptr_t>(d);
+                std::cout << "[LOAN-DIAG] " << label << " ptr=" << d << " mod8=" << (p % 8) << " mod4=" << (p % 4)
+                          << " -> " << ((alignof(MsgT) > 4 && (p % 8) == 4) ? "zero-copy loan FIRED(base+4)" : (alignof(MsgT) > 4 ? "deserialize-copy(aligned)" : "alignof<=4(不可由对齐区分)"))
+                          << std::endl;
                 std::lock_guard<std::mutex> lk(mtx);
-                got.push_back(m->data());
+                // 借出指针可能仅 4 字节对齐(base+4)。闸门用 ValueT 而非 MsgT：FastDDS 生成的 MsgT 有用户定义拷贝赋值/
+                // 析构 → 非平凡可拷贝(is_trivially_copyable_v<MsgT>==false)，若以其为闸门会漏掉 MFloat64/MInt64 致欠对齐 deref；
+                // 且 memcpy 进非平凡可拷贝的 MsgT 会触发 -Wclass-memaccess。故 memcpy 目标取 ValueT(double/int64_t，平凡可拷贝)。
+                //   · ValueT 平凡可拷贝 且 alignof(MsgT)>4(MFloat64/MInt64)：plain 单标量，CDR body(base+4)即标量裸字节(偏移0)；
+                //     运行期指针未按 alignof 对齐(真零拷贝借出)→ memcpy 到对齐 ValueT 读值(UBSan 清洁、严格对齐 ARM 安全、
+                //     等价 msg.data())；已对齐(data-sharing 关时反序列化实例)→直接 deref。
+                //   · 其余(alignof≤4：MFloat32/MBool 借出 base+4 天然对齐；ValueT 非平凡可拷贝：MString/MByteArray 非 plain、
+                //     反序列化进对齐实例 mod8==0)→直接 deref 安全。
+                if constexpr (std::is_trivially_copyable_v<ValueT> && alignof(MsgT) > 4)
+                {
+                    if ((p % alignof(MsgT)) != 0)
+                    {
+                        ValueT v;
+                        std::memcpy(&v, d, sizeof(ValueT));
+                        got.push_back(v);
+                    }
+                    else
+                    {
+                        got.push_back(static_cast<const MsgT *>(d)->data());
+                    }
+                }
+                else
+                {
+                    got.push_back(static_cast<const MsgT *>(d)->data());
+                }
                 received++;
             };
             CHECK(svc->invoke("/register_sub_topic",

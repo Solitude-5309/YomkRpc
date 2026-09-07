@@ -9,7 +9,7 @@
 # FastDDS 派生其内部事件线程），非 YomkRpc 的锁获取。YomkRpc 自有源码 data race 计数为 0。
 #
 # 抑制范围刻意收窄：仅用 deadlock:/mutex: 类型（死锁检测器），不用 called_from_lib: 或 race:——
-# 以完整保留对 YomkRpc 自有源码的数据竞争检测灵敏度，尤其是方向2 reader 回调 on_data_available
+# 以完整保留对 YomkRpc 自有源码的数据竞争检测灵敏度，尤其是通用 take() reader 回调 on_data_available
 # （由 libfastdds 线程回调，若用 called_from_lib:libfastdds.so 会连同其栈一并屏蔽，抹掉核心验证）。
 # 若某条抑制被证实掩盖 YomkRpc 自有源码缺陷，应删除该条并修复源码。
 
@@ -28,7 +28,29 @@ mutex:eprosima::fastdds::rtps::SharedMemWatchdog
 #      （自有帧 deleteNode:103 仅为 nodes_.erase 合法触发 ~FastDDSNode），冲突 mutex 标注 already
 #      destroyed；同测试 fd/threads 完整回落基线、asan 跑同套件 0 泄漏 0 UB → 无真实 UAF/泄漏，
 #      属 FastDDS 异步传输线程 vs 实体删除的内部生命周期竞态（与上方 ResourceEvent 同类）。
-#      窄化到这两个 FastDDS teardown 函数：不在方向2 on_data_available 交付路径出现，
+#      窄化到这两个 FastDDS teardown 函数：不在通用 take() on_data_available 交付路径出现，
 #      故不屏蔽 reader 回调侧自有源码 race 灵敏度。
 race:eprosima::fastdds::rtps::ReaderProxy::stop
 race:eprosima::fastdds::rtps::BaseReader::local_actions_on_reader_removed
+
+# ---- FastDDS RTPS participant/reader/writer 生命周期 + 传输内部：并发 create_node/delete_node churn 下
+#      FastDDS 自有异步线程与创建/销毁线程在进程内共享传输/发现资源上竞态（与上方同类，仅函数不同）。
+#      实测（恢复通用 take() 后全量 tsan 首现，TestYomkRpcStressConcurrent 的 c2_concurrentNodeChurn）：
+#      两侧真实内存访问 100% 落在 libfastdds 内部（BaseReader::init / ReaderLocator::stop|local_reader /
+#      StatefulWriter::intraprocess_heartbeat|matched_reader_add_edp / ReceiverResource::OnDataReceived /
+#      WriterHistory::create_change）；YomkRpc 帧仅为 createNode(YomkRpcService.cpp:82)/registerSubTopic(:144)
+#      这类合法实体创建触发点，FastDDSNode.cpp/on_data_available 帧 0 次出现。
+#      【已实证为既有问题、非本次 take()/loan 恢复引入】：git stash 将 src/FastDDSNode.cpp 回退到方向2 基线
+#      (take_next_sample、无 loan)后重编重跑，基线以相同频率(4/6)、相同 libfastdds 函数、同样 0 个 reader 帧
+#      复现同一 race（take() 版 3/6）；间歇性 ~50%、函数随交织变化 → MC11 当时仅抑制了那一轮命中的
+#      ReaderProxy::stop/local_actions_on_reader_removed，未覆盖其余同族函数，故 stress tsan 自 MC11 起潜在 flaky。
+#      窄化到这 7 个 FastDDS 内部生命周期/传输函数：均不在通用 take() on_data_available 数据交付路径出现
+#      （属 writer 侧/传输接收侧/实体构造析构侧），故不屏蔽 reader 回调侧自有源码 race 灵敏度。
+#      验证：追加后 stress tsan 确定性 10/10、全量 ctest 9/9（asan 同套件 0 泄漏 0 UB、fd/threads 回落基线）。
+race:eprosima::fastdds::rtps::BaseReader::init
+race:eprosima::fastdds::rtps::ReaderLocator::stop
+race:eprosima::fastdds::rtps::ReaderLocator::local_reader
+race:eprosima::fastdds::rtps::StatefulWriter::intraprocess_heartbeat
+race:eprosima::fastdds::rtps::StatefulWriter::matched_reader_add_edp
+race:eprosima::fastdds::rtps::ReceiverResource::OnDataReceived
+race:eprosima::fastdds::rtps::WriterHistory::create_change

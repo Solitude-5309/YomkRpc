@@ -3,8 +3,8 @@
  * @brief MC6：并发安全 + TSan 基线（多线程 invoke 锁正确性 / 并发收发 / teardown 竞态）
  *
  * 范围：MC0-MC5 均由单线程顺序驱动（回调虽在 FastDDS reader 线程触发，但主逻辑串行），双层锁
- *       （YomkRpcService::mtx_ 序列化所有 invoke；FastDDSNode::mtx_ 序列化节点内 3 张 map）与方向2
- *       改动后的 reader 回调路径（on_data_available 在 reader 线程 take_next_sample 进对齐 data_）
+ *       （YomkRpcService::mtx_ 序列化所有 invoke；FastDDSNode::mtx_ 序列化节点内 3 张 map）与通用
+ *       take() 的 reader 回调路径（on_data_available 在 reader 线程 take()+return_loan 借出交付）
  *       在真并发下的正确性从未被系统验证。本用例经 svc->invoke() 从多线程并发驱动，配合 off/asan/tsan
  *       三模式，实证锁正确性、并发收发数据完整性、以及 delete_node 与活跃回调的 teardown 竞态安全。
  * 覆盖：
@@ -15,9 +15,9 @@
  *        type 由 registerPubTopic 首守卫在锁内 delete，20 轮共 140 个 loser type 零泄漏）；
  *     A3 T=8 线程 × K=200 轮混合并发（唯一 topic 注册 / publish / loan / discard_loan / version）→
  *        各操作计数全部 eOk、终态一致（验证 node mtx_ 序列化写；version 只读端点无锁与写并发安全）。
- *   Part B 并发发布+订阅端到端（方向2 reader 路径 + 回调契约并发下）：P=4 发布线程各发 K=250 条
+ *   Part B 并发发布+订阅端到端（通用 take() reader 路径 + 回调契约并发下）：P=4 发布线程各发 K=250 条
  *     MInt32（值编码 tid*1000+seq，全局唯一）→ 同一 writer 并发 write 经 node mtx_ 序列化；reader 单
- *     线程顺序 drain data_ 交付回调；抗抖动断言 received∈(0,P*K] 且所有收到值可解码（检测 data_ 撕裂/串值）。
+ *     线程顺序 drain 借出缓冲交付回调；抗抖动断言 received∈(0,P*K] 且所有收到值可解码（检测借出缓冲撕裂/串值）。
  *   Part C delete_node 与活跃回调竞态（最高风险 teardown）：R=10 轮，高频发布流进行中 delete_node，
  *     实证 ~FastDDSNode "先 delete_datareader（drain 回调）后 delete_data" 的顺序安全（asan 无 UAF、
  *     tsan 无 race、无死锁）。
@@ -221,7 +221,7 @@ namespace
               "A3 删除 a3_node → eOk（终态一致）");
     }
 
-    // ---- Part B：并发发布 + 订阅端到端（方向2 reader 路径 + 回调契约在并发下）----
+    // ---- Part B：并发发布 + 订阅端到端（通用 take() reader 路径 + 回调契约在并发下）----
     void partB_concurrentPubSub(YomkRpcService *svc)
     {
         CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN, "b_node")).m_status == YomkResponse::eOk,
@@ -235,7 +235,7 @@ namespace
         std::vector<int32_t> got; // 收集所有收到值，供事后解码校验
         auto cb = [&](const void *d)
         {
-            // 方向2：reader 线程 take_next_sample 进对齐 data_ 后交付；d 已按 MInt32 对齐，可安全 deref
+            // 通用 take()：reader 线程 take()+return_loan 借出交付；MInt32 alignof≤4，base+4 仍 4 字节对齐，可安全 deref
             auto *m = static_cast<const YomkRpc::MInt32 *>(d);
             const int32_t v = m->data();
             std::lock_guard<std::mutex> lk(mtx);

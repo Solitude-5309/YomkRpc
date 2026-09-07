@@ -1,5 +1,6 @@
 #include "FastDDSNode.h"
 
+#include <fastdds/dds/core/LoanableSequence.hpp>
 #include <fastdds/dds/core/status/StatusMask.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
@@ -43,9 +44,61 @@ public:
 
     void on_data_available(DataReader *reader) override
     {
-        // 方向2修复：始终以对齐的 data_ 交付回调——take_next_sample 反序列化进 create_data() 分配的对齐缓冲，
-        // 消除 plain 8字节类型(MFloat64/MInt64)零拷贝 loan 指针 base+4 欠对齐在严格对齐架构上的 UB/崩溃。
-        // 代价：放弃 reader 零拷贝（每样本一次反序列化拷贝）；x86-64 功能等价，严格对齐 ARM 由崩溃转为正确。
+        // 通用借出机制（reader 侧零拷贝）：以 max_len=0 的 LoanableSequence 调 take()，交付方式由 FastDDS 内部按
+        // “可借出性”(is_plain && data-sharing，非按 alignof) 自动决定——
+        //   · plain 且 data-sharing 生效：零拷贝借出，dataSeq.buffer()[i] 指向接收缓冲 CDR body(base+4)；
+        //   · 非 plain / 未启用 data-sharing：内部反序列化进 create_data() 分配的对齐实例（等价 take_next_sample 拷贝）。
+        // 两情形应用代码一致：take → 回调交付 → return_loan；return_loan 对“未借出”集合是无害 no-op（DataReader.hpp doc L270-273）。
+        //
+        // 对齐契约（关键，务必阅读）：借出指针为 base+4（4=RTPS representation_header_size）。
+        //   ✓ 可安全直接 deref 的 plain 类型 = alignof≤4：bool / byte(octet) / char / int8 / uint8 / int16 / uint16 /
+        //     int32 / uint32 / float，及其定长数组（如 float pts[N]（点云）、octet pixels[N]（图像））——base+4 天然对齐，
+        //     全架构（含严格对齐 ARM）安全，是零拷贝大数组负载的推荐表示。
+        //   ✗ alignof>4 的 plain 标量 = double / int64 / uint64（如 MFloat64/MInt64）：借出指针仅 4 字节对齐，消费方须
+        //     memcpy 到对齐局部再读（与 YOMKRPC_LOAN 发布侧同一契约）；x86-64 良性，严格对齐 ARM 直接 deref 会 SIGBUS。
+        //   建议：大数组/点云/图像负载优先选用 alignof≤4 的 plain 类型（float/byte），从源头规避该边界，勿用定长 double/int64。
+        if (loanSupported_)
+        {
+            while (true)
+            {
+                LoanableSequence<void *> dataSeq; // max_len=0 → 请求借出
+                SampleInfoSeq infoSeq;
+                ReturnCode_t ret = reader->take(dataSeq, infoSeq, LENGTH_UNLIMITED);
+                if (ret == RETCODE_OK)
+                {
+                    for (LoanableCollection::size_type i = 0; i < infoSeq.length(); ++i)
+                    {
+                        if (infoSeq[i].valid_data &&
+                            infoSeq[i].instance_state == ALIVE_INSTANCE_STATE && callback_)
+                        {
+                            // buffer()[i] 是 LoanableCollection 唯一元素访问方式（无 operator[]/span），FastDDS 官方惯用法；
+                            // i 受 infoSeq.length() 界定 → 指针算术安全，抑制 clang-tidy 误报。
+                            callback_(dataSeq.buffer()[i]); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                        }
+                    }
+                    reader->return_loan(dataSeq, infoSeq); // 复位为 max_len=0，可继续 take 剩余样本
+                    continue;
+                }
+                if (ret != RETCODE_NO_DATA)
+                {
+                    // 罕见保险：take 返回非预期错误码时永久回退传统反序列化路径（通用 take 正常不会走到这里）
+                    loanSupported_ = false;
+                    legacyTake(reader);
+                }
+                break;
+            }
+        }
+        else
+        {
+            legacyTake(reader);
+        }
+    }
+
+private:
+    // 传统路径：反序列化进对齐的 data_ 后回调（take 不可用时的保险回退）。
+    // data_ 由 create_data()=`new T()` 分配、按 alignof(T) 对齐 → 交付指针恒对齐，全类型全架构安全。
+    void legacyTake(DataReader *reader)
+    {
         SampleInfo info;
         while (RETCODE_OK == reader->take_next_sample(data_, &info))
         {
@@ -56,9 +109,9 @@ public:
         }
     }
 
-private:
     void *data_;
     DataCallback callback_;
+    bool loanSupported_ = true;
 };
 
 FastDDSNode::FastDDSNode() = default;
