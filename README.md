@@ -253,4 +253,3 @@ MIT License - 详见 [LICENSE.txt](../../LICENSE.txt)
 ## 链接
 
 - [YomkServer 官方仓库](https://github.com/Solitude-5309/YomkServer)
-- [YomkExtensions 扩展集合](https://github.com/Solitude-5309/YomkExtensions)
