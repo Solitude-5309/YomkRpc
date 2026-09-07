@@ -344,7 +344,23 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
     }
     guard.reader = info.reader; // reader 纳入守卫，覆盖 map 分配抛出时 reader 泄漏
 
-    subTopics_[topicName] = std::move(info);
+    // #2 强保证对称（对齐 registerPubTopic）：subTopics_ 节点分配抛 bad_alloc 时 info 未被 move、
+    // reader+data 由已武装的 SubResGuard 在栈展开清理（无泄漏）；但本次 getOrCreateTopic 新建并入
+    // topics_ 的 topic 不在守卫覆盖内 → catch 内仅回滚 topic 后重抛，升级基本保证为强保证，与 pub 侧一致
+    // （残留 topic 会阻断后续同名 create_topic，故必须显式回滚，不能仅依赖 ~FastDDSNode 兜底）。
+    try
+    {
+        subTopics_[topicName] = std::move(info);
+    }
+    catch (...)
+    {
+        if (!topicExisted)
+        {
+            participant_->delete_topic(topic);
+            topics_.erase(topicName);
+        }
+        throw;
+    }
     guard.reader = nullptr; // 所有权已入 map，解除守卫（后续由 ~FastDDSNode 释放）
     // cppcheck-suppress redundantAssignment
     guard.data = nullptr; // 解除 data 守卫：正常路径覆盖登记值，异常/失败路径该值由 ~SubResGuard 读并 delete_data

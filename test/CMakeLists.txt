@@ -54,9 +54,14 @@ target_include_directories(yomkrpc_under_test PUBLIC
     ${YOMKRPC_ROOT}/src
     ${CMAKE_CURRENT_SOURCE_DIR}   # TestCheck.h
 )
-# 与主库一致的版本宏（getVersion 拼接 "YomkRpc v" YOMKRPC_VERSION_STRING " (WIP)"）
+# 与主库一致的版本宏（getVersion 拼接 "YomkRpc v" YOMKRPC_VERSION_STRING）
 # MC9：随主库改名 YOMKRPC_VERSION→YOMKRPC_VERSION_STRING，避免与 YomkRpcAPI.h 的 YOMKRPC_VERSION() API 宏冲突
-target_compile_definitions(yomkrpc_under_test PUBLIC YOMKRPC_VERSION_STRING="0.1.0")
+# #5(b) drift-free：从根 ../CMakeLists.txt 的 project(YomkRpc VERSION x.y.z) 提取版本，消除硬编码 0.1.0 与根版本脱节
+file(STRINGS "${YOMKRPC_ROOT}/CMakeLists.txt" _yomkrpc_ver_line
+     REGEX "^project\\(YomkRpc[ \t]+VERSION[ \t]+[0-9]")
+string(REGEX REPLACE "^project\\(YomkRpc[ \t]+VERSION[ \t]+([0-9]+\\.[0-9]+\\.[0-9]+).*$" "\\1"
+       YOMKRPC_SRC_VERSION "${_yomkrpc_ver_line}")
+target_compile_definitions(yomkrpc_under_test PUBLIC YOMKRPC_VERSION_STRING="${YOMKRPC_SRC_VERSION}")
 target_link_libraries(yomkrpc_under_test PUBLIC YomkServer::YomkServer fastdds)
 
 # ----------------------------- Sanitizer 开关 -----------------------------

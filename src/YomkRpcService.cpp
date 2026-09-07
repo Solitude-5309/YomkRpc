@@ -49,7 +49,8 @@ int YomkRpcService::init()
 
 YomkResponse YomkRpcService::getVersion(YomkPkgPtr pkg)
 {
-    std::string version = "YomkRpc v" YOMKRPC_VERSION_STRING " (WIP)";
+    // #5(a) 移除 (WIP)：发布态整洁版本串，成熟度由 0.x 版本号本身表达（契约测试同步断言不含 (WIP)）
+    std::string version = "YomkRpc v" YOMKRPC_VERSION_STRING;
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(String, version));
 }
 
@@ -71,6 +72,11 @@ YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
                             "domainId [" + std::to_string(p->msg.domainId) + "] out of valid range [0,232]");
     }
 
+    // create_participant（经 setDomainId）必须在全局 mtx_ 内串行，不可“锁外构造”优化：
+    // FastDDS 3.6.1 的 DomainParticipantFactory 单例 lazy-init(get_shared_instance/load_profiles) 与
+    // SystemInfo::get_username()(→ 非线程安全 getpwuid，写 libc 静态缓冲) 在并发 create_participant 下
+    // data race。tsan 实证：移出锁后 A1 3 race / stress 2 race（create-vs-create），锁内串行则 0 race
+    // （git stash 基线对照 6×0）。并发安全优先于该罕见路径（create_node 多在启动期）的微优化。
     std::lock_guard<std::mutex> lock(mtx_);
     if (nodes_.find(p->msg.nodeName) != nodes_.end())
     {

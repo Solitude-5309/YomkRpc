@@ -32,7 +32,7 @@ namespace
         if (ver != nullptr)
         {
             CHECK(ver->d.rfind("YomkRpc v", 0) == 0, "/version 版本串前缀为 YomkRpc v");
-            CHECK(ver->d.find("(WIP)") != std::string::npos, "/version 版本串含 (WIP)");
+            CHECK(ver->d.find("(WIP)") == std::string::npos, "/version 版本串不含 (WIP)（发布态整洁版本串）");
         }
 
         auto respNull = svc->invoke("/version", nullptr);
