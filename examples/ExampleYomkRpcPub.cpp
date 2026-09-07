@@ -8,15 +8,14 @@
 
 using namespace yomk;
 
-// YomkRpc 发布端示例程序（用户参考）：每隔 1s 发布一次 hello world，
-// 持续 60 秒后自行干净退出；与 ExampleYomkRpcSub（订阅端示例）配合
-// 可演示真实跨进程发布/订阅通信
+// 发布端示例：演示 创建节点 → 注册 MString 发布主题 → 每隔 1s 发布一条、共 60 条 → 销毁节点 的代码流程。
+// 跨进程运行方式（与 ExampleYomkRpcSub 配合、启动顺序）见 README。
 int main(int argc, char *argv[])
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
 
-    // 1. 创建节点
+    // 1. 创建节点：domainId=0（仅同域节点互通），nodeName 唯一
     auto resp = YOMKRPC_NODE(0, "pub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -24,7 +23,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // 2. 注册发布主题
+    // 2. 注册发布主题：type 所有权移交服务端，new 后无需自行 delete
     resp = YOMKRPC_PUB_TOPIC("pub_node", "hello_world", new YomkRpc::MStringPubSubType());
     if (resp.m_status != YomkResponse::eOk)
     {

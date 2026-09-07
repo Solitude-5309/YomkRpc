@@ -10,9 +10,8 @@
 
 using namespace yomk;
 
-// YomkRpc 发布订阅完整流程演示（用户参考）：在同一节点内注册发布与订阅主题，
-// 发布 5 条 MString 消息并在订阅回调中接收打印，最后干净退出。
-// 演示 create_node / register_pub_topic / register_sub_topic / publish / delete_node 全流程。
+// 单进程完整流程示例：同一节点内注册发布与订阅主题，发布 5 条 MString 并在订阅回调中接收打印，最后销毁节点。
+// 覆盖 create_node / register_pub_topic / register_sub_topic / publish / delete_node 全流程。
 int main(int argc, char *argv[])
 {
     YOMK_INIT();
@@ -48,6 +47,7 @@ int main(int argc, char *argv[])
     std::string lastMsg;
     auto onMessage = [&](const void *data)
     {
+        // data 为交付的消息实例指针（仅回调期间有效），转型为具体消息类型后读取
         auto *msg = static_cast<const YomkRpc::MString *>(data);
         std::lock_guard<std::mutex> lock(msgMtx);
         lastMsg = msg->data();

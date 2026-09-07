@@ -39,6 +39,17 @@ public:
     {
     }
 
+    // 数据交付有两条路径，交付给 callback_ 的 const void* 对齐性不同（消费方须据此安全读值）：
+    //   1) loan 零拷贝（主路径，loanSupported_）：reader->take 借出，callback 收到 dataSeq.buffer()[i]，
+    //      指向接收缓冲的 CDR body = base+4（representation_header_size=4，仅 4 字节对齐）。FastDDS 按
+    //      loanability = is_plain && data-sharing 自动决定 loan-vs-copy；is_plain 是 loanability 闸门而非
+    //      alignof 闸门，故对 alignof>4 的 plain 类型不会退化为对齐拷贝，仍交付 base+4：
+    //        - plain 且 alignof≤4（bool/byte/char/int8-32/uint/float 及定长数组=点云/图像）：base+4 天然对齐，
+    //          消费方可直接 static_cast<const T*> 解引用（全架构含严格对齐 ARM 安全），是零拷贝大数组推荐表示；
+    //        - plain 且 alignof>4（double/int64/uint64，如 MFloat64/MInt64）：base+4 仅 4 字节对齐，消费方须
+    //          memcpy 到对齐局部再读；直接类型化解引用在严格对齐 ARM 触发 SIGBUS（x86-64 良性、UBSan 报 misaligned）。
+    //   2) legacy 对齐反序列化（回退路径，见 legacyTake）：take_next_sample 反序列化进 create_data()=new T() 的
+    //      data_ 缓冲，按 alignof(T) 对齐 → 交付指针恒对齐，全类型全架构可直接解引用。
     void on_data_available(DataReader *reader) override
     {
         if (loanSupported_)
@@ -146,6 +157,7 @@ FastDDSNode::~FastDDSNode()
     DomainParticipantFactory::get_instance()->delete_participant(participant_);
 }
 
+// 惰性创建 participant/publisher/subscriber（一次性）：已创建（participant_!=nullptr）或 participant 创建失败返回 false。
 bool FastDDSNode::setDomainId(uint32_t domainId)
 {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -197,6 +209,8 @@ Topic *FastDDSNode::getOrCreateTopic(
     return topic;
 }
 
+// 注册发布主题：无条件接管 type 所有权（失败路径亦 delete）；创建 writer 并登记到 pubTopics_。
+// 节点未就绪 / type==nullptr / 主题名已存在 / 类型名不符 → 返回 false；writer 创建失败回滚本次新建的主题。
 bool FastDDSNode::registerPubTopic(const std::string &topicName, void *type)
 {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -247,6 +261,8 @@ bool FastDDSNode::registerPubTopic(const std::string &topicName, void *type)
     return true;
 }
 
+// 注册订阅主题：无条件接管 type 所有权，create_data() 建对齐接收缓冲 data，装 SubListener 后创建 reader。
+// 失败/异常路径经 SubResGuard 与主题回滚释放已建资源，防止 reader/data/type 泄漏。
 bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
                                    DataCallback callback)
 {
@@ -320,6 +336,8 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
     return true;
 }
 
+// 同步写入一条消息：data 为借用（write 内部完成序列化/拷贝），调用返回后 caller 即可释放；
+// 主题未注册发布 / writer 为空 / data==nullptr 返回 false。
 bool FastDDSNode::publish(const std::string &topicName, const void *data)
 {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -331,6 +349,8 @@ bool FastDDSNode::publish(const std::string &topicName, const void *data)
     return it->second.writer->write(const_cast<void *>(data)) == RETCODE_OK;
 }
 
+// 从 writer 池借出一个待发样本（仅 plain 类型支持）：成功返回 true 且 sample 指向池内缓冲，填值后经 publish 免序列化发送；
+// 非 plain / 池耗尽返回 false 且 sample=nullptr（回退普通发布）。借出指针在 write/discard 后被中间件收回，不可再访问。
 bool FastDDSNode::loan(const std::string &topicName, void *&sample)
 {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -343,6 +363,7 @@ bool FastDDSNode::loan(const std::string &topicName, void *&sample)
     return it->second.writer->loan_sample(sample) == RETCODE_OK;
 }
 
+// 归还未发布的借出样本（loan 借出但不 publish 时须调用，否则池泄漏）；writer 不存在或 sample==nullptr 返回 false。
 bool FastDDSNode::discardLoan(const std::string &topicName, void *&sample)
 {
     std::lock_guard<std::mutex> lock(mtx_);

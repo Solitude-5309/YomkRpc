@@ -20,20 +20,21 @@ message(STATUS "YomkRpc libraries: ${YomkRpc_LIBRARIES}")
 # YomkRpcMsg 无导出包、以裸库名链接，仅能靠 -L 解析（fastdds 已由 Config 的 find_dependency 解析为全路径）
 link_directories(${YomkRpc_LIB_DIR})
 
+# 单进程示例：完整发布订阅流程（ExampleYomkRpcTopic）与 loan 借出机制（ExampleYomkRpcTopicLoan）
 add_executable(ExampleYomkRpcTopic ExampleYomkRpcTopic.cpp)
 target_link_libraries(ExampleYomkRpcTopic PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
 add_executable(ExampleYomkRpcTopicLoan ExampleYomkRpcTopicLoan.cpp)
 target_link_libraries(ExampleYomkRpcTopicLoan PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
-# 发布/订阅示例程序（用户参考）：另开终端分别运行
+# 跨进程发布/订阅双示例：ExampleYomkRpcPub（发布端）与 ExampleYomkRpcSub（订阅端）各编译为独立可执行程序
 add_executable(ExampleYomkRpcPub ExampleYomkRpcPub.cpp)
 target_link_libraries(ExampleYomkRpcPub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
 add_executable(ExampleYomkRpcSub ExampleYomkRpcSub.cpp)
 target_link_libraries(ExampleYomkRpcSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
-# 示例程序随扩展一并安装到 <安装路径>/bin，供用户在任意终端直接运行参考
+# 示例程序随扩展一并安装到 <安装路径>/bin（运行方式见 README）
 # 示例程序可能有多个，此处显式列出全部示例目标名（不能用 ${PROJECT_NAME} 占位）
 install(TARGETS
     ExampleYomkRpcTopic

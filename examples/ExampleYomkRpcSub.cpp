@@ -16,15 +16,14 @@ static void onSignal(int)
     g_stop.store(true);
 }
 
-// YomkRpc 订阅端示例程序（用户参考）：订阅 hello_world 主题，
-// 收到每条消息打印内容；Ctrl+C 干净退出并打印累计接收条数；
-// 与 ExampleYomkRpcPub（发布端示例）配合可演示真实跨进程发布/订阅通信
+// 订阅端示例：演示 创建节点 → 注册 MString 订阅主题（回调打印每条消息）→ 等待 Ctrl+C 退出 → 销毁节点 的代码流程。
+// 跨进程运行方式（与 ExampleYomkRpcPub 配合、启动顺序）见 README。
 int main(int argc, char *argv[])
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
 
-    // 1. 创建节点
+    // 1. 创建节点：domainId=0，须与发布端同域方可互通
     auto resp = YOMKRPC_NODE(0, "sub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -32,10 +31,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // 2. 注册订阅主题：回调中打印消息内容并累计计数
+    // 2. 注册订阅主题：type 所有权移交服务端；收到消息时回调 onMessage
     std::atomic<int> received{0};
     auto onMessage = [&](const void *data)
     {
+        // data 为交付的消息实例指针（仅回调期间有效），转型为具体消息类型后读取
         auto *msg = static_cast<const YomkRpc::MString *>(data);
         received++;
         YOMK_INFO_TAG("ExampleYomkRpcSub", "[RECV] ", msg->data());

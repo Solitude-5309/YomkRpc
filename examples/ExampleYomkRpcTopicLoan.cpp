@@ -10,10 +10,8 @@
 
 using namespace yomk;
 
-// YomkRpc loan 借出机制演示（用户参考）：
-// - 发布端借出池内样本免序列化发布（仅 plain 类型可用，非 plain 自动回退普通发布）
-// - 订阅端透明走 reader loan 路径（回调期间指针有效，零序列化拷贝）
-// 演示 loan / discard_loan 接口，以及 plain(MInt32) 与非 plain(MString) 类型的差异。
+// loan 借出机制示例：演示 借出池内样本免序列化发布（仅 plain 类型可用，非 plain 回退普通发布）与 discard 归还，
+// 并对比 plain(MInt32) 与非 plain(MString) 的借出差异；订阅端回调透明接收（指针仅回调期间有效）。
 int main(int argc, char *argv[])
 {
     YOMK_INIT();
@@ -57,6 +55,7 @@ int main(int argc, char *argv[])
     int32_t lastLoanValue = -1;
     auto onLoan = [&](const void *data)
     {
+        // data 为交付的消息实例指针；MInt32 是 alignof≤4 的 plain 类型，可直接转型解引用（对齐契约见 src/FastDDSNode.cpp）
         auto *msg = static_cast<const YomkRpc::MInt32 *>(data);
         std::lock_guard<std::mutex> lock(loanMtx);
         lastLoanValue = msg->data();

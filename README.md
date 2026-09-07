@@ -6,16 +6,18 @@
 
 基于 YomkServer 框架的 RPC 扩展，集成 FastDDS 提供分布式发布订阅能力。
 
-| URL | 功能 | 说明 |
-|-----|------|------|
-| `/YomkRpcService/version` | 版本查询 | 返回 YomkRpc 扩展版本信息 |
-| `/YomkRpcService/create_node` | 创建节点 | 传入 `DDSNode{domainId, nodeName}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误 |
-| `/YomkRpcService/delete_node` | 删除节点 | 销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
-| `/YomkRpcService/register_pub_topic` | 注册发布主题 | 传入 `DDSTopic{nodeName, topicName, type}`，type 为 PubSubType 实例指针 |
-| `/YomkRpcService/register_sub_topic` | 注册订阅主题 | 传入 `DDSSubRequest{nodeName, topicName, type, callback}`，data 由内部自动创建 |
-| `/YomkRpcService/publish` | 发布数据 | 传入 `DDSPublish{nodeName, topicName, data}`，data 为数据实例指针 |
-| `/YomkRpcService/loan` | 借出发送缓冲 | 传入 `DDSLoan{nodeName, topicName}`，成功返回 `DDSLoanResult{sample}` 池内指针，仅 plain 类型支持 |
-| `/YomkRpcService/discard_loan` | 归还未发布的借出缓冲 | 传入 `DDSLoan{nodeName, topicName, sample}` |
+| 宏 API（用户调用） | URL 端点 | 功能 | 说明 |
+|--------------------|----------|------|------|
+| `YOMKRPC_VERSION()` | `/YomkRpcService/version` | 版本查询 | 宏内部自动解包并打印版本，无返回值 |
+| `YOMKRPC_NODE(domainId, nodeName)` | `/YomkRpcService/create_node` | 创建节点 | 打包 `DDSNode{domainId, nodeName}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误 |
+| `YOMKRPC_DEL_NODE(nodeName)` | `/YomkRpcService/delete_node` | 删除节点 | 销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
+| `YOMKRPC_PUB_TOPIC(nodeName, topicName, type)` | `/YomkRpcService/register_pub_topic` | 注册发布主题 | 打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放） |
+| `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback)` | `/YomkRpcService/register_sub_topic` | 注册订阅主题 | 打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建 |
+| `YOMKRPC_PUB_MSG(nodeName, topicName, data)` | `/YomkRpcService/publish` | 发布数据 | 打包 `DDSPublish`；data 为数据实例指针（借用，同步写入，caller 保留所有权） |
+| `YOMKRPC_LOAN(nodeName, topicName, outPtr)` | `/YomkRpcService/loan` | 借出发送缓冲 | outPtr 为输出参数，成功指向 `DDSLoanResult{sample}` 池内样本、失败置 nullptr；仅 plain 类型支持 |
+| `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | `/YomkRpcService/discard_loan` | 归还未发布的借出缓冲 | 打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
+
+> 除 `YOMKRPC_VERSION()` 外，其余宏均返回 `YomkResponse`，调用后须判 `m_status == YomkResponse::eOk`；失败时可读 `m_msg` 获取错误信息。
 
 ## 前置条件
 
@@ -190,6 +192,33 @@ int main(int argc, char *argv[])
 - **发布端显式 API**：`YOMKRPC_LOAN` 借出 writer 池内样本，直接在池内填值后 `YOMKRPC_PUB_MSG` 发布免序列化；每次 write 后指针即被中间件收回，须重新借出
 - **适用条件**：仅 plain 类型可借出（纯基础类型成员 + FINAL 可扩展性，如 MInt32、MColorRGBA）；含 string/sequence 的类型 loan 失败返回 nullptr，自动回退普通发布
 - **指针生命周期**：发布端 loaned 指针 write/discard 后不可再访问；订阅端指针仅回调期间有效
+
+### 订阅回调与数据消费
+
+`YOMKRPC_SUB_TOPIC` 注册的回调签名为 `std::function<void(const void *data)>`，每次收到消息时被调用：
+
+- **转型读取**：`data` 是交付的消息实例指针，`static_cast<const 你的消息类型 *>(data)` 后即可读取字段（如 `msg->data()`）。
+- **生命周期**：`data` 仅在回调执行期间有效，须在回调内同步消费（读取或拷贝到自有存储），**不要**跨回调持有该指针（回调返回后即失效）。
+- **对齐与类型选型**（关系到严格对齐平台如 ARM 的稳定性）：交付方式由消息「可借出性」自动决定——
+  - 非 plain 类型 / 未启用 data-sharing：FastDDS 反序列化进对齐实例，指针恒对齐，可直接解引用（全架构安全）；`string` / `sequence` / 无界类型属此列。
+  - plain 且 data-sharing 生效：走零拷贝借出，指针指向接收缓冲 CDR body（`base+4`，仅 4 字节对齐），须按消息 `alignof` 分两种情形消费：
+    - **推荐**：`alignof≤4` 的 plain 类型（`float` / `byte` / `int32` 及其定长数组，如点云 `float pts[N]`、图像 `octet pixels[N]`）——借出指针天然对齐，可直接解引用，从零拷贝获益且无对齐风险。大数据 / 点云 / 图像负载应优先选用这类类型。
+    - **注意**：`alignof>4` 的 plain 标量（`double` / `int64` / `uint64`，如 `MFloat64` / `MInt64`）——借出指针仅 4 字节对齐，回调中应 `memcpy` 到对齐局部变量再读取；直接解引用在 x86-64 良性，但在严格对齐 ARM 上会触发 SIGBUS。勿用定长 `double` / `int64` 标量作为借出负载。
+  - 底层交付路径（loan 零拷贝 vs 对齐反序列化）与对齐契约的实现细节见 `src/FastDDSNode.cpp`。
+
+```cpp
+#include <cstring>
+
+auto onMessage = [&](const void *data)
+{
+    // alignof≤4 的 plain 类型（如 MInt32、float/byte 定长数组）：直接转型解引用
+    int32_t v = static_cast<const YomkRpc::MInt32 *>(data)->data();
+
+    // alignof>4 的 plain 标量（如 MFloat64）：从裸指针 memcpy 到对齐局部再读，规避严格对齐平台 SIGBUS
+    // double d;
+    // std::memcpy(&d, data, sizeof(d)); // MFloat64 的 double 成员位于偏移 0
+};
+```
 
 ### 双进程示例程序（hello world）
 

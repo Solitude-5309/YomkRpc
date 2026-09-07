@@ -1,9 +1,19 @@
+// YomkRpcService 实现：将 /YomkRpcService/* 端点的请求分发到对应 handler，再委托给 FastDDSNode 执行 DDS 操作。
+//
+// 内存所有权协议（贯穿全部 handler）：
+//   - type（DDSTopic/DDSSubRequest.type）：caller new，服务端全路径接管——无论成功或失败均由本服务 delete，caller 不再释放；
+//   - data（DDSPublish.data）：借用（非所有权），publish 同步写入后 caller 自行管理其生命周期；
+//   - sample（DDSLoan/DDSLoanResult.sample）：loan 从 writer 池借出，所有权经 write（发布）或 discard（归还）交回中间件。
+//
+// 线程安全：nodes_ 的增删查改统一以 mtx_ 串行化（见各 handler 的 lock_guard）；create_node 的并发约束详见其内部注释。
 #include "YomkRpcService.h"
 #include "FastDDSNode.h"
 
 namespace
 {
-    constexpr uint32_t kMaxDomainId = 232;
+    constexpr uint32_t kMaxDomainId = 232; // DDS 域号上限（超出视为非法，createNode 据此校验）
+    // loan 响应构造期间的异常安全守卫：sample 已从 writer 池借出，若响应包构造抛 bad_alloc，
+    // 由本守卫在栈展开时归还池，避免借出样本滞留致池耗尽；成功构造后由 caller 显式解除（见 loan()）。
     struct LoanGuard
     {
         FastDDSNode *node = nullptr;
@@ -27,6 +37,7 @@ YomkRpcService::YomkRpcService(YomkServer *server)
 
 YomkRpcService::~YomkRpcService() = default;
 
+// 注册各 URL 端点到对应 handler（YomkInstallFunc 将成员函数绑定为固定签名 YomkServiceFunc）。
 int YomkRpcService::init()
 {
     YomkInstallFunc("/version", YomkRpcService::getVersion);
@@ -40,12 +51,14 @@ int YomkRpcService::init()
     return 0;
 }
 
+// 返回扩展版本字符串（编译期 YOMKRPC_VERSION_STRING 拼接）。
 YomkResponse YomkRpcService::getVersion(YomkPkgPtr pkg)
 {
     std::string version = "YomkRpc v" YOMKRPC_VERSION_STRING;
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(String, version));
 }
 
+// 创建节点：校验 nodeName 非空、domainId∈[0,232]，去重后经 FastDDSNode::setDomainId 建 DDS 参与者并登记到 nodes_。
 YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSNode, p);
@@ -85,6 +98,7 @@ YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
     return YomkResponse(YomkResponse::eOk, "ok");
 }
 
+// 删除节点：从 nodes_ 移除即触发 FastDDSNode 析构（销毁其全部 DDS 实体）；节点不存在返回错误。
 YomkResponse YomkRpcService::deleteNode(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, String, p);
@@ -100,6 +114,7 @@ YomkResponse YomkRpcService::deleteNode(YomkPkgPtr pkg)
     return YomkResponse(YomkResponse::eOk, "ok");
 }
 
+// 注册发布主题：委托 FastDDSNode::registerPubTopic；type 所有权无条件移交（节点不存在的早退路径亦须在此 delete）。
 YomkResponse YomkRpcService::registerPubTopic(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSTopic, p);
@@ -123,6 +138,7 @@ YomkResponse YomkRpcService::registerPubTopic(YomkPkgPtr pkg)
     return YomkResponse(YomkResponse::eOk, "ok");
 }
 
+// 注册订阅主题：委托 FastDDSNode::registerSubTopic（透传 callback）；type 所有权无条件移交（早退路径亦须 delete）。
 YomkResponse YomkRpcService::registerSubTopic(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSSubRequest, p);
@@ -146,6 +162,7 @@ YomkResponse YomkRpcService::registerSubTopic(YomkPkgPtr pkg)
     return YomkResponse(YomkResponse::eOk, "ok");
 }
 
+// 发布：委托 FastDDSNode::publish 同步写入；data 为借用，本层不接管其生命周期。
 YomkResponse YomkRpcService::publish(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSPublish, p);
@@ -166,6 +183,7 @@ YomkResponse YomkRpcService::publish(YomkPkgPtr pkg)
     return YomkResponse(YomkResponse::eOk, "ok");
 }
 
+// 借出发送缓冲：委托 FastDDSNode::loan 从 writer 池借出 sample，成功则以 DDSLoanResult 回传（借出指针所有权转 caller）。
 YomkResponse YomkRpcService::loan(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSLoan, p);
@@ -192,6 +210,7 @@ YomkResponse YomkRpcService::loan(YomkPkgPtr pkg)
     return resp;
 }
 
+// 归还借出缓冲：委托 FastDDSNode::discardLoan 将未发布的 sample 交回 writer 池。
 YomkResponse YomkRpcService::discardLoan(YomkPkgPtr pkg)
 {
     YomkUnPackPkgResponse(pkg, DDSLoan, p);
