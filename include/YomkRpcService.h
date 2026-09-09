@@ -33,9 +33,9 @@ private:
     std::mutex mtx_;
 };
 
-// 订阅回调类型：收到消息时被调用，参数为交付的消息实例指针（const void*），消费方 static_cast 为自己的消息类型后读取。
-// 生命周期：指针仅回调期间有效，须同步消费、勿跨调用持有（return_loan 后失效）。
-// 底层交付路径（loan 零拷贝 vs 对齐反序列化）与指针对齐契约见 src/FastDDSNode.cpp；面向用户的类型选型/安全消费指引见 README。
+// 订阅回调：收到消息时被调用，参数为交付的消息实例指针（const void*），static_cast 为自己的消息类型后读取。
+// 指针仅回调期间有效，须同步消费、勿跨调用持有（return_loan 后失效）。
+// 不同类型的安全消费方式见 README。
 using DDSCallbackFunc = std::function<void(const void *)>;
 
 // create_node 请求负载。
@@ -81,7 +81,7 @@ struct DDSLoan
 // loan 成功响应负载。
 struct DDSLoanResult
 {
-    // /loan 借出的待发样本指针（FastDDS loan_sample 透传）；对齐契约见 src/FastDDSNode.cpp。
+    // /loan 借出的待发样本指针；填值后经 YOMKRPC_PUB_MSG 发布，write 后指针失效。
     void *sample;
 };
 

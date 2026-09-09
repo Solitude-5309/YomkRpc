@@ -27,13 +27,13 @@ class FastDDSNode
     struct PubInfo
     {
         eprosima::fastdds::dds::TypeSupport type;             // 已注册类型（TypeSupport 以 shared_ptr 持有 TopicDataType 所有权）
-        eprosima::fastdds::dds::DataWriter *writer = nullptr; // 由 publisher_ 创建，析构时 delete_datawriter
+        eprosima::fastdds::dds::DataWriter *writer = nullptr;
     };
     // 订阅主题登记项。
     struct SubInfo
     {
-        eprosima::fastdds::dds::TypeSupport type;                   // 已注册类型（持有 TopicDataType 所有权）
-        eprosima::fastdds::dds::DataReader *reader = nullptr;       // 由 subscriber_ 创建，析构时 delete_datareader
+        eprosima::fastdds::dds::TypeSupport type;                   // 已注册类型（同 PubInfo.type）
+        eprosima::fastdds::dds::DataReader *reader = nullptr;
         eprosima::fastdds::dds::TopicDataType *topicType = nullptr; // 指向 type 所辖同一对象，仅供 delete_data(data)，不单独持有所有权
         void *data = nullptr;                                       // 内部 create_data() 创建的对齐接收缓冲，析构时 delete_data() 释放
         std::unique_ptr<SubListener> listener;                      // reader 的数据监听器，持有 data 与用户回调
@@ -69,13 +69,13 @@ private:
                                                     const std::string &typeName);
 
 private:
-    eprosima::fastdds::dds::DomainParticipant *participant_ = nullptr; // 本节点的 DDS 参与者
-    eprosima::fastdds::dds::Publisher *publisher_ = nullptr;           // 发布者，拥有全部 writer
-    eprosima::fastdds::dds::Subscriber *subscriber_ = nullptr;         // 订阅者，拥有全部 reader
-    std::map<std::string, eprosima::fastdds::dds::Topic *> topics_;    // topicName → Topic，发布/订阅共享
-    std::map<std::string, PubInfo> pubTopics_;                         // topicName → 发布登记项
-    std::map<std::string, SubInfo> subTopics_;                         // topicName → 订阅登记项
-    std::mutex mtx_;                                                   // 串行化本节点全部公开方法
+    eprosima::fastdds::dds::DomainParticipant *participant_ = nullptr;
+    eprosima::fastdds::dds::Publisher *publisher_ = nullptr;        // 发布者，拥有全部 writer
+    eprosima::fastdds::dds::Subscriber *subscriber_ = nullptr;      // 订阅者，拥有全部 reader
+    std::map<std::string, eprosima::fastdds::dds::Topic *> topics_; // topicName → Topic，发布/订阅共享
+    std::map<std::string, PubInfo> pubTopics_;
+    std::map<std::string, SubInfo> subTopics_;
+    std::mutex mtx_; // 串行化本节点全部公开方法
 };
 
 #endif // FASTDDSNODE_H
