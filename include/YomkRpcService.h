@@ -14,7 +14,7 @@ using namespace yomk;
 class YomkRpcService : public YomkService
 {
 public:
-    YomkRpcService(YomkServer *server);
+    YomkRpcService(YomkServer* server);
     virtual ~YomkRpcService();
     virtual int init() override;
 
@@ -36,13 +36,13 @@ private:
 // 订阅回调：收到消息时被调用，参数为交付的消息实例指针（const void*），static_cast 为自己的消息类型后读取。
 // 指针仅回调期间有效，须同步消费、勿跨调用持有（return_loan 后失效）。
 // 不同类型的安全消费方式见 README。
-using DDSCallbackFunc = std::function<void(const void *)>;
+using DDSCallbackFunc = std::function<void(const void*)>;
 
 // create_node 请求负载。
 struct DDSNode
 {
-    uint32_t domainId;    // DDS 域号，合法范围 [0,232]
-    std::string nodeName; // 节点唯一名，不可为空
+    uint32_t domainId;     // DDS 域号，合法范围 [0,232]
+    std::string nodeName;  // 节点唯一名，不可为空
 };
 
 // register_pub_topic 请求负载。
@@ -50,7 +50,7 @@ struct DDSTopic
 {
     std::string nodeName;
     std::string topicName;
-    void *type; // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
+    void* type;  // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
 };
 
 // register_sub_topic 请求负载。
@@ -58,8 +58,8 @@ struct DDSSubRequest
 {
     std::string nodeName;
     std::string topicName;
-    void *type;               // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
-    DDSCallbackFunc callback; // 收到消息时回调
+    void* type;  // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
+    DDSCallbackFunc callback;  // 收到消息时回调
 };
 
 // publish 请求负载。
@@ -67,7 +67,7 @@ struct DDSPublish
 {
     std::string nodeName;
     std::string topicName;
-    void *data; // 借用（非所有权）：publish 同步写入，caller 保留并在调用后自行管理 data 生命周期
+    void* data;  // 借用（非所有权）：publish 同步写入，caller 保留并在调用后自行管理 data 生命周期
 };
 
 // loan / discard_loan 请求负载。
@@ -75,14 +75,14 @@ struct DDSLoan
 {
     std::string nodeName;
     std::string topicName;
-    void *sample; // loan 请求忽略；discard 请求携带待归还的借出指针
+    void* sample;  // loan 请求忽略；discard 请求携带待归还的借出指针
 };
 
 // loan 成功响应负载。
 struct DDSLoanResult
 {
     // /loan 借出的待发样本指针；填值后经 YOMKRPC_PUB_MSG 发布，write 后指针失效。
-    void *sample;
+    void* sample;
 };
 
 // clang-format off

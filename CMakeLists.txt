@@ -1,8 +1,16 @@
 cmake_minimum_required(VERSION 3.14)
-project(YomkRpc VERSION 0.1.19 LANGUAGES CXX)
+project(YomkRpc VERSION 0.1.20 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# compile_commands.json 导出到源码根目录，供 clangd 使用：
+# 构建目录可任意（仓库外亦可），避免用户因 build 目录位置不同而 IDE 解析失败
+add_custom_target(export_compile_commands ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_BINARY_DIR}/compile_commands.json
+        ${CMAKE_SOURCE_DIR}/compile_commands.json
+)
 
 find_package(YomkServer REQUIRED)
 message(STATUS "YomkServer version: ${YomkServer_VERSION}")  

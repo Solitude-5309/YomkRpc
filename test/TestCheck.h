@@ -24,13 +24,12 @@ inline int g_checkFailed = 0;
     } while (0)
 
 // 汇总并返回进程退出码：有失败返回 1，全通过返回 0
-inline int testReport(const std::string &suiteName)
+inline int testReport(const std::string& suiteName)
 {
     std::cout << "-------------------------------------------" << std::endl;
     if (g_checkFailed > 0)
     {
-        std::cout << suiteName << " FAILED: " << g_checkFailed << "/" << g_checkTotal
-                  << " checks failed." << std::endl;
+        std::cout << suiteName << " FAILED: " << g_checkFailed << "/" << g_checkTotal << " checks failed." << std::endl;
         return 1;
     }
     std::cout << suiteName << " all passed (" << g_checkTotal << " checks)." << std::endl;

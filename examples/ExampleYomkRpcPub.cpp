@@ -1,5 +1,6 @@
-#include <YomkServer/YomkAPI.h>
 #include <YomkRpc/YomkRpcAPI.h>
+#include <YomkServer/YomkAPI.h>
+
 #include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
 #include <chrono>
@@ -10,7 +11,7 @@ using namespace yomk;
 
 // 发布端示例：演示 创建节点 → 注册 MString 发布主题 → 每隔 1s 发布一条、共 60 条 → 销毁节点 的代码流程。
 // 跨进程运行方式（与 ExampleYomkRpcSub 配合、启动顺序）见 README。
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
@@ -43,7 +44,12 @@ int main(int argc, char *argv[])
         if (resp.m_status != YomkResponse::eOk)
         {
             failCount++;
-            YOMK_ERROR_TAG("ExampleYomkRpcPub", "[SEND] publish failed: ", msg.data(), " status=", static_cast<int>(resp.m_status));
+            YOMK_ERROR_TAG(
+                "ExampleYomkRpcPub",
+                "[SEND] publish failed: ",
+                msg.data(),
+                " status=",
+                static_cast<int>(resp.m_status));
         }
         else
         {

@@ -36,7 +36,9 @@
 // 在指定节点上注册订阅主题。
 // type：同 YOMKRPC_PUB_TOPIC，所有权移交服务端；callback：std::function<void(const void*)>，每次收到消息时被调用。
 #define YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback) \
-    YOMK_REQUEST("/YomkRpcService/register_sub_topic", YomkMkPtr(DDSSubRequest, DDSSubRequest{nodeName, topicName, type, callback}))
+    YOMK_REQUEST(                                              \
+        "/YomkRpcService/register_sub_topic",                  \
+        YomkMkPtr(DDSSubRequest, DDSSubRequest{nodeName, topicName, type, callback}))
 
 // 向指定节点的已注册发布主题发送一条消息。
 // data：消息实例指针（&msg），借用（非所有权）——publish 同步写入，caller 保留并在调用后自行管理其生命周期。
@@ -46,20 +48,19 @@
 // 借出发布缓冲（仅 plain 类型）：outPtr 为输出参数，成功时指向 writer 池内待发样本，直接在池内填值后
 // 经 YOMKRPC_PUB_MSG 发布免序列化；类型不支持 loan（非 plain）或池耗尽时 outPtr 保持 nullptr，回退普通发布路径。
 // 每次 write 后指针即被中间件收回，须重新借出。
-#define YOMKRPC_LOAN(nodeName, topicName, outPtr)                                              \
-    do                                                                                         \
-    {                                                                                          \
-        (outPtr) = nullptr;                                                                    \
-        auto __resp = YOMK_REQUEST("/YomkRpcService/loan",                                     \
-                                   YomkMkPtr(DDSLoan, DDSLoan{nodeName, topicName, nullptr})); \
-        if (__resp.m_status == YomkResponse::eOk && __resp.m_data)                             \
-        {                                                                                      \
-            YomkUnPackPkg(__resp.m_data, DDSLoanResult, __loan);                               \
-            if (__loan)                                                                        \
-            {                                                                                  \
-                (outPtr) = __loan->msg.sample;                                                 \
-            }                                                                                  \
-        }                                                                                      \
+#define YOMKRPC_LOAN(nodeName, topicName, outPtr)                                                                      \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        (outPtr) = nullptr;                                                                                            \
+        auto __resp = YOMK_REQUEST("/YomkRpcService/loan", YomkMkPtr(DDSLoan, DDSLoan{nodeName, topicName, nullptr})); \
+        if (__resp.m_status == YomkResponse::eOk && __resp.m_data)                                                     \
+        {                                                                                                              \
+            YomkUnPackPkg(__resp.m_data, DDSLoanResult, __loan);                                                       \
+            if (__loan)                                                                                                \
+            {                                                                                                          \
+                (outPtr) = __loan->msg.sample;                                                                         \
+            }                                                                                                          \
+        }                                                                                                              \
     } while (0)
 
 // 归还未发布的借出样本（sample 为 YOMKRPC_LOAN 借出的指针），避免 writer 池泄漏。返回 YomkResponse。
@@ -67,5 +68,4 @@
     YOMK_REQUEST("/YomkRpcService/discard_loan", YomkMkPtr(DDSLoan, DDSLoan{nodeName, topicName, sample}))
 
 // 删除节点并销毁其全部 DDS 实体；nodeName 不存在时返回错误。返回 YomkResponse。
-#define YOMKRPC_DEL_NODE(nodeName) \
-    YOMK_REQUEST("/YomkRpcService/delete_node", YomkMkPtr(String, nodeName))
+#define YOMKRPC_DEL_NODE(nodeName) YOMK_REQUEST("/YomkRpcService/delete_node", YomkMkPtr(String, nodeName))

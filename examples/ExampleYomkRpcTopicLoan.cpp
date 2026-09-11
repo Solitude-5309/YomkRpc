@@ -1,5 +1,6 @@
-#include <YomkServer/YomkAPI.h>
 #include <YomkRpc/YomkRpcAPI.h>
+#include <YomkServer/YomkAPI.h>
+
 #include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
 #include <atomic>
@@ -12,7 +13,7 @@ using namespace yomk;
 
 // loan 借出机制示例：演示 借出池内样本免序列化发布（仅 plain 类型可用，非 plain 回退普通发布）与 discard 归还，
 // 并对比 plain(MInt32) 与非 plain(MString) 的借出差异；订阅端回调透明接收（指针仅回调期间有效）。
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
@@ -35,9 +36,13 @@ int main(int argc, char *argv[])
         YOMKRPC_DEL_NODE("node0");
         return 1;
     }
-    void *loanPtr = nullptr;
+    void* loanPtr = nullptr;
     YOMKRPC_LOAN("node0", "fallback_topic", loanPtr);
-    YOMK_INFO_TAG("ExampleYomkRpcTopicLoan", "非 plain MString 借出指针=", (loanPtr != nullptr ? "非空" : "空"), "（预期为空，回退普通发布）");
+    YOMK_INFO_TAG(
+        "ExampleYomkRpcTopicLoan",
+        "非 plain MString 借出指针=",
+        (loanPtr != nullptr ? "非空" : "空"),
+        "（预期为空，回退普通发布）");
 
     // 3. plain 类型 loan 全链路演示：MInt32 为纯基础类型，FINAL 后 is_plain 为 true
     YOMK_INFO_TAG("ExampleYomkRpcTopicLoan", "=== loan publish (plain MInt32) ===");
@@ -53,10 +58,10 @@ int main(int argc, char *argv[])
     std::atomic<int> loanReceived{0};
     std::mutex loanMtx;
     int32_t lastLoanValue = -1;
-    auto onLoan = [&](const void *data)
+    auto onLoan = [&](const void* data)
     {
         // data 为交付的消息实例指针；MInt32 是 alignof≤4 的 plain 类型，可直接转型解引用（对齐契约见 src/FastDDSNode.cpp）
-        auto *msg = static_cast<const YomkRpc::MInt32 *>(data);
+        auto* msg = static_cast<const YomkRpc::MInt32*>(data);
         std::lock_guard<std::mutex> lock(loanMtx);
         lastLoanValue = msg->data();
         loanReceived++;
@@ -82,11 +87,16 @@ int main(int argc, char *argv[])
             YOMK_ERROR_TAG("ExampleYomkRpcTopicLoan", "[SEND] 借出失败: 第 ", i, " 次 loan 返回 nullptr");
             break;
         }
-        static_cast<YomkRpc::MInt32 *>(loanPtr)->data(100 + i);
+        static_cast<YomkRpc::MInt32*>(loanPtr)->data(100 + i);
         resp = YOMKRPC_PUB_MSG("node0", "loan_topic", loanPtr);
         if (resp.m_status != YomkResponse::eOk)
         {
-            YOMK_ERROR_TAG("ExampleYomkRpcTopicLoan", "[SEND] 借出发布失败: ", 100 + i, " status=", static_cast<int>(resp.m_status));
+            YOMK_ERROR_TAG(
+                "ExampleYomkRpcTopicLoan",
+                "[SEND] 借出发布失败: ",
+                100 + i,
+                " status=",
+                static_cast<int>(resp.m_status));
             break;
         }
         YOMK_INFO_TAG("ExampleYomkRpcTopicLoan", "[SEND] 借出发布: ", 100 + i);

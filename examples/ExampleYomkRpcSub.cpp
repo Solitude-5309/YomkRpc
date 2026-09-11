@@ -1,5 +1,6 @@
-#include <YomkServer/YomkAPI.h>
 #include <YomkRpc/YomkRpcAPI.h>
+#include <YomkServer/YomkAPI.h>
+
 #include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
 #include <atomic>
@@ -9,7 +10,7 @@
 
 using namespace yomk;
 
-static std::atomic<bool> g_stop{false}; // SIGINT（Ctrl+C）退出标志
+static std::atomic<bool> g_stop{false};  // SIGINT（Ctrl+C）退出标志
 
 static void onSignal(int)
 {
@@ -18,7 +19,7 @@ static void onSignal(int)
 
 // 订阅端示例：演示 创建节点 → 注册 MString 订阅主题（回调打印每条消息）→ 等待 Ctrl+C 退出 → 销毁节点 的代码流程。
 // 跨进程运行方式（与 ExampleYomkRpcPub 配合、启动顺序）见 README。
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
@@ -33,10 +34,10 @@ int main(int argc, char *argv[])
 
     // 2. 注册订阅主题：type 所有权移交服务端；收到消息时回调 onMessage
     std::atomic<int> received{0};
-    auto onMessage = [&](const void *data)
+    auto onMessage = [&](const void* data)
     {
         // data 为交付的消息实例指针（仅回调期间有效），转型为具体消息类型后读取
-        auto *msg = static_cast<const YomkRpc::MString *>(data);
+        auto* msg = static_cast<const YomkRpc::MString*>(data);
         received++;
         YOMK_INFO_TAG("ExampleYomkRpcSub", "[RECV] ", msg->data());
     };

@@ -10,62 +10,58 @@ using namespace eprosima::fastdds::dds;
 
 namespace
 {
-    // registerSubTopic 异常安全守卫：栈展开时释放已建资源，防止泄漏。
-    struct SubResGuard
+// registerSubTopic 异常安全守卫：栈展开时释放已建资源，防止泄漏。
+struct SubResGuard
+{
+    eprosima::fastdds::dds::Subscriber* subscriber = nullptr;
+    eprosima::fastdds::dds::DataReader* reader = nullptr;
+    eprosima::fastdds::dds::TopicDataType* type = nullptr;
+    void* data = nullptr;
+    ~SubResGuard()
     {
-        eprosima::fastdds::dds::Subscriber *subscriber = nullptr;
-        eprosima::fastdds::dds::DataReader *reader = nullptr;
-        eprosima::fastdds::dds::TopicDataType *type = nullptr;
-        void *data = nullptr;
-        ~SubResGuard()
+        if (subscriber != nullptr && reader != nullptr)
         {
-            if (subscriber != nullptr && reader != nullptr)
-            {
-                subscriber->delete_datareader(reader);
-            }
-            if (type != nullptr && data != nullptr)
-            {
-                type->delete_data(data);
-            }
+            subscriber->delete_datareader(reader);
         }
-    };
-} // namespace
+        if (type != nullptr && data != nullptr)
+        {
+            type->delete_data(data);
+        }
+    }
+};
+}  // namespace
 
 class FastDDSNode::SubListener : public DataReaderListener
 {
 public:
-    SubListener(void *data, DataCallback cb)
-        : data_(data), callback_(std::move(cb))
-    {
-    }
+    SubListener(void* data, DataCallback cb) : data_(data), callback_(std::move(cb)) {}
 
     // 数据交付两条路径，对齐性不同：
     //   loan 零拷贝（loanSupported_）：指针指向接收缓冲 CDR body = base+4，仅 4 字节对齐——
     //     plain 且 alignof>4 的类型（double/int64）须 memcpy 后再读，严格对齐 ARM 直接解引用触发 SIGBUS；
     //   legacy 反序列化（legacyTake）：指针按 alignof(T) 对齐，全类型全架构可直接解引用。
     // 类型选型与安全消费指引见 README。
-    void on_data_available(DataReader *reader) override
+    void on_data_available(DataReader* reader) override
     {
         if (loanSupported_)
         {
             while (true)
             {
-                LoanableSequence<void *> dataSeq; // max_len=0 → 请求借出
+                LoanableSequence<void*> dataSeq;  // max_len=0 → 请求借出
                 SampleInfoSeq infoSeq;
                 ReturnCode_t ret = reader->take(dataSeq, infoSeq, LENGTH_UNLIMITED);
                 if (ret == RETCODE_OK)
                 {
                     for (LoanableCollection::size_type i = 0; i < infoSeq.length(); ++i)
                     {
-                        if (infoSeq[i].valid_data &&
-                            infoSeq[i].instance_state == ALIVE_INSTANCE_STATE && callback_)
+                        if (infoSeq[i].valid_data && infoSeq[i].instance_state == ALIVE_INSTANCE_STATE && callback_)
                         {
                             // buffer()[i] 是 LoanableCollection 唯一元素访问方式（无 operator[]/span），FastDDS 官方惯用法；
                             // i 受 infoSeq.length() 界定 → 指针算术安全，抑制 clang-tidy 误报。
-                            callback_(dataSeq.buffer()[i]); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                            callback_(dataSeq.buffer()[i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
                         }
                     }
-                    reader->return_loan(dataSeq, infoSeq); // 复位为 max_len=0，可继续 take 剩余样本
+                    reader->return_loan(dataSeq, infoSeq);  // 复位为 max_len=0，可继续 take 剩余样本
                     continue;
                 }
                 if (ret != RETCODE_NO_DATA)
@@ -85,7 +81,7 @@ public:
 
 private:
     // 回退路径：反序列化进对齐的 data_ 后回调。
-    void legacyTake(DataReader *reader)
+    void legacyTake(DataReader* reader)
     {
         SampleInfo info;
         while (RETCODE_OK == reader->take_next_sample(data_, &info))
@@ -97,7 +93,7 @@ private:
         }
     }
 
-    void *data_;
+    void* data_;
     DataCallback callback_;
     bool loanSupported_ = true;
 };
@@ -113,7 +109,7 @@ FastDDSNode::~FastDDSNode()
 
     if (subscriber_ != nullptr)
     {
-        for (auto &kv : subTopics_)
+        for (auto& kv : subTopics_)
         {
             if (kv.second.reader != nullptr)
             {
@@ -129,7 +125,7 @@ FastDDSNode::~FastDDSNode()
 
     if (publisher_ != nullptr)
     {
-        for (auto &kv : pubTopics_)
+        for (auto& kv : pubTopics_)
         {
             if (kv.second.writer != nullptr)
             {
@@ -139,7 +135,7 @@ FastDDSNode::~FastDDSNode()
         participant_->delete_publisher(publisher_);
     }
 
-    for (auto &kv : topics_)
+    for (auto& kv : topics_)
     {
         participant_->delete_topic(kv.second);
     }
@@ -167,9 +163,7 @@ bool FastDDSNode::setDomainId(uint32_t domainId)
     return (publisher_ != nullptr) && (subscriber_ != nullptr);
 }
 
-Topic *FastDDSNode::getOrCreateTopic(
-    const std::string &topicName,
-    const std::string &typeName)
+Topic* FastDDSNode::getOrCreateTopic(const std::string& topicName, const std::string& typeName)
 {
     auto it = topics_.find(topicName);
     if (it != topics_.end())
@@ -182,7 +176,7 @@ Topic *FastDDSNode::getOrCreateTopic(
         return it->second;
     }
 
-    Topic *topic = participant_->create_topic(topicName, typeName, TOPIC_QOS_DEFAULT);
+    Topic* topic = participant_->create_topic(topicName, typeName, TOPIC_QOS_DEFAULT);
     if (topic != nullptr)
     {
         try
@@ -199,22 +193,22 @@ Topic *FastDDSNode::getOrCreateTopic(
 }
 
 // type 所有权无条件接管（失败路径亦 delete）；writer 创建失败回滚本次新建的主题。
-bool FastDDSNode::registerPubTopic(const std::string &topicName, void *type)
+bool FastDDSNode::registerPubTopic(const std::string& topicName, void* type)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ == nullptr || publisher_ == nullptr || type == nullptr || pubTopics_.count(topicName) > 0)
     {
-        delete static_cast<TopicDataType *>(type);
+        delete static_cast<TopicDataType*>(type);
         return false;
     }
 
-    TypeSupport ts(static_cast<TopicDataType *>(type));
+    TypeSupport ts(static_cast<TopicDataType*>(type));
     ts.register_type(participant_);
 
     PubInfo info;
     info.type = ts;
     bool topicExisted = topics_.count(topicName) > 0;
-    Topic *topic = getOrCreateTopic(topicName, ts.get_type_name());
+    Topic* topic = getOrCreateTopic(topicName, ts.get_type_name());
     if (topic == nullptr)
     {
         return false;
@@ -250,28 +244,27 @@ bool FastDDSNode::registerPubTopic(const std::string &topicName, void *type)
 }
 
 // type 所有权无条件接管（含失败/异常路径，经 SubResGuard 与主题回滚释放）。
-bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
-                                   DataCallback callback)
+bool FastDDSNode::registerSubTopic(const std::string& topicName, void* type, DataCallback callback)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ == nullptr || subscriber_ == nullptr || type == nullptr || subTopics_.count(topicName) > 0)
     {
-        delete static_cast<TopicDataType *>(type);
+        delete static_cast<TopicDataType*>(type);
         return false;
     }
 
-    auto *topicType = static_cast<TopicDataType *>(type);
+    auto* topicType = static_cast<TopicDataType*>(type);
     TypeSupport ts(topicType);
     ts.register_type(participant_);
 
     bool topicExisted = topics_.count(topicName) > 0;
-    Topic *topic = getOrCreateTopic(topicName, ts.get_type_name());
+    Topic* topic = getOrCreateTopic(topicName, ts.get_type_name());
     if (topic == nullptr)
     {
         return false;
     }
 
-    void *data = topicType->create_data();
+    void* data = topicType->create_data();
     if (data == nullptr)
     {
         if (!topicExisted)
@@ -323,7 +316,7 @@ bool FastDDSNode::registerSubTopic(const std::string &topicName, void *type,
     return true;
 }
 
-bool FastDDSNode::publish(const std::string &topicName, const void *data)
+bool FastDDSNode::publish(const std::string& topicName, const void* data)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = pubTopics_.find(topicName);
@@ -331,10 +324,10 @@ bool FastDDSNode::publish(const std::string &topicName, const void *data)
     {
         return false;
     }
-    return it->second.writer->write(const_cast<void *>(data)) == RETCODE_OK;
+    return it->second.writer->write(const_cast<void*>(data)) == RETCODE_OK;
 }
 
-bool FastDDSNode::loan(const std::string &topicName, void *&sample)
+bool FastDDSNode::loan(const std::string& topicName, void*& sample)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     sample = nullptr;
@@ -346,7 +339,7 @@ bool FastDDSNode::loan(const std::string &topicName, void *&sample)
     return it->second.writer->loan_sample(sample) == RETCODE_OK;
 }
 
-bool FastDDSNode::discardLoan(const std::string &topicName, void *&sample)
+bool FastDDSNode::discardLoan(const std::string& topicName, void*& sample)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = pubTopics_.find(topicName);

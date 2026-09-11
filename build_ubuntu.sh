@@ -2,6 +2,7 @@
 # 一键编译脚本（交互式）
 # 用法: source build_ubuntu.sh
 # 依次交互询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取环境变量 YOMK_PREFIX_PATH，可修改
+# 随后询问是否编译 test 测试树（仅供开发验证，不安装）：直接回车=跳过，输入 y=编译
 # 扩展库与 YomkServer 安装到一起（头文件由 YomkServer::YomkServer 的 INTERFACE include 统一提供）
 # 安装后将扩展 lib 注册到系统动态库搜索路径（复用 yomk.conf）并刷新 ldconfig 缓存，新开任意终端即可找到扩展 so
 
@@ -12,6 +13,8 @@ EXAMPLES_DIR="${SCRIPT_DIR}/examples"
 EXAMPLES_BUILD_DIR="${EXAMPLES_DIR}/build"
 MSG_DIR="${SCRIPT_DIR}/msg"
 MSG_BUILD_DIR="${MSG_DIR}/build"
+TEST_DIR="${SCRIPT_DIR}/test"
+TEST_BUILD_DIR="${TEST_DIR}/build"
 _ORIG_DIR="$(pwd)"
 
 # 路径规范化：展开 ~ 、相对路径补全
@@ -46,6 +49,14 @@ if [ -z "${INSTALL_DIR}" ]; then
     return 1
 fi
 echo "-- 扩展安装路径: ${INSTALL_DIR}"
+
+# 交互询问是否编译 test 测试树（独立 CMake 工程，仅供开发验证，不安装）：直接回车=不编译，输入 y=编译
+read -r -p "是否编译 test 测试？(直接回车=否，输入 y=是): " _INPUT_TEST
+BUILD_TEST=""
+if [[ "${_INPUT_TEST}" =~ ^[Yy]$ ]]; then
+    BUILD_TEST="1"
+fi
+unset _INPUT_TEST
 
 # 安装目录不可写时（如 /opt/yomk）使用 sudo 执行安装
 # 目录不存在时向上找最近的已存在父目录判断；已存在目录用真实写入探测（避免新建目录属 root 导致 -w 误判）
@@ -198,6 +209,32 @@ if [ $? -ne 0 ]; then
 fi
 
 cd "${_ORIG_DIR}"
+
+# 可选步骤: 编译 test 测试树（独立 CMake 工程，仅供开发验证，不安装）
+if [ -n "${BUILD_TEST}" ]; then
+    echo ""
+    echo "可选步骤: 编译 test 测试树"
+    mkdir -p "${TEST_BUILD_DIR}"
+    cd "${TEST_BUILD_DIR}" || return 1
+
+    cmake "${TEST_DIR}" -DCMAKE_PREFIX_PATH="${INSTALL_DIR};${YOMK_SERVER_PATH}"
+    if [ $? -ne 0 ]; then
+        echo "test cmake 配置失败"
+        cd "${_ORIG_DIR}"
+        return 1
+    fi
+
+    cmake --build . --config Release
+    if [ $? -ne 0 ]; then
+        echo "test 编译失败"
+        cd "${_ORIG_DIR}"
+        return 1
+    fi
+
+    cd "${_ORIG_DIR}"
+    unset TEST_DIR TEST_BUILD_DIR
+fi
+unset BUILD_TEST
 unset _ORIG_DIR
 
 # ========== 安装结果 ==========

@@ -1,5 +1,6 @@
-#include <YomkServer/YomkAPI.h>
 #include <YomkRpc/YomkRpcAPI.h>
+#include <YomkServer/YomkAPI.h>
+
 #include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
 #include <atomic>
@@ -12,7 +13,7 @@ using namespace yomk;
 
 // 单进程完整流程示例：同一节点内注册发布与订阅主题，发布 5 条 MString 并在订阅回调中接收打印，最后销毁节点。
 // 覆盖 create_node / register_pub_topic / register_sub_topic / publish / delete_node 全流程。
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
@@ -45,10 +46,10 @@ int main(int argc, char *argv[])
     std::atomic<int> received{0};
     std::mutex msgMtx;
     std::string lastMsg;
-    auto onMessage = [&](const void *data)
+    auto onMessage = [&](const void* data)
     {
         // data 为交付的消息实例指针（仅回调期间有效），转型为具体消息类型后读取
-        auto *msg = static_cast<const YomkRpc::MString *>(data);
+        auto* msg = static_cast<const YomkRpc::MString*>(data);
         std::lock_guard<std::mutex> lock(msgMtx);
         lastMsg = msg->data();
         received++;
@@ -72,7 +73,8 @@ int main(int argc, char *argv[])
         resp = YOMKRPC_PUB_MSG("node0", "rpc_demo_topic", &msg);
         if (resp.m_status != YomkResponse::eOk)
         {
-            YOMK_ERROR_TAG("ExampleYomkRpcTopic", "[SEND] 发布失败: ", msg.data(), " status=", static_cast<int>(resp.m_status));
+            YOMK_ERROR_TAG(
+                "ExampleYomkRpcTopic", "[SEND] 发布失败: ", msg.data(), " status=", static_cast<int>(resp.m_status));
             break;
         }
         YOMK_INFO_TAG("ExampleYomkRpcTopic", "[SEND] 发布消息: ", msg.data());
