@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.14)
-project(YomkRpc VERSION 0.1.20 LANGUAGES CXX)
+
+# 编译器预选模块：g++ 优先，回退 clang++（必须在 project() 之前 include）
+include(cmake/AbiInfo.cmake)
+
+project(YomkRpc VERSION 0.1.21 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ABI 环境指纹：采集/打印编译环境信息并生成 abi_report.txt（project() 之后才可调用）
+yomk_abi_report()
 # compile_commands.json 导出到源码根目录，供 clangd 使用：
 # 构建目录可任意（仓库外亦可），避免用户因 build 目录位置不同而 IDE 解析失败
 add_custom_target(export_compile_commands ALL
@@ -49,6 +56,10 @@ install(TARGETS ${PROJECT_NAME}
     LIBRARY DESTINATION ${LIB_INSTALL_DIR}
 )
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
+
+# ABI 环境指纹：随库安装，供下游比对编译环境
+install(FILES ${CMAKE_BINARY_DIR}/abi_report.txt
+        DESTINATION share/${PROJECT_NAME})
 
 # CMake export 导出配置
 include(CMakePackageConfigHelpers)
