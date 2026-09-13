@@ -56,6 +56,12 @@ YomkRpc/
 │   └── ExampleYomkRpcSub.cpp       # 订阅端示例程序（订阅 hello_world，Ctrl+C 退出）
 ├── cmake/
 │   └── ProjectConfig.cmake.in  # CMake 导出配置模板
+├── test/
+│   ├── CMakeLists.txt            # 测试树构建配置（独立 CMake 工程，只测自有源码）
+│   ├── run_tests.sh              # 一键全量测试运行器（含现场残留清理）
+│   ├── TestCheck.h               # 极简断言头（CHECK / testReport）
+│   ├── Harness/                  # 基座自检（TestHarnessSmoke）
+│   └── YomkRpcService/           # 服务层测试（8 个，含 2 个 stress）
 ├── CMakeLists.txt            # CMake 构建配置
 ├── build_ubuntu.sh           # 一键编译脚本（交互式）
 └── README.md
@@ -235,6 +241,63 @@ ExampleYomkRpcSub
 # 终端 2（再启动发布端）
 ExampleYomkRpcPub
 ```
+
+## 测试
+
+### 1. 编译测试
+
+测试树（`test/`）为独立 CMake 工程，只测 YomkRpc 自有源码（`src/`、`include/`），第三方（FastDDS / YomkServer / YomkRpcMsg）仅链接不插桩：
+
+```bash
+cmake -S test -B test/build -DCMAKE_PREFIX_PATH="${YOMK_PREFIX_PATH:-/opt/yomk}"
+cmake --build test/build -j
+```
+
+构建产物为 9 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`）：
+
+| 模块 | 测试目标 |
+|---|---|
+| Harness (1) | TestHarnessSmoke（零 DDS 基座自检） |
+| YomkRpcService (8) | TestYomkRpcServiceContract、TestYomkRpcNodeLifecycle、TestYomkRpcTopic、TestYomkRpcLoan、TestYomkRpcTypes、TestYomkRpcConcurrency、TestYomkRpcStressSerial、TestYomkRpcStressConcurrent |
+
+可选构建开关（CMake cache 变量）：
+
+- `-DYOMKRPC_TEST_SANITIZER=off/asan/tsan`：对自有源码插桩 sanitizer（默认 `off`；tsan 模式经 `setarch -R` 启动以兼容高 ASLR 内核）
+- `-DSTRESS_ITERS=5000 -DSTRESS_CYCLES=30`：压测规模（编译期旋钮，闭环规模 100000/50）
+
+### 2. 一键运行全量测试
+
+```bash
+./test/run_tests.sh                # 全量运行（含 2 个 stress，编译期规模 5000/30）
+./test/run_tests.sh --skip-stress  # 快速冒烟（跳过 2 个 stress）
+./test/run_tests.sh --full         # 闭环规模：自动重配+重编 stress（100000/50）后全量运行
+./test/run_tests.sh --bin DIR      # 指定测试可执行根目录（默认 test/build，自动定位子目录）
+./test/run_tests.sh --timeout N    # 单测试超时秒数（默认 300；stress 默认 1800）
+```
+
+运行器行为：
+
+- **失败即停**：任一测试退出码非 0（含超时被杀、正常退出但 /dev/shm 残留未自清理）立即终止，输出 `[FAIL]` 用例摘要与完整日志路径
+- **日志落盘**：`test/test_logs/<时间戳>/` 下每个测试一份日志 + `summary.log` 汇总
+- **现场清理**：每个测试在独立临时目录运行（隔离 CWD）；运行前清理 `/dev/shm` 中 FastDDS 上次遗留的共享内存（崩溃/超时时 SHM 段不会自清），每个测试结束后与全部结束后复查残留，发现即清理并判定失败
+- **超时保护**：每个测试由 `timeout` 包裹，防卡死
+
+### 3. 单独运行与压测规模
+
+每个测试为独立可执行（纯 `main()` + `CHECK` 断言，返回 0 = 全部通过，非 0 = 存在失败用例），可直接单独运行：
+
+```bash
+./test/build/YomkRpcService/TestYomkRpcTopic
+```
+
+2 个 stress 测试（Serial / Concurrent）的规模是**编译期**旋钮，由 CMake 变量 `STRESS_ITERS` / `STRESS_CYCLES` 注入（缺省 5000/30，闭环规模 100000/50）。需调整时重新配置并重编 stress 目标：
+
+```bash
+cmake -S test -B test/build -DSTRESS_ITERS=100000 -DSTRESS_CYCLES=50
+cmake --build test/build --target TestYomkRpcStressSerial TestYomkRpcStressConcurrent -j
+```
+
+`./test/run_tests.sh --full` 即自动执行上述重配+重编后再全量运行。
 
 ## 开发状态
 

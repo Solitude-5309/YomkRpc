@@ -80,6 +80,9 @@ build/
 install/
 log/
 
+# 测试运行脚本日志（test/run_tests.sh 生成）
+test_logs/
+
 # custom
 # 第三方库目录：取消忽略其中被通用规则(如 *.so、bin/)排除的文件。
 # 注意：否定目录本身不会递归包含内部文件，须用 `**` 显式重新包含；
