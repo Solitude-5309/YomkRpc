@@ -324,7 +324,7 @@ bool FastDDSNode::publish(const std::string& topicName, const void* data)
     {
         return false;
     }
-    return it->second.writer->write(const_cast<void*>(data)) == RETCODE_OK;
+    return it->second.writer->write(data) == RETCODE_OK;
 }
 
 bool FastDDSNode::loan(const std::string& topicName, void*& sample)

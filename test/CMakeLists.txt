@@ -12,7 +12,7 @@
 # 构建（在 test/ 下独立配置，勿污染主库构建）：
 #   cmake -S test -B test/build -DCMAKE_PREFIX_PATH="/opt/yomk"
 #   cmake --build test/build -j
-# sanitizer / coverage / 静态分析开关见下方 CACHE 选项。
+# sanitizer / coverage 开关见下方 CACHE 选项；静态检查用 test/run_static_checks.sh（独立运行器，读仓库根 .clang-tidy）。
 # =============================================================================
 cmake_minimum_required(VERSION 3.14)
 project(YomkRpcTest LANGUAGES CXX)
@@ -107,62 +107,6 @@ if(YOMKRPC_TEST_COVERAGE)
     target_compile_options(yomkrpc_under_test PUBLIC --coverage -g -O0)
     target_link_options(yomkrpc_under_test PUBLIC --coverage)
     message(STATUS "[test] YOMKRPC_TEST_COVERAGE=ON")
-endif()
-
-# ----------------------------- 静态分析开关 -----------------------------
-# 默认 OFF，不污染默认构建；扫描范围严格限定自有源码 ../src 与 ../include。
-set(YOMKRPC_TEST_STATIC_ANALYZE OFF CACHE BOOL "Enable clang-tidy/cppcheck static analysis targets")
-if(YOMKRPC_TEST_STATIC_ANALYZE)
-    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/static-analysis)
-
-    file(GLOB _YOMKRPC_SA_SRCS
-        ${YOMKRPC_ROOT}/src/*.cpp
-        ${YOMKRPC_ROOT}/src/*.h
-        ${YOMKRPC_ROOT}/include/*.h
-    )
-
-    find_program(CLANG_TIDY_EXE NAMES clang-tidy)
-    if(CLANG_TIDY_EXE)
-        set(_YOMKRPC_TIDY_CHECKS
-            "-checks=bugprone-*,-bugprone-macro-parentheses,-bugprone-easily-swappable-parameters,cppcoreguidelines-*,-cppcoreguidelines-owning-memory,-cppcoreguidelines-macro-usage,-cppcoreguidelines-pro-bounds-array-to-pointer-decay,-cppcoreguidelines-special-member-functions,-cppcoreguidelines-explicit-virtual-functions,-cppcoreguidelines-non-private-member-variables-in-classes,-cppcoreguidelines-avoid-non-const-global-variables,clang-analyzer-*,performance-*,-performance-unnecessary-value-param,portability-*"
-        )
-        add_custom_target(YomkRpc-clang-tidy
-            COMMAND ${CLANG_TIDY_EXE}
-                ${_YOMKRPC_TIDY_CHECKS}
-                -header-filter=${YOMKRPC_ROOT}
-                -p=${CMAKE_BINARY_DIR}
-                ${_YOMKRPC_SA_SRCS}
-                > ${CMAKE_BINARY_DIR}/static-analysis/clang-tidy.log 2>&1
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy on YomkRpc own sources (src/ + include/)"
-        )
-    else()
-        message(STATUS "[test] clang-tidy not found, YomkRpc-clang-tidy target disabled")
-    endif()
-
-    find_program(CPPCHECK_EXE NAMES cppcheck)
-    if(CPPCHECK_EXE)
-        add_custom_target(YomkRpc-cppcheck
-            COMMAND ${CPPCHECK_EXE}
-                --language=c++
-                --std=c++17
-                --enable=warning,style,performance,portability,information
-                --suppress=missingInclude
-                --suppress=noExplicitConstructor
-                --suppress=useStlAlgorithm
-                --inline-suppr
-                --template=gcc
-                --error-exitcode=0
-                -I ${YOMKRPC_ROOT}/include
-                -I ${YOMKRPC_ROOT}/src
-                ${_YOMKRPC_SA_SRCS}
-                > ${CMAKE_BINARY_DIR}/static-analysis/cppcheck.log 2>&1
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running cppcheck on YomkRpc own sources (src/ + include/)"
-        )
-    else()
-        message(STATUS "[test] cppcheck not found, YomkRpc-cppcheck target disabled")
-    endif()
 endif()
 
 # ----------------------------- 压力/soak 旋钮（MC7）-----------------------------

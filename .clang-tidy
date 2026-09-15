@@ -1,0 +1,39 @@
+# clang-tidy 基线配置（自 test/CMakeLists.txt 内联检查集迁移，配合 test/run_static_checks.sh 门禁化）
+# 检查集：bugprone/cppcoreguidelines/clang-analyzer/performance/portability，
+# 后续可与 YomkPluginSystem 对齐补 modernize-*/readability-* 维度
+#
+# 禁用项理由：
+# - bugprone-macro-parentheses：include/YomkRpcAPI.h 全量为 API 包装宏，宏体含参数展开为设计使然
+# - bugprone-easily-swappable-parameters：相邻同型参数为消息结构体字段风格约定
+# - cppcoreguidelines-owning-memory：所有权协议以注释约定（src/YomkRpcService.cpp 文件头），
+#   raw new/delete 为 FastDDS TopicDataType create_data/delete_data 惯用法，非 gsl owner 体系
+# - cppcoreguidelines-macro-usage：API 宏即产品形态（include/YomkRpcAPI.h）
+# - cppcoreguidelines-pro-bounds-array-to-pointer-decay：LoanableCollection buffer()[i] 为
+#   FastDDS 官方惯用法（src/FastDDSNode.cpp 已配 NOLINT 注明安全性依据）
+# - cppcoreguidelines-special-member-functions：FastDDSNode 以 mutex 成员天然不可拷贝，
+#   五规则声明为冗余样板
+# - cppcoreguidelines-explicit-virtual-functions：SubListener 覆写 FastDDS
+#   DataReaderListener 虚函数，virtual 关键字为框架惯例
+# - cppcoreguidelines-non-private-member-variables-in-classes：PubInfo/SubInfo 登记
+#   结构体为聚合数据，成员公开为设计使然
+# - cppcoreguidelines-avoid-non-const-global-variables：沿用原内联集历史决策
+# - performance-unnecessary-value-param：handler 的 YomkPkgPtr pkg 按值传参为框架
+#   YomkInstallFunc(std::bind) 签名约定（与 YomkPluginSystem 同因）
+---
+Checks: >
+  bugprone-*,
+  cppcoreguidelines-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  -bugprone-macro-parentheses,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-special-member-functions,
+  -cppcoreguidelines-explicit-virtual-functions,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -performance-unnecessary-value-param
+WarningsAsErrors: '*'
