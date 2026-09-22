@@ -44,10 +44,11 @@ link_directories(${YomkRpc_LIB_DIR})
 message(STATUS "[test] YomkRpc lib dir: ${YomkRpc_LIB_DIR}")
 
 # ----------------------------- 被测目标 -----------------------------
-# 仅编译自有源码两个 TU；第三方以 IMPORTED/已安装库形式链接，不参与插桩
+# 仅编译自有源码三个 TU；第三方以 IMPORTED/已安装库形式链接，不参与插桩
 add_library(yomkrpc_under_test STATIC
     ${YOMKRPC_ROOT}/src/YomkRpcService.cpp
     ${YOMKRPC_ROOT}/src/FastDDSNode.cpp
+    ${YOMKRPC_ROOT}/src/FastDDSDebugNode.cpp
 )
 target_include_directories(yomkrpc_under_test PUBLIC
     ${YOMKRPC_ROOT}/include
@@ -123,3 +124,5 @@ enable_testing()
 add_subdirectory(Harness)
 # MC1：服务层契约（DDS-free，验证 invoke 白盒入口与 8 端点输入校验/错误码）
 add_subdirectory(YomkRpcService)
+# FastDDSDebugNode：类型无关调试订阅节点（守卫用例 + 发现→动态类型→订阅→JSON 输出端到端）
+add_subdirectory(FastDDSDebugNode)
