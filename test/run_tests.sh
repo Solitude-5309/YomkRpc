@@ -4,7 +4,7 @@
 #
 # 用法:
 #   ./run_tests.sh               全量运行（含 2 个 stress，编译期规模 5000/30）
-#   ./run_tests.sh --skip-stress 仅运行 7 个非 stress 测试（快速冒烟）
+#   ./run_tests.sh --skip-stress 仅运行 10 个非 stress 测试（快速冒烟）
 #   ./run_tests.sh --full        以闭环规模(STRESS_ITERS=100000, STRESS_CYCLES=50)
 #                                 重配+重编 stress 目标后全量运行
 #   ./run_tests.sh --bin DIR     指定测试可执行根目录（默认 <test>/build，自动定位子目录）
@@ -20,7 +20,7 @@
 #   5. 全部结束后复查一次 /dev/shm 残留，发现则清理并计为失败
 #
 # 写磁盘操作审计（2026-09 逐文件核对）:
-#   - 9 个测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress 两例
+#   - 12 个测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress 两例
 #     只读 /proc/self/status 与 /proc/self/fd 的资源采样器（VmRSS/Threads/fd）。
 #   - 唯一运行时"磁盘"产物来自 FastDDS 3.6.1 默认 SHM 传输: /dev/shm 下
 #     fastdds_* / fastdds_port* / sem.fastdds_port*_mutex / fast_datasharing_*，
@@ -42,6 +42,9 @@ FULL_MODE=0
 ALL_TESTS=(
     TestHarnessSmoke
     TestYomkRpcServiceContract
+    TestYomkRpcDebugServiceContract
+    TestYomkRpcDebugServiceLifecycle
+    TestFastDDSDebugNode
     TestYomkRpcNodeLifecycle
     TestYomkRpcTopic
     TestYomkRpcLoan

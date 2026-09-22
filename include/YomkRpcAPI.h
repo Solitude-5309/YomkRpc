@@ -1,7 +1,9 @@
 #pragma once
+#include <YomkRpc/YomkRpcDebugService.h>
 #include <YomkRpc/YomkRpcService.h>
 
-// YomkRpc 对外 API 宏：每个宏封装一次对 /YomkRpcService/* 端点的 YOMK_REQUEST 调用。
+// YomkRpc 对外 API 宏：每个宏封装一次对 /YomkRpcService/*（RPC 服务）或 /YomkRpcDebugService/*
+// （调试服务）端点的 YOMK_REQUEST 调用。
 // 除 YOMKRPC_VERSION（无返回值）外，其余宏均返回 YomkResponse，调用后须判 m_status==YomkResponse::eOk。
 
 // 创建 DDS 节点（每节点对应一个独立的 DDS 参与者）。
@@ -69,3 +71,20 @@
 
 // 删除节点并销毁其全部 DDS 实体；nodeName 不存在时返回错误。返回 YomkResponse。
 #define YOMKRPC_DEL_NODE(nodeName) YOMK_REQUEST("/YomkRpcService/delete_node", YomkMkPtr(String, nodeName))
+
+// ===== YomkRpcDebugService 调试 API（端点定义见 YomkRpcDebugService.h） =====
+
+// 创建调试节点（单节点模型：一个进程至多一个，重复创建须先删除）。
+// domainId：DDS 域号，合法范围 [0,232]，仅同域节点的主题可被调试。返回 YomkResponse。
+#define YOMKRPC_DEBUG_NODE(domainId) \
+    YOMK_REQUEST("/YomkRpcDebugService/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{domainId}))
+
+// 登记调试主题：发现匹配的远端 DataWriter 后自动解析类型并建立订阅，消息 JSON 文本逐条投递
+// output（DDSDebugOutputFunc，用户自定义，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误。返回 YomkResponse。
+#define YOMKRPC_DEBUG_PRINT(topicName, output) \
+    YOMK_REQUEST(                              \
+        "/YomkRpcDebugService/topic_print",    \
+        YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, output}))
+
+// 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
+#define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)
