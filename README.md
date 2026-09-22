@@ -16,6 +16,9 @@
 | `YOMKRPC_PUB_MSG(nodeName, topicName, data)` | `/YomkRpcService/publish` | 发布数据 | 打包 `DDSPublish`；data 为数据实例指针（借用，同步写入，caller 保留所有权） |
 | `YOMKRPC_LOAN(nodeName, topicName, outPtr)` | `/YomkRpcService/loan` | 借出发送缓冲 | outPtr 为输出参数，成功指向 `DDSLoanResult{sample}` 池内样本、失败置 nullptr；仅 plain 类型支持 |
 | `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | `/YomkRpcService/discard_loan` | 归还未发布的借出缓冲 | 打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
+| `YOMKRPC_DEBUG_NODE(domainId)` | `/YomkRpcDebugService/create_node` | 创建调试节点 | 打包 `DDSDebugNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试 |
+| `YOMKRPC_DEBUG_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误 |
+| `YOMKRPC_DEBUG_QUIT()` | `/YomkRpcDebugService/delete_node` | 退出调试 | 无参宏（载荷 nullptr）；删除调试节点并销毁其全部 DDS 实体，未创建时返回错误 |
 
 > 除 `YOMKRPC_VERSION()` 外，其余宏均返回 `YomkResponse`，调用后须判 `m_status == YomkResponse::eOk`；失败时可读 `m_msg` 获取错误信息。
 
@@ -32,19 +35,39 @@
 source build_ubuntu.sh
 ```
 
-> 交互式编译：依次询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取 `$YOMK_PREFIX_PATH`，可修改。扩展库与 YomkServer 安装到一起（头文件由 `YomkServer::YomkServer` 的 INTERFACE include 统一提供）。脚本启动时先自动检测 gcc / swig / python3-dev / build-essential / cmake 等编译依赖，缺失时提示一键 `sudo apt install` 补齐；随后按三步流程编译安装主库（YomkRpc）、msg 类型库（YomkRpcMsg，含 SWIG Python 绑定）与示例程序，并将 `${安装路径}/lib` 幂等注册到 `/etc/ld.so.conf.d/yomk.conf`、执行 `sudo ldconfig` 刷新缓存（新开任意终端即可找到扩展 so）。示例程序随扩展安装到 `<安装路径>/bin`，安装后可在任意终端直接运行 `ExampleYomkRpcTopic`（发布订阅完整流程演示）与 `ExampleYomkRpcTopicLoan`（loan 借出机制演示）；`ExampleYomkRpcPub`/`ExampleYomkRpcSub` 为跨进程发布/订阅双进程示例，可另开两个终端分别运行。
+> **交互式编译说明**：
+>
+> - **路径询问**：启动后依次询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取 `$YOMK_PREFIX_PATH`，可直接回车确认或修改
+> - **依赖检测**：脚本启动时自动检测 gcc / swig / python3-dev / build-essential / cmake 等编译依赖，缺失时提示一键 `sudo apt install` 补齐
+> - **三步编译安装**：主库 YomkRpc → msg 类型库 YomkRpcMsg（含 SWIG Python 绑定）→ 示例程序
+> - **动态库注册**：安装完成后将 `${安装路径}/lib` 幂等注册到 `/etc/ld.so.conf.d/yomk.conf` 并执行 `sudo ldconfig` 刷新缓存，新开任意终端即可找到扩展 so（无需手动设置 `LD_LIBRARY_PATH`）
+> - **安装布局**：扩展库与 YomkServer 安装到一起，头文件路径由 `YomkServer::YomkServer` 的 INTERFACE include 统一提供
+
+安装后可直接运行的程序（位于 `<安装路径>/bin`）：
+
+| 程序 | 用途 |
+|---|---|
+| `ExampleYomkRpcTopic` | 发布订阅完整流程演示 |
+| `ExampleYomkRpcTopicLoan` | loan 借出机制演示 |
+| `ExampleYomkRpcPub` | 跨进程发布端示例（每 1s 发布 hello world，持续 60 秒） |
+| `ExampleYomkRpcSub` | 跨进程订阅端示例（订阅 hello_world，Ctrl+C 退出） |
+| `yomkrpc` | 命令行工具，观察任意 DDS 主题（`yomkrpc topic print [-d N] <主题名>`，详见使用示例） |
 
 ## 工程结构
 
 ```
 YomkRpc/
 ├── include/
-│   ├── YomkRpcService.h    # 服务头文件（消息包定义 + 类声明）
-│   └── YomkRpcAPI.h        # API 宏封装（简化调用）
+│   ├── YomkRpcService.h        # RPC 服务头文件（消息包定义 + 类声明）
+│   ├── YomkRpcDebugService.h   # 调试服务头文件（消息包定义 + 类声明）
+│   └── YomkRpcAPI.h            # API 宏封装（简化调用）
 ├── src/
-│   ├── YomkRpcService.cpp  # 服务实现
-│   ├── FastDDSNode.h       # DDS 节点头文件
-│   └── FastDDSNode.cpp     # DDS 节点实现
+│   ├── YomkRpcService.cpp      # RPC 服务实现
+│   ├── YomkRpcDebugService.cpp # 调试服务实现
+│   ├── FastDDSNode.h           # DDS 节点头文件（发布订阅）
+│   ├── FastDDSNode.cpp         # DDS 节点实现
+│   ├── FastDDSDebugNode.h      # 类型无关调试订阅节点头文件
+│   └── FastDDSDebugNode.cpp    # 调试订阅节点实现（发现→动态类型→订阅→JSON 输出）
 ├── msg/
 │   ├── YomkRpcMsg.idl      # IDL 消息定义（如 MString）
 │   └── ...                 # fastddsgen 生成代码（独立类型库，含 SWIG Python 绑定）
@@ -53,7 +76,8 @@ YomkRpc/
 │   ├── ExampleYomkRpcTopic.cpp     # 发布订阅完整流程演示
 │   ├── ExampleYomkRpcTopicLoan.cpp # loan 借出机制演示
 │   ├── ExampleYomkRpcPub.cpp       # 发布端示例程序（每 1s 发布 hello world，持续 60 秒）
-│   └── ExampleYomkRpcSub.cpp       # 订阅端示例程序（订阅 hello_world，Ctrl+C 退出）
+│   ├── ExampleYomkRpcSub.cpp       # 订阅端示例程序（订阅 hello_world，Ctrl+C 退出）
+│   └── yomkrpc.cpp                 # yomkrpc 命令行工具（topic print 观察任意主题）
 ├── cmake/
 │   └── ProjectConfig.cmake.in  # CMake 导出配置模板
 ├── test/
@@ -61,7 +85,9 @@ YomkRpc/
 │   ├── run_tests.sh              # 一键全量测试运行器（含现场残留清理）
 │   ├── TestCheck.h               # 极简断言头（CHECK / testReport）
 │   ├── Harness/                  # 基座自检（TestHarnessSmoke）
-│   └── YomkRpcService/           # 服务层测试（8 个，含 2 个 stress）
+│   ├── YomkRpcService/           # RPC 服务层测试（8 个，含 2 个 stress）
+│   ├── FastDDSDebugNode/         # 调试节点层测试（守卫用例 + 发现→订阅→JSON 输出端到端）
+│   └── YomkRpcDebugService/      # 调试服务层测试（契约 DDS-free + 真实 DDS 生命周期）
 ├── CMakeLists.txt            # CMake 构建配置
 ├── build_ubuntu.sh           # 一键编译脚本（交互式）
 └── README.md
@@ -242,6 +268,77 @@ ExampleYomkRpcSub
 ExampleYomkRpcPub
 ```
 
+### 调试主题观察（yomkrpc topic print）
+
+`yomkrpc` 命令行工具订阅任意 DDS 主题（类型无关，无需 IDL 生成代码），经 FastDDS 发现机制自动解析远端类型建立订阅，消息 JSON 文本逐条直出控制台：
+
+```bash
+yomkrpc topic print hello_world        # 默认域 0
+yomkrpc topic print -d 5 sensor_data   # 指定 DDS 域号
+```
+
+与发布端配合观察（另开两个终端）：
+
+```bash
+# 终端 1（先启动观察端）
+yomkrpc topic print hello_world
+# 终端 2（再启动发布端）
+ExampleYomkRpcPub
+```
+
+输出示例（每条消息一行状态头 + 一行 JSON 体）：
+
+```
+[17:18:34.868398] topic=hello_world type=YomkRpc::MString seq=1
+{"data":"hello world 0"}
+```
+
+工具经 `YomkRpcDebugService` 调试服务实现，等价的用户代码（`YOMKRPC_DEBUG_*` 宏定义于 `YomkRpcAPI.h`，链接 `YomkRpc::YomkRpc YomkServer::YomkServer`）：
+
+```cpp
+#include <YomkServer/YomkAPI.h>
+#include <YomkRpc/YomkRpcAPI.h>
+
+#include <iostream>
+#include <string>
+
+using namespace yomk;
+
+int main(int argc, char *argv[])
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：一个进程至多一个，重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(0);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("DebugExample", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 登记调试主题：发现匹配远端 DataWriter 后自动建订阅，
+    //    消息文本逐条投递 output 回调（输出权在调用方，服务层不打印）
+    resp = YOMKRPC_DEBUG_PRINT("hello_world", [](const std::string &text)
+        { std::cout << text << std::endl; });
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("DebugExample", "register debug topic failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+
+    // 3. 业务逻辑后退出前显式清理（规避 FastDDS 静态析构期段错误）
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("DebugExample", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+```
+
 ## 测试
 
 ### 1. 编译测试
@@ -253,12 +350,14 @@ cmake -S test -B test/build -DCMAKE_PREFIX_PATH="${YOMK_PREFIX_PATH:-/opt/yomk}"
 cmake --build test/build -j
 ```
 
-构建产物为 9 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`）：
+构建产物为 12 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`、`test/build/FastDDSDebugNode/`、`test/build/YomkRpcDebugService/`）：
 
 | 模块 | 测试目标 |
 |---|---|
 | Harness (1) | TestHarnessSmoke（零 DDS 基座自检） |
 | YomkRpcService (8) | TestYomkRpcServiceContract、TestYomkRpcNodeLifecycle、TestYomkRpcTopic、TestYomkRpcLoan、TestYomkRpcTypes、TestYomkRpcConcurrency、TestYomkRpcStressSerial、TestYomkRpcStressConcurrent |
+| FastDDSDebugNode (1) | TestFastDDSDebugNode（节点层守卫 + 发现→动态类型→订阅→JSON 输出端到端） |
+| YomkRpcDebugService (2) | TestYomkRpcDebugServiceContract（DDS-free 契约）、TestYomkRpcDebugServiceLifecycle（真实 DDS 生命周期） |
 
 可选构建开关（CMake cache 变量）：
 
@@ -307,6 +406,7 @@ cmake --build test/build --target TestYomkRpcStressSerial TestYomkRpcStressConcu
 - ✅ YomkRpcService DDS 接口（节点管理/主题注册/发布）
 - ✅ Loan 借出机制（订阅端透明自动切换，发布端 loan/discard 接口）
 - ✅ 跨进程通信验证（ExampleYomkRpcPub/ExampleYomkRpcSub 双进程示例）
+- ✅ 类型无关调试（FastDDSDebugNode + YomkRpcDebugService + yomkrpc 命令行工具）
 - 🚧 更多数据类型支持
 
 ## License

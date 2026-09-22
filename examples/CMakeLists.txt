@@ -34,6 +34,11 @@ target_link_libraries(ExampleYomkRpcPub PRIVATE YomkRpc::YomkRpc YomkServer::Yom
 add_executable(ExampleYomkRpcSub ExampleYomkRpcSub.cpp)
 target_link_libraries(ExampleYomkRpcSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
+# 命令行工具：yomkrpc topic print [-d N] <主题名>（观察任意 DDS 主题，控制台直出消息内容；
+# 类型无关，无需 YomkRpcMsg）
+add_executable(yomkrpc yomkrpc.cpp)
+target_link_libraries(yomkrpc PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer)
+
 # 示例程序随扩展一并安装到 <安装路径>/bin（运行方式见 README）
 # 示例程序可能有多个，此处显式列出全部示例目标名（不能用 ${PROJECT_NAME} 占位）
 install(TARGETS
@@ -41,5 +46,6 @@ install(TARGETS
     ExampleYomkRpcTopicLoan
     ExampleYomkRpcPub
     ExampleYomkRpcSub
+    yomkrpc
     RUNTIME DESTINATION bin
 )
