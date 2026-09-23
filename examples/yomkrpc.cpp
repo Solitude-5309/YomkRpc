@@ -12,12 +12,17 @@
  *   yomkrpc topic print -d 5 sensor_data
  *   yomkrpc topic list
  *
- * 实现：经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
+ * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
  * topic list：创建节点后短暂等待 EDP 发现重放（异步，约 2s），一次性查询并逐行打印
  * "topicName [typeName]"。两种子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，
  * 规避 FastDDS 静态析构期段错误（同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
+ *
+ * 域 id 两种指定方式（优先级 -d > 环境变量 > 0）：
+ *   1. 环境变量 YOMKRPC_DDS_DOMAIN_ID：默认从此读取；启动时无则创建并设默认值 0，
+ *      同时幂等写入 ~/.bashrc（仅当其中无该变量时），使新开任意终端可查看并继承；
+ *   2. -d N：临时指定，直接使用该值（不读、也绝不写环境变量与 .bashrc）。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>
@@ -27,7 +32,8 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
-#include <cstdlib> // strtoul
+#include <cstdlib> // strtoul, getenv, setenv
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -50,13 +56,52 @@ static void printUsage(std::ostream &os)
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
-          "  -d N, --domain N    DDS 域号（0-232，默认 0，须与发布端同域）\n"
+          "  -d N, --domain N    DDS 域号（0-232），临时指定，不写环境变量；未指定时读\n"
+          "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
           "  yomkrpc topic print hello_world\n"
           "  yomkrpc topic print -d 5 sensor_data\n"
-          "  yomkrpc topic list\n";
+          "  yomkrpc topic list\n"
+          "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
+          "  yomkrpc topic list                # 此后免 -d，等价于 -d 5\n";
+}
+
+// 域 id 环境变量：默认路径（启动时无则创建并设默认值 0）；-d 显式指定时不读写它
+static constexpr char kDomainEnv[] = "YOMKRPC_DDS_DOMAIN_ID";
+
+// 将默认域 id 持久化到 ~/.bashrc（幂等）：仅当 .bashrc 中不存在该变量时追加一次 export 行，
+// 使新开任意终端可直接 echo 查看并自动继承；-d 指定不触发写入（临时语义）。
+// 失败（无 HOME/无写权限）仅告警不致命——进程内 setenv 兜底已保证本进程行为正确。
+static void persistDefaultDomainEnv()
+{
+    const char *home = std::getenv("HOME");
+    if (home == nullptr)
+    {
+        return;
+    }
+    const std::string bashrc = std::string(home) + "/.bashrc";
+    std::ifstream in(bashrc);
+    if (in)
+    {
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (line.find(kDomainEnv) != std::string::npos)
+            {
+                return; // .bashrc 已含该变量（用户 export 或此前写入），不重复追加
+            }
+        }
+    }
+    std::ofstream out(bashrc, std::ios::app);
+    if (!out)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "persist default domain id failed: cannot append ", bashrc);
+        return;
+    }
+    out << "\n# added by yomkrpc: default DDS domain id (priority: -d > env > 0)\n"
+        << "export " << kDomainEnv << "=0\n";
 }
 
 // 解析域号：十进制、无尾随非数字字符、合法范围 [0,232]
@@ -174,8 +219,17 @@ static int runList(uint32_t domainId)
 
 int main(int argc, char *argv[])
 {
-    // ---- 参数解析：-h/--help 即刻退出；-d/--domain 可选；位置参数 topic <print|list> ... ----
+    // ---- 环境变量：无 YOMKRPC_DDS_DOMAIN_ID 则创建并设默认值 0（进程内生效），并幂等
+    // 持久化到 ~/.bashrc 使新开终端可见可继承；用户已 export 或 -d 时不写 ----
+    if (std::getenv(kDomainEnv) == nullptr)
+    {
+        ::setenv(kDomainEnv, "0", 1);
+        persistDefaultDomainEnv();
+    }
+
+    // ---- 参数解析：-h/--help 即刻退出；-d/--domain 可选（临时指定，不写环境变量）；位置参数 ----
     uint32_t domainId = 0;
+    bool hasDomainId = false;
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -198,9 +252,22 @@ int main(int argc, char *argv[])
                 std::cerr << "yomkrpc: 非法域号 \"" << argv[i] << "\"（合法范围 [0,232]）\n";
                 return 2;
             }
+            hasDomainId = true;
             continue;
         }
         pos.push_back(arg);
+    }
+
+    // ---- 域 id 解析：-d 显式指定优先（临时生效，不写环境变量）；否则读环境变量（默认 0） ----
+    if (!hasDomainId)
+    {
+        const char *envVal = std::getenv(kDomainEnv);
+        if (!parseDomain(envVal, domainId))
+        {
+            std::cerr << "yomkrpc: 环境变量 " << kDomainEnv << " 非法 \"" << envVal
+                      << "\"（合法范围 [0,232]）\n";
+            return 2;
+        }
     }
 
     // ---- 子命令分派：topic print <topic-name> / topic list ----

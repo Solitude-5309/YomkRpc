@@ -278,6 +278,8 @@ yomkrpc topic print hello_world        # 默认域 0
 yomkrpc topic print -d 5 sensor_data   # 指定 DDS 域号
 ```
 
+域 id 两种指定方式（优先级 `-d` > 环境变量 > 0）：`-d N` 为临时指定，直接使用该值（不读、也不写环境变量）；环境变量 `YOMKRPC_DDS_DOMAIN_ID` 为默认路径，yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行。
+
 与发布端配合观察（另开两个终端）：
 
 ```bash
@@ -348,6 +350,8 @@ int main(int argc, char *argv[])
 yomkrpc topic list          # 默认域 0
 yomkrpc topic list -d 5     # 指定 DDS 域号
 ```
+
+域 id 指定方式与 `topic print` 相同：`-d N` 临时指定（显式覆盖，不写环境变量）；或设置环境变量 `YOMKRPC_DDS_DOMAIN_ID`（启动时无则自动创建默认 0，可持久化到 .bashrc）后免 `-d` 运行。
 
 与发布端配合观察（建议先启动发布端——调试节点入域后工具等待约 2s 收集域内发现信息，再一次性查询输出）：
 
