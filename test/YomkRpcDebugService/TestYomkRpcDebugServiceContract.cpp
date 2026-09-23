@@ -8,10 +8,10 @@
  * 覆盖：
  *   T1 funcInfos 内省 5 端点齐全 + 未知端点 eNo；
  *   T2 /version 正常路径（eOk + 版本串契约 + 忽略 pkg）；
- *   T3 /create_node、/topic_print 解包双守卫（nullptr / 异类包 / 改名伪造）；
- *   T4 /delete_node 与 /list_topics 特殊契约：单节点模型无参载荷，handler (void)pkg 不走
- *      解包守卫，未建节点时无论何种载荷均 eNo "debug node not created"（/delete_node 与
- *      YomkRpcService delete_node 的 String 包解包守卫形态不同，属设计差异点）；
+ *   T3 /create_node、/topic_print、/list_topics 解包双守卫（nullptr / 异类包 / 改名伪造）；
+ *   T4 /delete_node 特殊契约：单节点模型无参载荷，handler (void)pkg 不走解包守卫，未建节点时
+ *      无论何种载荷均 eNo "debug node not created"（与 YomkRpcService delete_node 的 String
+ *      包解包守卫形态不同，属设计差异点）；
  *   T5 /create_node domainId 越界前置拦截（233 / UINT32_MAX → eNo，不触 DDS）；
  *   T6 /topic_print 未建节点早退（node_ 空检查先于 output 空检查）。
  * DDS-free 保证：T5 的越界校验在锁外返回；T4/T6 的 node_ 空检查在触达节点层前返回；
@@ -73,9 +73,10 @@ namespace
 
         checkGuards("/create_node", "DDSDebugNode", YomkMkPtr(String, "wrong"));
         checkGuards("/topic_print", "DDSDebugTopic", YomkMkPtr(DDSDebugNode, DDSDebugNode{0}));
+        checkGuards("/list_topics", "DDSDebugList", YomkMkPtr(String, "wrong"));
     }
 
-    // T4：/delete_node 与 /list_topics 特殊契约——单节点模型无参载荷，(void)pkg 不走解包守卫
+    // T4：/delete_node 特殊契约——单节点模型无参载荷，(void)pkg 不走解包守卫
     void testNoPayloadEndpoints(YomkRpcDebugService *svc)
     {
         // 未建节点：无论载荷形态，均在 node_ 空检查处早退（不触 DDS）
@@ -97,7 +98,6 @@ namespace
                   std::string(ep) + " : 无载荷 → eNo debug node not created（对齐无参宏形态）");
         };
         checkNoPayload("/delete_node");
-        checkNoPayload("/list_topics");
     }
 
     // T5：/create_node domainId 越界前置拦截（锁外校验，不触 DDS）

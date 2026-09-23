@@ -1,5 +1,6 @@
 #include "FastDDSDebugNode.h"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -21,6 +22,7 @@
 #include <fastdds/dds/xtypes/dynamic_types/DynamicTypeBuilderFactory.hpp>
 #include <fastdds/dds/xtypes/type_representation/TypeObject.hpp>
 #include <fastdds/dds/xtypes/utils.hpp>
+#include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
 #include <fastdds/rtps/writer/WriterDiscoveryStatus.hpp>
 
 using namespace eprosima::fastdds::dds;
@@ -64,6 +66,21 @@ public:
         if (reason == rtps::WriterDiscoveryStatus::DISCOVERED_WRITER)
         {
             node_.onWriterDiscovered(std::string(info.topic_name.to_string()), info);
+        }
+    }
+
+    // 仅处理 DISCOVERED_READER（QoS 变更/移除忽略）；回调内仅缓存发现信息，
+    // 供 listTopics 列出仅有订阅者的主题（不参与订阅建立链路）。
+    void on_data_reader_discovery(
+            DomainParticipant* /*participant*/,
+            rtps::ReaderDiscoveryStatus reason,
+            const SubscriptionBuiltinTopicData& info,
+            bool& should_be_ignored) override
+    {
+        should_be_ignored = false;
+        if (reason == rtps::ReaderDiscoveryStatus::DISCOVERED_READER)
+        {
+            node_.onReaderDiscovered(std::string(info.topic_name.to_string()), info);
         }
     }
 
@@ -272,27 +289,80 @@ void FastDDSDebugNode::setOutputSink(OutputSink sink)
     sink_ = std::move(sink);
 }
 
-bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string>>& topics)
+bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string>>& topics,
+        uint32_t stableRounds, uint32_t intervalMs)
 {
-    std::lock_guard<std::mutex> lock(mtx_);
-    if (participant_ == nullptr)
+    if (stableRounds == 0)
     {
-        return false;
+        stableRounds = kDefaultStableRounds;
     }
-    // seen_ 为 std::map，遍历天然按主题名有序
-    for (const auto& kv : seen_)
+    if (intervalMs == 0)
     {
-        topics.emplace_back(kv.first, kv.second.type_name.to_string());
+        intervalMs = kDefaultIntervalMs;
     }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    return waitForTopicsStable(topics, stableRounds, intervalMs);
+}
+
+bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    // 快照：锁内合并拷贝 seen_（writer）与 seenReaders_（reader——仅有订阅者的主题同样
+    // 列出），writer 优先、reader 补缺，末尾按主题名排序（两 map 各自有序但合并后交错）。
+    // 只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
+    auto snapshot = [this]()
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        std::vector<std::pair<std::string, std::string>> items;
+        items.reserve(seen_.size() + seenReaders_.size());
+        for (const auto& kv : seen_)
+        {
+            items.emplace_back(kv.first, kv.second.type_name.to_string());
+        }
+        for (const auto& kv : seenReaders_)
+        {
+            if (seen_.count(kv.first) == 0)
+            {
+                items.emplace_back(kv.first, kv.second.type_name.to_string());
+            }
+        }
+        std::sort(items.begin(), items.end());
+        return items;
+    };
+    std::vector<std::pair<std::string, std::string>> prev = snapshot();
+    uint32_t unchanged = 1;
+    while (unchanged < stableRounds)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        std::vector<std::pair<std::string, std::string>> cur = snapshot();
+        if (cur == prev)
+        {
+            ++unchanged;
+        }
+        else
+        {
+            prev = std::move(cur);  // 又有新发现，重置不变计数
+            unchanged = 1;
+        }
+    }
+    topics = std::move(prev);
     return true;
 }
 
 // 发现线程回调入口：首见 writer 记入缓存并唤醒工作线程；回调内不建订阅。
+// 仅拿 seenMtx_ 叶子锁：本回调在 Fast DDS EDP 锁临界区内被调用，拿 mtx_ 会与工作线程
+// （持 mtx_ 建 reader 内部等 PDP/EDP 锁）锁序倒置死锁（详见 seenMtx_ 成员注释）。
 bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
         const rtps::PublicationBuiltinTopicData& info)
 {
     {
-        std::lock_guard<std::mutex> lock(mtx_);
+        std::lock_guard<std::mutex> lock(seenMtx_);
         if (!seen_.emplace(topicName, info).second)
         {
             return false;
@@ -300,6 +370,16 @@ bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
     }
     cv_.notify_all();
     return true;
+}
+
+// 发现线程回调入口：首见 reader 记入 seenReaders_ 缓存；不唤醒工作线程（订阅建立仅由
+// writer 驱动，reader 缓存仅供 listTopics 列出仅有订阅者的主题）。仅拿 seenMtx_ 叶子锁
+//（本回调在 Fast DDS PDP 大锁临界区内被调用，锁序倒置防护同上）。
+bool FastDDSDebugNode::onReaderDiscovered(const std::string& topicName,
+        const rtps::SubscriptionBuiltinTopicData& info)
+{
+    std::lock_guard<std::mutex> lock(seenMtx_);
+    return seenReaders_.emplace(topicName, info).second;
 }
 
 // 官方文档 15.16 "Remote type discovery and endpoint matching" 接收端形态：
@@ -388,7 +468,7 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
 }
 
 // 订阅建立工作线程：轮询 pending_ × seen_ 交集建订阅；cv_ 有界超时兼顾"新发现/新登记即时响应"
-// 与"TypeObject 稍后就绪的重试"。
+// 与"TypeObject 稍后就绪的重试"。查交集时按锁序 mtx_ → seenMtx_ 嵌套。
 void FastDDSDebugNode::workerLoop()
 {
     constexpr auto kWorkerInterval = std::chrono::milliseconds(100);  // 空闲等待/重试节奏
@@ -397,14 +477,17 @@ void FastDDSDebugNode::workerLoop()
     {
         std::string todo;
         rtps::PublicationBuiltinTopicData info;
-        for (const auto& name : pending_)
         {
-            auto it = seen_.find(name);
-            if (it != seen_.end())
+            std::lock_guard<std::mutex> seenLock(seenMtx_);
+            for (const auto& name : pending_)
             {
-                todo = name;
-                info = it->second;  // 快照，解锁后使用
-                break;
+                auto it = seen_.find(name);
+                if (it != seen_.end())
+                {
+                    todo = name;
+                    info = it->second;  // 快照，解锁后使用
+                    break;
+                }
             }
         }
         if (!todo.empty())

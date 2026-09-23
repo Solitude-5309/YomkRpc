@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <fastdds/dds/builtin/topic/PublicationBuiltinTopicData.hpp>
+#include <fastdds/dds/builtin/topic/SubscriptionBuiltinTopicData.hpp>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/subscriber/DataReader.hpp>
 #include <fastdds/dds/subscriber/Subscriber.hpp>
@@ -27,7 +28,7 @@
 // 析构按停工作线程 → DataReader → Topic → Subscriber → Participant 顺序清理。
 class FastDDSDebugNode
 {
-    class DebugParticipantListener;  // 参与者监听器：on_data_writer_discovery → onWriterDiscovered
+    class DebugParticipantListener;  // 参与者监听器：writer/reader 发现回调 → onWriterDiscovered/onReaderDiscovered
     class DebugSubListener;          // 数据监听器：take 动态样本 → json_serialize 结构化输出
     // 订阅登记项。
     struct DebugSub
@@ -49,6 +50,10 @@ public:
 public:
     // 输出回调：每条消息交付一次格式化文本；未设置时默认输出到 stdout
     using OutputSink = std::function<void(const std::string&)>;
+    // listTopics 收敛查询默认参数：连续 5 次快照集合不变即收敛（2 次窗口过短，域内 participant
+    // 间歇上线时易误判提前收敛漏主题）、200ms 快照轮询间隔（默认窗口约 1s）
+    static constexpr uint32_t kDefaultStableRounds = 5;
+    static constexpr uint32_t kDefaultIntervalMs = 200;
     // 设置 DDS 域并创建 participant（挂发现监听）与 subscriber；仅可成功一次，失败/重复调用返回 false。
     bool setDomainId(uint32_t domainId);
     // 登记待调试主题：发现匹配的远端 DataWriter 后由工作线程自动解析类型并建立订阅者；
@@ -56,17 +61,36 @@ public:
     bool subscribeTopic(const std::string& topicName);
     // 设置输出目的地；须在订阅实际建立前调用（工作线程建订阅时按值捕获），用于测试注入。
     void setOutputSink(OutputSink sink);
-    // 列出已发现的远端主题与数据类型名（基于发现缓存：本节点入域时 EDP 全量重放既有 writer
-    // 发现信息，域内既有 participant 上新增 writer 经实时发现事件追加，缓存单调累积）。
-    // 纯同步查询，发现重放是异步的——入域后立即查询可能得到空列表，等待窗口由调用方负责；
-    // 未 setDomainId 返回 false，入域后列表可为空（返回 true）。
-    bool listTopics(std::vector<std::pair<std::string, std::string>>& topics);
+    // 列出已发现的远端主题与数据类型名（自适应收敛查询，基于发现缓存：远端 DataWriter 与
+    // DataReader 均记录——仅有订阅者而无发布者的主题同样列出；本节点入域时 EDP 全量重放既有
+    // 端点发现信息，域内既有 participant 上新增端点经实时发现事件追加，缓存单调累积）：
+    // 轮询缓存快照，连续 stableRounds 次集合不变即认为发现收敛，以最终快照填充
+    // topics 返回 true（未 setDomainId 返回 false，入域后列表可为空）。stableRounds=1 即单次
+    // 快照（免等待的快速查询语义）；等待期间远端新增端点会使快照变化并把不变计数重置为 1。
+    // stableRounds/intervalMs 传 0 时钳制为默认 5 次/200ms；阻塞调用（最长约
+    // stableRounds*intervalMs），等待中 Ctrl+C 依赖进程信号处理。集合不变判定基于有序对比较
+    // （快照合并后按主题名排序）。调用方无需再自设发现等待窗口。
+    bool listTopics(std::vector<std::pair<std::string, std::string>>& topics,
+            uint32_t stableRounds = kDefaultStableRounds,
+            uint32_t intervalMs = kDefaultIntervalMs);
 
 private:
+    // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
+    // 循环——每次快照锁内合并拷贝 seen_ 与 seenReaders_（writer 优先、reader 补缺，按主题名
+    // 排序），连续 stableRounds 次相同即以最终快照填充 topics 返回 true；等待期间远端新增
+    // writer/reader 使快照变化并重置计数。
+    bool waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
+            uint32_t stableRounds, uint32_t intervalMs);
     // 发现线程回调入口（DebugParticipantListener 转发）：首见 writer 记入 seen_ 缓存后唤醒
-    // 工作线程（发现事件不重发，缓存供登记晚于发现时回放）；回调内不建订阅。
+    // 工作线程（发现事件不重发，缓存供登记晚于发现时回放）；回调内不建订阅。回调运行于
+    // Fast DDS 发现锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置死锁防护见成员注释）。
     bool onWriterDiscovered(const std::string& topicName,
                             const eprosima::fastdds::rtps::PublicationBuiltinTopicData& info);
+    // 发现线程回调入口（DebugParticipantListener 转发）：首见 reader 记入 seenReaders_ 缓存
+    // （不唤醒工作线程——订阅建立仅由 writer 驱动，reader 缓存仅供 listTopics 列出仅有订阅者
+    // 的主题）。回调运行于 Fast DDS PDP 锁临界区内，仅拿 seenMtx_ 叶子锁。
+    bool onReaderDiscovered(const std::string& topicName,
+                            const eprosima::fastdds::rtps::SubscriptionBuiltinTopicData& info);
     // 建订阅链路（自加锁，仅由工作线程调用）：TypeInformation → TypeObject → DynamicType →
     // Topic → DataReader，任一步失败放弃本次订阅；typeNotReadyWarn 控制 TypeObject 未就绪
     // 告警（工作线程重试时静默）。
@@ -84,8 +108,16 @@ private:
     std::set<std::string> pending_;         // 已登记、待发现的主题（含解析失败等待重试者）
     // 已发现 writer 缓存（topic → 首见发现信息）：发现事件不重发，供登记晚于发现时回放
     std::map<std::string, eprosima::fastdds::rtps::PublicationBuiltinTopicData> seen_;
+    // 已发现 reader 缓存（topic → 首见发现信息）：与 seen_ 并列，供 listTopics 列出仅有
+    // 订阅者而无发布者的主题（订阅建立链路不依赖此缓存）
+    std::map<std::string, eprosima::fastdds::rtps::SubscriptionBuiltinTopicData> seenReaders_;
     std::map<std::string, DebugSub> subs_;  // 已建立订阅
-    std::mutex mtx_;  // 串行化公开方法、发现回调与工作线程
+    std::mutex mtx_;  // 串行化公开方法与工作线程（participant_/pending_/subs_/workerRunning_）
+    // 发现缓存专用叶子锁（保护 seen_/seenReaders_）：发现回调在 Fast DDS 持有 PDP/EDP 内部
+    // 锁的临界区内被调用，只允许拿此锁——若拿 mtx_ 会与工作线程（tryStartSubscription 持
+    // mtx_ 调 create_topic/create_datareader，内部等 PDP 锁）形成锁序倒置死锁（实测 AB-BA）。
+    // 锁序固定：mtx_ → seenMtx_，seenMtx_ 永不反向嵌套。
+    std::mutex seenMtx_;
     std::condition_variable cv_;  // 发现/登记变化时唤醒工作线程
     std::thread worker_;          // 订阅建立工作线程（setDomainId 成功后启动）
     bool workerRunning_ = false;  // 工作线程生命周期标志（mtx_ 保护）

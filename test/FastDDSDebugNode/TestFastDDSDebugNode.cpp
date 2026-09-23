@@ -10,11 +10,15 @@
  *   守卫  未 setDomainId 时 subscribeTopic/listTopics → false；
  *         setDomainId 重复调用 → 第二次 false；
  *         subscribeTopic 重复登记同一主题 → 第二次 false；
- *         入域后立即 listTopics → true 且空（无 writer，空列表正常）；
+ *         入域后 listTopics(listed,1,50) → true 且空（stableRounds=1 单次快照，无 writer 空列表正常）；
+ *         入域无 writer listTopics(listed,2,100) → true 且空（快照立即稳定收敛）；
  *   端到端 发布端持续 publish（MString "hello_debug"）→ 被测端捕获输出包含
  *         "topic=t_debug"（发现→建订阅）、"type=YomkRpc::MString"（远端类型解析成功）、
  *         "hello_debug"（反序列化 + JSON 结构化输出成功）；
- *         listTopics 含 (t_debug, YomkRpc::MString)（发现缓存同步查询）。
+ *         listTopics 含 (t_debug, YomkRpc::MString)（发现缓存同步查询）；
+*         listTopics(2,100ms) 收敛快照与 listTopics(1) 一致（含 t_debug 与类型名）。
+ *   仅订阅者 纯订阅端仅建 DataReader（t_reader_only，无任何 writer）→ listTopics 同样
+ *         列出该主题与类型名（远端 DataReader 发现缓存，writer 优先 reader 补缺）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -27,6 +31,8 @@
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MString 数据类（仅发布端使用）
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅发布端使用）
+
+#include <fastdds/dds/domain/DomainParticipantFactory.hpp> // 纯订阅端 participant（仅订阅者用例）
 
 #include <chrono>
 #include <cstdint>
@@ -58,10 +64,18 @@ int main()
         CHECK(dbg.subscribeTopic(TEST_TOPIC), "首次 subscribeTopic(t_debug) → true（登记待发现）");
         CHECK(!dbg.subscribeTopic(TEST_TOPIC), "重复 subscribeTopic(t_debug) → false（pending_ 去重）");
         // 本时刻域内无其他 participant（ctest 串行，e2e 的 pub 尚未创建），发现缓存必空；
-        // 断言同步查询空列表路径正常（等待窗口由调用方负责的设计）
+        // 断言 stableRounds=1 单次快照路径正常（免等待的快速查询语义）
         listed.clear();
-        CHECK(dbg.listTopics(listed) && listed.empty(),
-              "入域后立即 listTopics → true 且空（无 writer，空列表正常）");
+        CHECK(dbg.listTopics(listed, 1, 50) && listed.empty(),
+              "入域后 listTopics(listed,1,50) → true 且空（单次快照，无 writer 空列表正常）");
+        // 自适应收敛：入域无 writer 时快照立即稳定，收敛耗时为一次轮询间隔（百毫秒级）
+        auto waitStart = std::chrono::steady_clock::now();
+        std::vector<std::pair<std::string, std::string>> waited;
+        CHECK(dbg.listTopics(waited, 2, 100) && waited.empty(),
+              "入域无 writer listTopics(2,100ms) → true 且空（快照立即稳定）");
+        auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - waitStart).count();
+        std::cout << "[OBSERVE] listTopics stable in " << waitMs << " ms" << std::endl;
     } // dbg 析构：清理尚未命中远端 writer 的登记与已建资源
 
     // ---- 端到端用例：FastDDSNode 发布真实类型 → FastDDSDebugNode 自动发现订阅并结构化输出 ----
@@ -133,6 +147,81 @@ int main()
         }
         CHECK(listedTopic, "listTopics 含 (t_debug, YomkRpc::MString)（发现缓存同步查询）");
         std::cout << "[OBSERVE] listed topics=" << listed.size() << std::endl;
+
+        // 自适应收敛：订阅已建立说明发现已稳定，收敛查询应快速返回且与单次快照结果一致
+        std::vector<std::pair<std::string, std::string>> waited;
+        CHECK(dbg.listTopics(waited, 2, 100), "listTopics(2,100ms) → true（入域状态收敛查询）");
+        bool waitedTopic = false;
+        for (const auto& entry : waited)
+        {
+            if (entry.first == TEST_TOPIC && entry.second == "YomkRpc::MString")
+            {
+                waitedTopic = true;
+            }
+        }
+        CHECK(waitedTopic, "listTopics(2,100ms) 含 (t_debug, YomkRpc::MString)（收敛快照一致）");
+        std::cout << "[OBSERVE] waited topics=" << waited.size() << std::endl;
+    }
+
+    // ---- 仅有订阅者主题的发现用例：远端 DataReader（无任何 writer）也应被 listTopics 列出 ----
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 搭建纯订阅端
+        // 纯订阅端：手工建 participant + subscriber + DataReader（MString 类型），域内无 writer。
+        // 被测端 dbg 只建 participant + subscriber（无本地 reader/writer），自身端点不进发现缓存
+        auto* subParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(subParticipant != nullptr, "纯订阅端 participant 创建成功（仅有订阅者场景）");
+        if (subParticipant != nullptr)
+        {
+            constexpr const char* READER_ONLY_TOPIC = "t_reader_only";
+            auto* sub = subParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            // TypeSupport 接管 PubSubType 所有权并完成 participant 内类型注册；
+            // ts 须活过 reader 使用期（participant 类型表不接管所有权），块内声明于 dbg 之前
+            dds::TypeSupport ts(new YomkRpc::MStringPubSubType());
+            ts.register_type(subParticipant);
+            auto* topic = subParticipant->create_topic(
+                READER_ONLY_TOPIC, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+            auto* reader = (sub != nullptr && topic != nullptr)
+                ? sub->create_datareader(topic, dds::DATAREADER_QOS_DEFAULT) : nullptr;
+            CHECK(reader != nullptr, "纯订阅端 DataReader 创建成功（t_reader_only，域内无 writer）");
+
+            if (reader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（仅订阅者场景）");
+                // dbg 为 late joiner：入域时 EDP 全量重放纯订阅端 reader 发现信息
+                std::vector<std::pair<std::string, std::string>> listed;
+                CHECK(dbg.listTopics(listed, 5, 100), "listTopics(5,100ms) → true（仅订阅者场景收敛查询）");
+                bool listedReaderOnly = false;
+                std::string readerTypeName;
+                for (const auto& entry : listed)
+                {
+                    if (entry.first == READER_ONLY_TOPIC)
+                    {
+                        listedReaderOnly = true;
+                        readerTypeName = entry.second;
+                    }
+                }
+                CHECK(listedReaderOnly, "listTopics 含仅有订阅者的主题 t_reader_only（reader 缓存并入快照）");
+                CHECK(readerTypeName == "YomkRpc::MString", "仅有订阅者主题的类型名正确列出（YomkRpc::MString）");
+                std::cout << "[OBSERVE] reader-only topic listed, type=" << readerTypeName << std::endl;
+            } // dbg 析构：reader/topic/subscriber/participant 逆序清理，随后 ts 析构
+
+            // 清理：reader → topic → subscriber → participant（顺序与 FastDDSDebugNode 析构一致）
+            if (sub != nullptr && reader != nullptr)
+            {
+                sub->delete_datareader(reader);
+            }
+            if (topic != nullptr)
+            {
+                subParticipant->delete_topic(topic);
+            }
+            if (sub != nullptr)
+            {
+                subParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(subParticipant);
+        }
     }
 
     return testReport("TestFastDDSDebugNode");

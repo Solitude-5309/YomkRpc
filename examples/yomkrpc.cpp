@@ -4,20 +4,22 @@
  *
  * 用法：
  *   yomkrpc topic print [-d N | --domain N] <topic-name>
- *   yomkrpc topic list [-d N | --domain N]
+ *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
  *   yomkrpc topic print hello_world
  *   yomkrpc topic print -d 5 sensor_data
  *   yomkrpc topic list
+ *   yomkrpc topic list -w 3
  *
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
- * topic list：创建节点后短暂等待 EDP 发现重放（异步，约 2s），一次性查询并逐行打印
- * "topicName [typeName]"。两种子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，
- * 规避 FastDDS 静态析构期段错误（同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
+ * topic list：创建节点后一次性收敛查询并逐行打印 topicName——自适应收敛：
+ * 节点内部每 ~200ms 轮询一次发现缓存快照，连续 waitRounds 次（默认 5，-w 可调）集合不变
+ * 即认为发现收敛、立即输出，无需固定等待窗口。两种子命令退出前均 YOMKRPC_DEBUG_QUIT()
+ * 显式清理，规避 FastDDS 静态析构期段错误（同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
  *
  * 域 id 两种指定方式（优先级 -d > 环境变量 > 0）：
  *   1. 环境变量 YOMKRPC_DDS_DOMAIN_ID：默认从此读取；启动时无则创建并设默认值 0，
@@ -52,18 +54,21 @@ static void printUsage(std::ostream &os)
 {
     os << "Usage:\n"
           "  yomkrpc topic print [-d N | --domain N] <topic-name>\n"
-          "  yomkrpc topic list [-d N | --domain N]\n"
+          "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
           "  -d N, --domain N    DDS 域号（0-232），临时指定，不写环境变量；未指定时读\n"
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
+          "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照集合不变即输出\n"
+          "                      （默认 5，仅 topic list 生效）\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
           "  yomkrpc topic print hello_world\n"
           "  yomkrpc topic print -d 5 sensor_data\n"
           "  yomkrpc topic list\n"
+          "  yomkrpc topic list -w 3\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后免 -d，等价于 -d 5\n";
 }
@@ -163,8 +168,9 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
     return 0;
 }
 
-// topic list 子命令：一次性列出域内已发现主题与数据类型名（无 Ctrl+C 循环，查完即退）
-static int runList(uint32_t domainId)
+// topic list 子命令：自适应收敛查询域内已发现主题与数据类型名（每 ~200ms 轮询一次发现缓存
+// 快照，连续 waitRounds 次集合不变即收敛立即输出；无 Ctrl+C 循环，查完即退）
+static int runList(uint32_t domainId, uint32_t waitRounds)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -177,10 +183,9 @@ static int runList(uint32_t domainId)
         return 1;
     }
 
-    // 2. 等待 EDP 发现重放（异步）：短暂等待让发现缓存积累域内既有 writer 主题
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
-    resp = YOMKRPC_DEBUG_LIST();
+    // 2. 收敛查询：节点内部轮询发现缓存快照（~200ms 间隔），连续 waitRounds 次集合不变即返回，
+    //    发现重放完成即立即输出，无需固定等待窗口
+    resp = YOMKRPC_DEBUG_LIST(waitRounds, 200);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "list topics failed: ", resp.m_msg);
@@ -227,9 +232,10 @@ int main(int argc, char *argv[])
         persistDefaultDomainEnv();
     }
 
-    // ---- 参数解析：-h/--help 即刻退出；-d/--domain 可选（临时指定，不写环境变量）；位置参数 ----
+    // ---- 参数解析：-h/--help 即刻退出；-d/--domain 与 -w/--wait 可选；位置参数 ----
     uint32_t domainId = 0;
     bool hasDomainId = false;
+    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；仅 topic list 生效）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -255,6 +261,24 @@ int main(int argc, char *argv[])
             hasDomainId = true;
             continue;
         }
+        if (arg == "-w" || arg == "--wait")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少收敛次数参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            char *end = nullptr;
+            unsigned long value = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value == 0 || value > UINT32_MAX)
+            {
+                std::cerr << "yomkrpc: 非法收敛次数 \"" << argv[i] << "\"（须为 >=1 的整数）\n";
+                return 2;
+            }
+            waitRounds = static_cast<uint32_t>(value);
+            continue;
+        }
         pos.push_back(arg);
     }
 
@@ -277,7 +301,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 2 && pos[0] == "topic" && pos[1] == "list")
     {
-        return runList(domainId);
+        return runList(domainId, waitRounds);
     }
     if (pos.size() == 2 && pos[0] == "topic")
     {

@@ -97,7 +97,7 @@ YomkResponse YomkRpcDebugService::topicPrint(YomkPkgPtr pkg)
 
 YomkResponse YomkRpcDebugService::listTopics(YomkPkgPtr pkg)
 {
-    (void)pkg;  // 列举端点无参数载荷（同 delete_node）
+    YomkUnPackPkgResponse(pkg, DDSDebugList, p);
 
     std::lock_guard<std::mutex> lock(mtx_);
     if (node_ == nullptr)
@@ -105,14 +105,17 @@ YomkResponse YomkRpcDebugService::listTopics(YomkPkgPtr pkg)
         YOMK_ERROR_TAG("YomkRpcDebugService::listTopics", "debug node not created");
         return YomkResponse(YomkResponse::eNo, "debug node not created");
     }
-    // node_ 非空即已入域，listTopics 必返回 true；空列表（发现重放未完成/无 writer）为正常状态
+    // node_ 非空即已入域，listTopics 必返回 true；持锁收敛等待（最长约 stableRounds*intervalMs）：
+    // 锁保护 node_ 生命周期不被并发 deleteNode 破坏（同 createNode 锁内 setDomainId 的既有约定），
+    // 等待期间本服务其他端点请求被串行化（单用户 CLI 场景无实际影响）；0 值参数由节点层钳制默认
     std::vector<std::pair<std::string, std::string>> pairs;
-    node_->listTopics(pairs);
+    node_->listTopics(pairs, p->msg.stableRounds, p->msg.intervalMs);
+    // 仅取主题名（节点层 pair 中的类型信息保留在发现缓存中，暂不对外暴露）
     std::vector<std::string> lines;
     lines.reserve(pairs.size());
     for (const auto& entry : pairs)
     {
-        lines.emplace_back(entry.first + " [" + entry.second + "]");
+        lines.emplace_back(entry.first);
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }

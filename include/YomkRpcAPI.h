@@ -86,10 +86,15 @@
         "/YomkRpcDebugService/topic_print",    \
         YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, output}))
 
-// 列出当前域内已发现的全部主题与数据类型名：返回 StringArray 包，每行 "topicName [typeName]"
-// 按主题名排序；列表可为空（EDP 发现重放是异步的，建议创建节点后等待约 2s 再查询）；须先创建
-// 调试节点。返回 YomkResponse。
-#define YOMKRPC_DEBUG_LIST() YOMK_REQUEST("/YomkRpcDebugService/list_topics", nullptr)
+// 列出当前域内已发现的全部主题与数据类型名（自适应收敛）：轮询发现缓存快照，连续 stableRounds
+// 次集合不变即收敛返回（0 值钳制为默认 5 次/200ms；stableRounds=1 即单次快照免等待；最长阻塞约
+// stableRounds*intervalMs）。远端 DataWriter 与 DataReader 均记录——仅有订阅者而无发布者的主题
+// 同样列出。返回 StringArray 包，每行一个 topicName（仅主题名，不含类型），按主题名排序；
+// 列表可为空（域内无 writer/reader）。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_LIST(stableRounds, intervalMs)                         \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/list_topics",                                  \
+        YomkMkPtr(DDSDebugList, DDSDebugList{stableRounds, intervalMs}))
 
 // 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)

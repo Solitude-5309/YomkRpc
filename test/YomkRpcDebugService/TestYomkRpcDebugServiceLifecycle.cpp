@@ -7,7 +7,7 @@
  *       节点层守卫（setDomainId 重复/未入域登记）与端到端流量（发现→动态类型→订阅→JSON 输出）
  *       已由 TestFastDDSDebugNode 覆盖，本测试不重复。
  * 覆盖：
- *   A-1 生命周期：创建 → list_topics 空列表 → 重复创建拒绝 → topicPrint 空回调拒绝 →
+ *   A-1 生命周期：创建 → list_topics 收敛空列表 → 重复创建拒绝 → topicPrint 空回调拒绝 →
  *       正常登记 → 同主题重复登记拒绝 → 异主题登记 → 删除 → 重复删除拒绝 → 删除后
  *       list_topics 拒绝 → 删除后重建 → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
@@ -41,6 +41,12 @@ namespace
     {
         return YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, [](const std::string &) {}});
     }
+
+    // 构造 /list_topics 请求包（stableRounds=1 单次快照路径，免收敛等待）
+    YomkPkgPtr mkList()
+    {
+        return YomkMkPtr(DDSDebugList, DDSDebugList{1, 100});
+    }
 } // namespace
 
 int main()
@@ -54,10 +60,11 @@ int main()
     CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN)).m_status == YomkResponse::eOk,
           "创建调试节点(domain 200) → eOk（真实创建 participant）");
 
-    // list_topics：ctest 串行执行，此刻域 200 无任何远端 writer，同步查询得空列表（正常状态）
-    auto listed = svc->invoke("/list_topics");
+    // list_topics：ctest 串行执行，此刻域 200 无任何远端 writer；stableRounds=1 单次快照
+    // 即得空列表（收敛参数链路直通节点层）
+    auto listed = svc->invoke("/list_topics", mkList());
     CHECK(listed.m_status == YomkResponse::eOk && listed.m_data != nullptr,
-          "list_topics（入域无 writer）→ eOk（空列表路径）");
+          "list_topics（入域无 writer，单次快照）→ eOk（空列表路径）");
     YomkUnPackPkg(listed.m_data, StringArray, arr);
     CHECK(arr != nullptr && arr->d.empty(), "list_topics 返回包可解包为空 StringArray");
 
@@ -87,7 +94,7 @@ int main()
     CHECK(del2.m_status == YomkResponse::eNo && del2.m_msg.find("not created") != std::string::npos,
           "重复删除 → eNo debug node not created");
 
-    auto listAfterDel = svc->invoke("/list_topics");
+    auto listAfterDel = svc->invoke("/list_topics", mkList());
     CHECK(listAfterDel.m_status == YomkResponse::eNo &&
               listAfterDel.m_msg.find("not created") != std::string::npos,
           "删除后 list_topics → eNo debug node not created");
