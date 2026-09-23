@@ -18,6 +18,7 @@
 | `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | `/YomkRpcService/discard_loan` | 归还未发布的借出缓冲 | 打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
 | `YOMKRPC_DEBUG_NODE(domainId)` | `/YomkRpcDebugService/create_node` | 创建调试节点 | 打包 `DDSDebugNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试 |
 | `YOMKRPC_DEBUG_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误 |
+| `YOMKRPC_DEBUG_LIST()` | `/YomkRpcDebugService/list_topics` | 列出域内主题 | 无参宏（载荷 nullptr）；返回 StringArray 包，每行 "topicName [typeName]" 按主题名排序；须先创建调试节点，入域后列表可为空（发现重放异步，建议等待约 2s 再查询） |
 | `YOMKRPC_DEBUG_QUIT()` | `/YomkRpcDebugService/delete_node` | 退出调试 | 无参宏（载荷 nullptr）；删除调试节点并销毁其全部 DDS 实体，未创建时返回错误 |
 
 > 除 `YOMKRPC_VERSION()` 外，其余宏均返回 `YomkResponse`，调用后须判 `m_status == YomkResponse::eOk`；失败时可读 `m_msg` 获取错误信息。
@@ -337,6 +338,46 @@ int main(int argc, char *argv[])
     }
     return 0;
 }
+```
+
+### 列出域内主题（yomkrpc topic list）
+
+`yomkrpc topic list` 一次性列出当前域内全部已发现主题与数据类型名，每行 "topicName [typeName]" 按主题名排序：
+
+```bash
+yomkrpc topic list          # 默认域 0
+yomkrpc topic list -d 5     # 指定 DDS 域号
+```
+
+与发布端配合观察（建议先启动发布端——调试节点入域后工具等待约 2s 收集域内发现信息，再一次性查询输出）：
+
+```bash
+# 终端 1（先启动发布端）
+ExampleYomkRpcPub
+# 终端 2
+yomkrpc topic list
+```
+
+输出示例（仅主题列表，发现过程静默不刷屏）：
+
+```
+hello_world [YomkRpc::MString]
+```
+
+域内无任何已发布主题时输出 `no topics discovered on domain N`。等价宏调用序列（流程与 print 示例同构，链接库相同，宏定义见上表）：
+
+```cpp
+YOMK_INIT();
+YOMK_NEW_SERVICE(YomkRpcDebugService);
+auto resp = YOMKRPC_DEBUG_NODE(0);          // 1. 创建调试节点
+/* 等待约 2s 收集发现信息（EDP 发现重放是异步的） */
+resp = YOMKRPC_DEBUG_LIST();                // 2. 一次性查询：返回 StringArray 包
+YomkUnPackPkg(resp.m_data, StringArray, arr);
+if (arr != nullptr)
+{
+    for (const auto &line : arr->d) { std::cout << line << "\n"; }
+}
+resp = YOMKRPC_DEBUG_QUIT();                // 3. 退出前显式清理
 ```
 
 ## 测试

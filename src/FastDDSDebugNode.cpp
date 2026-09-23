@@ -7,6 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 #include <fastdds/dds/core/status/StatusMask.hpp>
 #include <fastdds/dds/core/status/SubscriptionMatchedStatus.hpp>
@@ -271,6 +272,21 @@ void FastDDSDebugNode::setOutputSink(OutputSink sink)
     sink_ = std::move(sink);
 }
 
+bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string>>& topics)
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (participant_ == nullptr)
+    {
+        return false;
+    }
+    // seen_ 为 std::map，遍历天然按主题名有序
+    for (const auto& kv : seen_)
+    {
+        topics.emplace_back(kv.first, kv.second.type_name.to_string());
+    }
+    return true;
+}
+
 // 发现线程回调入口：首见 writer 记入缓存并唤醒工作线程；回调内不建订阅。
 bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
         const rtps::PublicationBuiltinTopicData& info)
@@ -282,8 +298,6 @@ bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
             return false;
         }
     }
-    std::cout << "[FastDDSDebugNode] discovered writer topic=" << topicName
-              << " type=" << info.type_name.to_string() << std::endl;
     cv_.notify_all();
     return true;
 }

@@ -23,6 +23,7 @@ private:
     YomkResponse getVersion(YomkPkgPtr pkg);
     YomkResponse createNode(YomkPkgPtr pkg);
     YomkResponse topicPrint(YomkPkgPtr pkg);
+    YomkResponse listTopics(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
 
 private:

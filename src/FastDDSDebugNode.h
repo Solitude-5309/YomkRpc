@@ -16,6 +16,8 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // 类型无关的调试节点：加入域后按主题名登记订阅意图，经 DDS 发现机制收到远端 DataWriter 携带的
 // XTypes TypeInformation → 从全局 TypeObjectRegistry 取回远端 TypeObject → 生成 DynamicType 并
@@ -54,6 +56,11 @@ public:
     bool subscribeTopic(const std::string& topicName);
     // 设置输出目的地；须在订阅实际建立前调用（工作线程建订阅时按值捕获），用于测试注入。
     void setOutputSink(OutputSink sink);
+    // 列出已发现的远端主题与数据类型名（基于发现缓存：本节点入域时 EDP 全量重放既有 writer
+    // 发现信息，域内既有 participant 上新增 writer 经实时发现事件追加，缓存单调累积）。
+    // 纯同步查询，发现重放是异步的——入域后立即查询可能得到空列表，等待窗口由调用方负责；
+    // 未 setDomainId 返回 false，入域后列表可为空（返回 true）。
+    bool listTopics(std::vector<std::pair<std::string, std::string>>& topics);
 
 private:
     // 发现线程回调入口（DebugParticipantListener 转发）：首见 writer 记入 seen_ 缓存后唤醒

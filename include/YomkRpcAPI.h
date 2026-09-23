@@ -86,5 +86,10 @@
         "/YomkRpcDebugService/topic_print",    \
         YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, output}))
 
+// 列出当前域内已发现的全部主题与数据类型名：返回 StringArray 包，每行 "topicName [typeName]"
+// 按主题名排序；列表可为空（EDP 发现重放是异步的，建议创建节点后等待约 2s 再查询）；须先创建
+// 调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_LIST() YOMK_REQUEST("/YomkRpcDebugService/list_topics", nullptr)
+
 // 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)

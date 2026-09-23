@@ -10,6 +10,9 @@
 
 #include "FastDDSDebugNode.h"
 
+#include <utility>
+#include <vector>
+
 namespace
 {
 constexpr uint32_t kMaxDomainId = 232;  // DDS 域号上限
@@ -27,6 +30,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/version", YomkRpcDebugService::getVersion);
     YomkInstallFunc("/create_node", YomkRpcDebugService::createNode);
     YomkInstallFunc("/topic_print", YomkRpcDebugService::topicPrint);
+    YomkInstallFunc("/list_topics", YomkRpcDebugService::listTopics);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
     return 0;
 }
@@ -89,6 +93,28 @@ YomkResponse YomkRpcDebugService::topicPrint(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "subscribeTopic [" + p->msg.topicName + "] failed");
     }
     return YomkResponse(YomkResponse::eOk, "ok");
+}
+
+YomkResponse YomkRpcDebugService::listTopics(YomkPkgPtr pkg)
+{
+    (void)pkg;  // 列举端点无参数载荷（同 delete_node）
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::listTopics", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // node_ 非空即已入域，listTopics 必返回 true；空列表（发现重放未完成/无 writer）为正常状态
+    std::vector<std::pair<std::string, std::string>> pairs;
+    node_->listTopics(pairs);
+    std::vector<std::string> lines;
+    lines.reserve(pairs.size());
+    for (const auto& entry : pairs)
+    {
+        lines.emplace_back(entry.first + " [" + entry.second + "]");
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
 
 YomkResponse YomkRpcDebugService::deleteNode(YomkPkgPtr pkg)

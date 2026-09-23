@@ -7,12 +7,14 @@
  *       FastDDSDebugNode 仅凭主题名经 DDS 发现机制取回远端 TypeInformation/TypeObject，
  *       生成 DynamicType 自动建订阅，收到消息后经内置 json_serialize 结构化输出。
  * 覆盖：
- *   守卫  未 setDomainId 时 subscribeTopic → false；
+ *   守卫  未 setDomainId 时 subscribeTopic/listTopics → false；
  *         setDomainId 重复调用 → 第二次 false；
  *         subscribeTopic 重复登记同一主题 → 第二次 false；
+ *         入域后立即 listTopics → true 且空（无 writer，空列表正常）；
  *   端到端 发布端持续 publish（MString "hello_debug"）→ 被测端捕获输出包含
  *         "topic=t_debug"（发现→建订阅）、"type=YomkRpc::MString"（远端类型解析成功）、
- *         "hello_debug"（反序列化 + JSON 结构化输出成功）。
+ *         "hello_debug"（反序列化 + JSON 结构化输出成功）；
+ *         listTopics 含 (t_debug, YomkRpc::MString)（发现缓存同步查询）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -32,6 +34,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -46,11 +50,18 @@ int main()
     // ---- 守卫用例：未入域登记 / 重复入域 / 重复登记 ----
     {
         FastDDSDebugNode dbg;
+        std::vector<std::pair<std::string, std::string>> listed;
+        CHECK(!dbg.listTopics(listed), "未 setDomainId 时 listTopics → false（participant 未创建）");
         CHECK(!dbg.subscribeTopic(TEST_TOPIC), "未 setDomainId 时 subscribeTopic → false（participant 未创建）");
         CHECK(dbg.setDomainId(TEST_DOMAIN), "setDomainId(200) → true");
         CHECK(!dbg.setDomainId(TEST_DOMAIN), "重复 setDomainId(200) → false（仅可成功一次）");
         CHECK(dbg.subscribeTopic(TEST_TOPIC), "首次 subscribeTopic(t_debug) → true（登记待发现）");
         CHECK(!dbg.subscribeTopic(TEST_TOPIC), "重复 subscribeTopic(t_debug) → false（pending_ 去重）");
+        // 本时刻域内无其他 participant（ctest 串行，e2e 的 pub 尚未创建），发现缓存必空；
+        // 断言同步查询空列表路径正常（等待窗口由调用方负责的设计）
+        listed.clear();
+        CHECK(dbg.listTopics(listed) && listed.empty(),
+              "入域后立即 listTopics → true 且空（无 writer，空列表正常）");
     } // dbg 析构：清理尚未命中远端 writer 的登记与已建资源
 
     // ---- 端到端用例：FastDDSNode 发布真实类型 → FastDDSDebugNode 自动发现订阅并结构化输出 ----
@@ -107,6 +118,21 @@ int main()
         CHECK(snap.find("type=YomkRpc::MString") != std::string::npos,
               "输出头部含 type=YomkRpc::MString（远端 TypeObject→DynamicType 解析成功）");
         std::cout << "[OBSERVE] captured " << snap.size() << " bytes" << std::endl;
+
+        // listTopics：订阅建立的前提是发现事件已入 seen_ 缓存（EDP 重放覆盖 late joiner），
+        // 此时同步查询必含 t_debug 与其类型名，且查询不影响既有订阅链路
+        std::vector<std::pair<std::string, std::string>> listed;
+        CHECK(dbg.listTopics(listed), "listTopics → true（入域状态）");
+        bool listedTopic = false;
+        for (const auto& entry : listed)
+        {
+            if (entry.first == TEST_TOPIC && entry.second == "YomkRpc::MString")
+            {
+                listedTopic = true;
+            }
+        }
+        CHECK(listedTopic, "listTopics 含 (t_debug, YomkRpc::MString)（发现缓存同步查询）");
+        std::cout << "[OBSERVE] listed topics=" << listed.size() << std::endl;
     }
 
     return testReport("TestFastDDSDebugNode");
