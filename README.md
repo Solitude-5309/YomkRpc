@@ -2,7 +2,7 @@
 
 基于 [YomkServer](https://github.com/Solitude-5309/YomkServer) 框架的 RPC 分布式通信扩展。
 
-## 功能
+## 1 功能
 
 基于 YomkServer 框架的 RPC 扩展，集成 FastDDS 提供分布式发布订阅能力。
 
@@ -25,14 +25,14 @@
 
 > 除 `YOMKRPC_VERSION()` 外，其余宏均返回 `YomkResponse`，调用后须判 `m_status == YomkResponse::eOk`；失败时可读 `m_msg` 获取错误信息。
 
-## 前置条件
+## 2 前置条件
 
 - C++17 编译器
 - CMake >= 3.14
 - YomkServer 已安装（通过 `build_ubuntu.sh` 安装后会自动配置环境变量 `YOMK_PREFIX_PATH` 指向安装路径）
 - swig 与 python3-dev（msg 类型库 SWIG Python 绑定编译依赖）
 
-## 编译
+## 3 编译
 
 ```bash
 source build_ubuntu.sh
@@ -54,9 +54,9 @@ source build_ubuntu.sh
 | `ExampleYomkRpcTopicLoan` | loan 借出机制演示 |
 | `ExampleYomkRpcPub` | 跨进程发布端示例（每 1s 发布 hello world，持续 60 秒） |
 | `ExampleYomkRpcSub` | 跨进程订阅端示例（订阅 hello_world，Ctrl+C 退出） |
-| `yomkrpc` | 命令行工具：观察任意 DDS 主题（topic print）、列出域内主题（topic list）、查询单个主题详情（topic info）、列出域内节点（node list），详见使用示例 |
+| `yomkrpc` | 命令行工具：观察任意 DDS 主题（topic print）、列出域内主题（topic list）、查询单个主题详情（topic info）、列出域内节点（node list），详见 YomkRpc 调试章节 |
 
-## 工程结构
+## 4 工程结构
 
 ```
 YomkRpc/
@@ -96,11 +96,11 @@ YomkRpc/
 └── README.md
 ```
 
-## 使用示例
+## 5 使用示例
 
-示例统一使用 `YOMKRPC_*` 宏 API（定义于 `YomkRpcAPI.h`），均为完整可复制编译的程序（链接 `YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg`）。
+示例统一使用 `YOMKRPC_*` 宏 API（定义于 `YomkRpcAPI.h`），均为完整可复制编译的程序（链接 `YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg`）。调试与域内状态观察类工具与示例见「YomkRpc 调试」章节。
 
-### 普通发布订阅示例
+### 5.1 普通发布订阅示例
 
 同一节点内注册发布与订阅主题，发布 5 条 MString 消息并等待接收：
 
@@ -160,7 +160,7 @@ int main(int argc, char *argv[])
 }
 ```
 
-### 借出（Loan）发布示例
+### 5.2 借出（Loan）发布示例
 
 plain 类型（如 MInt32）可借出 writer 池内样本直接填值发布，免序列化；
 loan 失败（非 plain 或池耗尽）时回退普通发布路径：
@@ -221,14 +221,14 @@ int main(int argc, char *argv[])
 }
 ```
 
-### Loan（借出）机制说明
+### 5.3 Loan（借出）机制说明
 
 - **订阅端完全透明**：`FastDDSNode` 内部自动使用 reader loan 接收（回调接口与指针语义不变，仅回调期间有效），零序列化拷贝，配合 data-sharing 跨进程零拷贝读取
 - **发布端显式 API**：`YOMKRPC_LOAN` 借出 writer 池内样本，直接在池内填值后 `YOMKRPC_PUB_MSG` 发布免序列化；每次 write 后指针即被中间件收回，须重新借出
 - **适用条件**：仅 plain 类型可借出（纯基础类型成员 + FINAL 可扩展性，如 MInt32、MColorRGBA）；含 string/sequence 的类型 loan 失败返回 nullptr，自动回退普通发布
 - **指针生命周期**：发布端 loaned 指针 write/discard 后不可再访问；订阅端指针仅回调期间有效
 
-### 订阅回调与数据消费
+### 5.4 订阅回调与数据消费
 
 `YOMKRPC_SUB_TOPIC` 注册的回调签名为 `std::function<void(const void *data)>`，每次收到消息时被调用：
 
@@ -255,7 +255,7 @@ auto onMessage = [&](const void *data)
 };
 ```
 
-### 双进程示例程序（hello world）
+### 5.5 双进程示例程序（hello world）
 
 `examples/` 下提供两个独立进程的参考程序（纯宏 API，编译后可直接运行）：
 
@@ -271,7 +271,25 @@ ExampleYomkRpcSub
 ExampleYomkRpcPub
 ```
 
-### 调试主题观察（yomkrpc topic print）
+## 6 YomkRpc 调试
+
+`yomkrpc` 命令行工具经 `YomkRpcDebugService` 调试服务观察任意 DDS 域（类型无关，无需 IDL 生成代码）；库用户可在代码中用等价的 `YOMKRPC_DEBUG_*` 宏（定义于 `YomkRpcAPI.h`）实现相同能力，各命令小节附等价宏调用。
+
+### 6.1 yomkrpc 命令清单
+
+| 命令 | 含义 |
+|---|---|
+| `yomkrpc topic print <主题名>` | 订阅指定主题，消息 JSON 文本逐条直出控制台 |
+| `yomkrpc topic list` | 一次性列出域内全部已发现主题（每行一个主题名，按主题名排序） |
+| `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行） |
+| `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
+
+公共参数（各命令通用）：
+
+- **`-d N`**：指定 DDS 域号（合法范围 [0,232]）。优先级 `-d` > 环境变量 > 0：`-d N` 为临时指定，直接使用该值（不读、也不写环境变量）；环境变量 `YOMKRPC_DDS_DOMAIN_ID` 为默认路径，yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行
+- **`-w N`**：收敛判定次数——查询类命令内部每 ~200ms 轮询一次发现缓存快照，连续 N 次集合不变即认为发现收敛、立即输出（默认 5；`topic list`、`topic info` 与 `node list` 生效，`topic print` 为持续订阅不用）
+
+### 6.2 调试主题观察（yomkrpc topic print）
 
 `yomkrpc` 命令行工具订阅任意 DDS 主题（类型无关，无需 IDL 生成代码），经 FastDDS 发现机制自动解析远端类型建立订阅，消息 JSON 文本逐条直出控制台：
 
@@ -279,8 +297,6 @@ ExampleYomkRpcPub
 yomkrpc topic print hello_world        # 默认域 0
 yomkrpc topic print -d 5 sensor_data   # 指定 DDS 域号
 ```
-
-域 id 两种指定方式（优先级 `-d` > 环境变量 > 0）：`-d N` 为临时指定，直接使用该值（不读、也不写环境变量）；环境变量 `YOMKRPC_DDS_DOMAIN_ID` 为默认路径，yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行。
 
 与发布端配合观察（另开两个终端）：
 
@@ -344,7 +360,7 @@ int main(int argc, char *argv[])
 }
 ```
 
-### 列出域内主题（yomkrpc topic list）
+### 6.3 列出域内主题（yomkrpc topic list）
 
 `yomkrpc topic list` 一次性列出当前域内全部已发现主题，每行一个 topicName 按主题名排序：
 
@@ -353,8 +369,6 @@ yomkrpc topic list          # 默认域 0
 yomkrpc topic list -d 5     # 指定 DDS 域号
 yomkrpc topic list -w 7     # 收敛判定放宽为连续 7 次快照不变（默认 5）
 ```
-
-域 id 指定方式与 `topic print` 相同：`-d N` 临时指定（显式覆盖，不写环境变量）；或设置环境变量 `YOMKRPC_DDS_DOMAIN_ID`（启动时无则自动创建默认 0，可持久化到 .bashrc）后免 `-d` 运行。`-w N` 为收敛判定次数（连续 N 次 200ms 快照集合不变即输出，默认 5，仅 `topic list` 生效）。
 
 与发布端配合观察（建议先启动发布端——工具创建调试节点入域后内部自适应收敛查询：每 ~200ms 轮询一次发现缓存快照，连续 5 次集合不变即认为发现收敛、立即输出，无需固定等待窗口）：
 
@@ -386,7 +400,7 @@ if (arr != nullptr)
 resp = YOMKRPC_DEBUG_QUIT();                // 3. 退出前显式清理
 ```
 
-### 查询主题详情（yomkrpc topic info）
+### 6.4 查询主题详情（yomkrpc topic info）
 
 `yomkrpc topic info <主题名>` 查询单个主题的发现详情，命中输出三行：消息类型名（原始 DDS 类型名，不做任何风格转换）、发布者数量、订阅者数量：
 
@@ -395,8 +409,6 @@ yomkrpc topic info hello_world        # 默认域 0
 yomkrpc topic info -d 5 sensor_data   # 指定 DDS 域号
 yomkrpc topic info -w 7 hello_world   # 收敛判定放宽为连续 7 次快照不变（默认 5）
 ```
-
-域 id 指定方式与 `topic print` 相同：`-d N` 临时指定（显式覆盖，不写环境变量）；或设置环境变量 `YOMKRPC_DDS_DOMAIN_ID`（启动时无则自动创建默认 0，可持久化到 .bashrc）后免 `-d` 运行。`-w N` 为收敛判定次数（默认 5，`topic list`、`topic info` 与 `node list` 生效）。
 
 与发布端配合观察（先启动发布端——工具创建调试节点入域后对该主题独立收敛查询：节点内部每 ~200ms 轮询一次该主题详情快照，连续 5 次不变即返回）：
 
@@ -430,7 +442,7 @@ if (arr != nullptr)
 resp = YOMKRPC_DEBUG_QUIT();                       // 3. 退出前显式清理
 ```
 
-### 列出域内节点（yomkrpc node list）
+### 6.5 列出域内节点（yomkrpc node list）
 
 `yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出。节点名称在创建节点时经 `YOMKRPC_NODE(domainId, nodeName)` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
 
@@ -439,8 +451,6 @@ yomkrpc node list          # 默认域 0
 yomkrpc node list -d 5     # 指定 DDS 域号
 yomkrpc node list -w 7     # 收敛判定放宽为连续 7 次快照不变（默认 5）
 ```
-
-域 id 指定方式与 `topic print` 相同（`-d N` 临时指定 / 环境变量 `YOMKRPC_DDS_DOMAIN_ID`），`-w N` 为收敛判定次数（默认 5，`topic list`、`topic info` 与 `node list` 生效）。
 
 与发布端配合观察（先启动发布端——`ExampleYomkRpcPub` 创建节点 `pub_node`，工具创建调试节点入域后对参与者发现缓存独立收敛查询）：
 
@@ -472,9 +482,9 @@ if (arr != nullptr)
 resp = YOMKRPC_DEBUG_QUIT();                  // 3. 退出前显式清理
 ```
 
-## 测试
+## 7 测试
 
-### 1. 编译测试
+### 7.1 编译测试
 
 测试树（`test/`）为独立 CMake 工程，只测 YomkRpc 自有源码（`src/`、`include/`），第三方（FastDDS / YomkServer / YomkRpcMsg）仅链接不插桩：
 
@@ -497,7 +507,7 @@ cmake --build test/build -j
 - `-DYOMKRPC_TEST_SANITIZER=off/asan/tsan`：对自有源码插桩 sanitizer（默认 `off`；tsan 模式经 `setarch -R` 启动以兼容高 ASLR 内核）
 - `-DSTRESS_ITERS=5000 -DSTRESS_CYCLES=30`：压测规模（编译期旋钮，闭环规模 100000/50）
 
-### 2. 一键运行全量测试
+### 7.2 一键运行全量测试
 
 ```bash
 ./test/run_tests.sh                # 全量运行（含 2 个 stress，编译期规模 5000/30）
@@ -514,7 +524,7 @@ cmake --build test/build -j
 - **现场清理**：每个测试在独立临时目录运行（隔离 CWD）；运行前清理 `/dev/shm` 中 FastDDS 上次遗留的共享内存（崩溃/超时时 SHM 段不会自清），每个测试结束后与全部结束后复查残留，发现即清理并判定失败
 - **超时保护**：每个测试由 `timeout` 包裹，防卡死
 
-### 3. 单独运行与压测规模
+### 7.3 单独运行与压测规模
 
 每个测试为独立可执行（纯 `main()` + `CHECK` 断言，返回 0 = 全部通过，非 0 = 存在失败用例），可直接单独运行：
 
@@ -531,7 +541,7 @@ cmake --build test/build --target TestYomkRpcStressSerial TestYomkRpcStressConcu
 
 `./test/run_tests.sh --full` 即自动执行上述重配+重编后再全量运行。
 
-## 开发状态
+## 8 开发状态
 
 - ✅ 基础框架搭建完成
 - ✅ CMake 构建系统集成
@@ -542,10 +552,10 @@ cmake --build test/build --target TestYomkRpcStressSerial TestYomkRpcStressConcu
 - ✅ 类型无关调试（FastDDSDebugNode + YomkRpcDebugService + yomkrpc 命令行工具）
 - 🚧 更多数据类型支持
 
-## License
+## 9 License
 
 MIT License - 详见 [LICENSE.txt](../../LICENSE.txt)
 
-## 链接
+## 10 链接
 
 - [YomkServer 官方仓库](https://github.com/Solitude-5309/YomkServer)
