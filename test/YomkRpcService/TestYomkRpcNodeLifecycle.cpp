@@ -112,15 +112,16 @@ namespace
       void testSetDomainIdGuard()
       {
             FastDDSNode node;
-            CHECK(node.setDomainId(TEST_DOMAIN), "Part B: 首次 setDomainId(200) → true（创建 participant）");
-            CHECK(!node.setDomainId(TEST_DOMAIN),
+            CHECK(node.setDomainId(TEST_DOMAIN, "test-lifecycle-node"),
+                  "Part B: 首次 setDomainId(200, \"test-lifecycle-node\") → true（创建 participant，test 前缀命名）");
+            CHECK(!node.setDomainId(TEST_DOMAIN, "test-lifecycle-node"),
                   "Part B: 重复 setDomainId → false（participant_!=nullptr 守卫，服务层每次新建 FastDDSNode 故不可达）");
             // node 栈对象在此离开作用域析构，清理 participant（DomainParticipantFactory 仍存活）
 
             // O1 后服务层已短路非法域，setDomainId 的 participant==null 分支（create_participant 返回 null）改由此直接覆盖：
             // UINT32_MAX→(int32_t)-1 非法域，create_participant 返回 null，participant_ 保持 null、析构早退，不建 participant
             FastDDSNode badNode;
-            CHECK(!badNode.setDomainId(UINT32_MAX),
+            CHECK(!badNode.setDomainId(UINT32_MAX, "test-lifecycle-bad"),
                   "Part B: setDomainId(UINT32_MAX) → false（非法域 create_participant 返回 null，覆盖 participant==null 分支）");
       }
 } // namespace

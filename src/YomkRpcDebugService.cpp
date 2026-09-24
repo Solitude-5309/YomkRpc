@@ -32,6 +32,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/topic_print", YomkRpcDebugService::topicPrint);
     YomkInstallFunc("/list_topics", YomkRpcDebugService::listTopics);
     YomkInstallFunc("/topic_info", YomkRpcDebugService::topicInfo);
+    YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
     return 0;
 }
@@ -149,6 +150,24 @@ YomkResponse YomkRpcDebugService::topicInfo(YomkPkgPtr pkg)
     lines.emplace_back("Publisher count: " + std::to_string(publisherCount));
     lines.emplace_back("Subscription count: " + std::to_string(subscriptionCount));
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::listNodes(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSNodeList, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::listNodes", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // node_ 非空即已入域，listNodes 必返回 true；持锁收敛等待（最长约 stableRounds*intervalMs）：
+    // 锁保护 node_ 生命周期不被并发 deleteNode 破坏（同 listTopics 既有约定）；0 值参数由节点层
+    // 钳制为默认。无 "not found" 分支——空列表合法（域内暂无命名参与者），语义同 list_topics 空域
+    std::vector<std::string> names;
+    node_->nodeList(names, p->msg.stableRounds, p->msg.intervalMs);
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, names));
 }
 
 YomkResponse YomkRpcDebugService::deleteNode(YomkPkgPtr pkg)

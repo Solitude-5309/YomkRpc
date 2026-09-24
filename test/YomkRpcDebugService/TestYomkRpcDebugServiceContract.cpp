@@ -2,20 +2,21 @@
  * @file TestYomkRpcDebugServiceContract.cpp
  * @brief YomkRpcDebugService 服务层契约测试（DDS-free，白盒经 invoke 直接分发）
  *
- * 范围：仅验证调试服务 6 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
+ * 范围：仅验证调试服务 7 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
  *       输入校验与错误码契约；真实 DDS 生命周期（创建/删除/登记）归
  *       TestYomkRpcDebugServiceLifecycle，节点层守卫与端到端流量归 TestFastDDSDebugNode。
  * 覆盖：
- *   T1 funcInfos 内省 6 端点齐全 + 未知端点 eNo；
+ *   T1 funcInfos 内省 7 端点齐全 + 未知端点 eNo；
  *   T2 /version 正常路径（eOk + 版本串契约 + 忽略 pkg）；
- *   T3 /create_node、/topic_print、/list_topics、/topic_info 解包双守卫（nullptr / 异类包 / 改名伪造）；
+ *   T3 /create_node、/topic_print、/list_topics、/topic_info、/list_nodes 解包双守卫（nullptr / 异类包 / 改名伪造）；
  *   T4 /delete_node 特殊契约：单节点模型无参载荷，handler (void)pkg 不走解包守卫，未建节点时
  *      无论何种载荷均 eNo "debug node not created"（与 YomkRpcService delete_node 的 String
  *      包解包守卫形态不同，属设计差异点）；
  *   T5 /create_node domainId 越界前置拦截（233 / UINT32_MAX → eNo，不触 DDS）；
  *   T6 /topic_print 未建节点早退（node_ 空检查先于 output 空检查）；
  *   T7 /topic_info 未建节点早退（node_ 空检查先于独立收敛触达）。
- * DDS-free 保证：T5 的越界校验在锁外返回；T4/T6/T7 的 node_ 空检查在触达节点层前返回；
+ *   T8 /list_nodes 未建节点早退（node_ 空检查先于独立收敛触达）。
+ * DDS-free 保证：T5 的越界校验在锁外返回；T4/T6/T7/T8 的 node_ 空检查在触达节点层前返回；
  *   /version 不碰 DDS；本测试绝不传合法 DDSDebugNode{0..232}（那会创建真实 participant）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
@@ -76,6 +77,7 @@ namespace
         checkGuards("/topic_print", "DDSDebugTopic", YomkMkPtr(DDSDebugNode, DDSDebugNode{0}));
         checkGuards("/list_topics", "DDSDebugList", YomkMkPtr(String, "wrong"));
         checkGuards("/topic_info", "DDSDebugInfo", YomkMkPtr(String, "wrong"));
+        checkGuards("/list_nodes", "DDSNodeList", YomkMkPtr(String, "wrong"));
     }
 
     // T4：/delete_node 特殊契约——单节点模型无参载荷，(void)pkg 不走解包守卫
@@ -140,6 +142,16 @@ namespace
                   rValid.m_msg.find("debug node not created") != std::string::npos,
               "/topic_info 合法包+未建节点 → eNo debug node not created（node_ 检查先于触达节点层）");
     }
+
+    // T8：/list_nodes 未建节点早退（node_ 空检查先于独立收敛触达）
+    void testListNodeNoNode(YomkRpcDebugService *svc)
+    {
+        // stableRounds=1 为单次快照快速路径；未建节点时 node_ 空检查先行返回，不触 DDS
+        auto rValid = svc->invoke("/list_nodes", YomkMkPtr(DDSNodeList, DDSNodeList{1, 50}));
+        CHECK(rValid.m_status == YomkResponse::eNo &&
+                  rValid.m_msg.find("debug node not created") != std::string::npos,
+              "/list_nodes 合法包+未建节点 → eNo debug node not created（node_ 检查先于触达节点层）");
+    }
 } // namespace
 
 int main()
@@ -150,12 +162,12 @@ int main()
     auto *svc = new YomkRpcDebugService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcDebugService 注册成功（所有权移交框架，init() 已内部调用）");
 
-    // T1：内省——6 端点齐全
+    // T1：内省——7 端点齐全
     auto infos = svc->funcInfos();
-    CHECK(infos.size() == 6 && infos.count("/version") && infos.count("/create_node") &&
+    CHECK(infos.size() == 7 && infos.count("/version") && infos.count("/create_node") &&
               infos.count("/topic_print") && infos.count("/list_topics") && infos.count("/topic_info") &&
-              infos.count("/delete_node"),
-          "funcInfos 内省 6 端点齐全");
+              infos.count("/list_nodes") && infos.count("/delete_node"),
+          "funcInfos 内省 7 端点齐全");
 
     testVersion(svc);
     testUnpackGuards(svc);
@@ -163,6 +175,7 @@ int main()
     testCreateDomainBoundary(svc);
     testTopicPrintNoNode(svc);
     testTopicInfoNoNode(svc);
+    testListNodeNoNode(svc);
 
     CHECK(svc->invoke("/no_such_endpoint").m_status == YomkResponse::eNo, "未知端点返回 eNo");
 

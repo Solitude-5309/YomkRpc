@@ -47,7 +47,10 @@ public:
 
 public:
     // 设置 DDS 域并惰性创建 participant/publisher/subscriber；仅可成功一次，已创建或创建失败返回 false。
-    bool setDomainId(uint32_t domainId);
+    // nodeName 非空时下沉为参与者名称（DomainParticipantQos::name，随 SPDP 发现传播给同域对端，
+    // 创建时固化不可改；string_255 定长 256 字节，超长自动截断），空名不置名（participant 保持
+    // Fast DDS 默认名 RTPSParticipant；默认参，兼容既有调用）。
+    bool setDomainId(uint32_t domainId, const std::string& nodeName = "");
     // 注册订阅主题：接管 type 所有权，收到消息时经 callback 交付；主题名冲突/类型名不符/资源创建失败返回 false。
     bool registerSubTopic(const std::string& topicName, void* type, DataCallback callback);
     // 注册发布主题：接管 type 所有权并创建 writer；主题名冲突/类型名不符/writer 创建失败返回 false。

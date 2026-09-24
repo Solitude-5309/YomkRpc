@@ -8,10 +8,11 @@
  *       已由 TestFastDDSDebugNode 覆盖，本测试不重复；topic_info 命中用例仅直连 FastDDS 建最小
  *       远端发布端触发 EDP 发现（不发布数据），覆盖服务层拼行路径。
  * 覆盖：
- *   A-1 生命周期：创建 → list_topics 收敛空列表 → topic_info 未发现主题 eNo → 重复创建拒绝 →
- *       topicPrint 空回调拒绝 → 正常登记 → 同主题重复登记拒绝 → 异主题登记 → 删除 →
- *       重复删除拒绝 → 删除后 list_topics/topic_info 拒绝 → 删除后重建 → topic_info 命中三行
- *       断言（Type/Publisher count/Subscription count）→ 退出前清理；
+ *   A-1 生命周期：创建 → list_topics 收敛空列表 → list_nodes 单次快照空列表 → topic_info 未发现
+ *       主题 eNo → 重复创建拒绝 → topicPrint 空回调拒绝 → 正常登记 → 同主题重复登记拒绝 →
+ *       异主题登记 → 删除 → 重复删除拒绝 → 删除后 list_topics/list_nodes/topic_info 拒绝 →
+ *       删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
+ *       （Type/Publisher count/Subscription count）→ 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
  *
  * 关键不变式：每个 eOk 创建的调试节点必须在 main 返回前经 /delete_node 显式删除，以规避
@@ -34,6 +35,7 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include <cstdint>
+#include <iostream>
 #include <string>
 
 namespace
@@ -64,6 +66,12 @@ namespace
     {
         return YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs});
     }
+
+    // 构造 /list_nodes 请求包（stableRounds=1 单次快照路径，免收敛等待）
+    YomkPkgPtr mkNodeList()
+    {
+        return YomkMkPtr(DDSNodeList, DDSNodeList{1, 50});
+    }
 } // namespace
 
 int main()
@@ -84,6 +92,14 @@ int main()
           "list_topics（入域无 writer，单次快照）→ eOk（空列表路径）");
     YomkUnPackPkg(listed.m_data, StringArray, arr);
     CHECK(arr != nullptr && arr->d.empty(), "list_topics 返回包可解包为空 StringArray");
+
+    // list_nodes：ctest 串行执行，此刻域 200 无其他参与者；调试节点自身不在自身发现缓存中，
+    // stableRounds=1 单次快照即得空列表（空列表合法：域内暂无命名参与者，语义同 list_topics 空域）
+    auto listedNodes = svc->invoke("/list_nodes", mkNodeList());
+    CHECK(listedNodes.m_status == YomkResponse::eOk && listedNodes.m_data != nullptr,
+          "list_nodes（入域无命名参与者，单次快照）→ eOk（空列表路径）");
+    YomkUnPackPkg(listedNodes.m_data, StringArray, nodeArr);
+    CHECK(nodeArr != nullptr && nodeArr->d.empty(), "list_nodes 返回包可解包为空 StringArray");
 
     // topic_info 未发现主题：node_ 已建、域内无该主题，单次快照快速路径 → eNo
     auto infoAbsent = svc->invoke("/topic_info", mkInfo("t_info_absent", 1, 50));
@@ -127,8 +143,75 @@ int main()
               infoAfterDel.m_msg.find("not created") != std::string::npos,
           "删除后 topic_info → eNo debug node not created");
 
+    auto nodesAfterDel = svc->invoke("/list_nodes", mkNodeList());
+    CHECK(nodesAfterDel.m_status == YomkResponse::eNo &&
+              nodesAfterDel.m_msg.find("not created") != std::string::npos,
+          "删除后 list_nodes → eNo debug node not created");
+
     CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN)).m_status == YomkResponse::eOk,
           "删除后重建调试节点 → eOk（delete/create 闭环）");
+
+    // ---- node list 命中用例：命名远端 participant（仅入域触发 SPDP 发现，不建任何端点）----
+    // 复用重建后的域 200 调试节点；置于 topic_info 命中用例之前——本块先执行保证
+    // seenParticipants_ 纯净（topic_info 块的 hitParticipant 默认名 "RTPSParticipant" 若先被
+    // 发现，REMOVED 不追踪会残留进本块断言）。SPDP 参与者发现独立于 EDP：peer 无需任何端点。
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 造命名参与者
+        dds::DomainParticipantQos peerQos = dds::PARTICIPANT_QOS_DEFAULT;
+        peerQos.name(std::string("test-svc-peer"));
+        auto *peerParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, peerQos);
+        CHECK(peerParticipant != nullptr, "命名 peer participant 创建成功（node list 命中用例）");
+        // "/" 名 peer：ROS2 参与者默认占位名（rmw_fastrtps 把参与者名统一置为根 enclave "/"，
+        // rcl_init 兜底，节点名走另一通道），显式 qos.name("/") 复现，验证 list_nodes 的
+        // "/" 过滤语义（ROS2 参与者不占行）
+        dds::DomainParticipantQos slashQos = dds::PARTICIPANT_QOS_DEFAULT;
+        slashQos.name(std::string("/"));
+        auto *slashParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, slashQos);
+        CHECK(slashParticipant != nullptr, "slash peer participant 创建成功（list_nodes 过滤用例）");
+        if (peerParticipant != nullptr)
+        {
+            // peer 后于调试节点入域——调试节点经活动发现（PDP 组播）收到 DISCOVERED_PARTICIPANT，
+            // 收敛窗口覆盖发现延迟；late joiner 反向时序已由 TestFastDDSDebugNode 覆盖
+            auto hitNodes = svc->invoke("/list_nodes", YomkMkPtr(DDSNodeList, DDSNodeList{5, 100}));
+            CHECK(hitNodes.m_status == YomkResponse::eOk && hitNodes.m_data != nullptr,
+                  "list_nodes(5,100ms) → eOk（参与者发现收敛命中）");
+            YomkUnPackPkg(hitNodes.m_data, StringArray, nodesArr);
+            CHECK(nodesArr != nullptr, "list_nodes 返回包可解包为 StringArray");
+            bool hasPeer = false;
+            bool noBadLine = true;  // 每行非空、非 "/" 且不含 GUID 串特征 '|'（无效名参与者跳过的证据）
+            bool noSelf = true;
+            if (nodesArr != nullptr)
+            {
+                for (const auto &name : nodesArr->d)
+                {
+                    if (name == "test-svc-peer")
+                    {
+                        hasPeer = true;
+                    }
+                    if (name.empty() || name == "/" || name.find('|') != std::string::npos)
+                    {
+                        noBadLine = false;
+                    }
+                    if (name == "yomkrpc-debug")
+                    {
+                        noSelf = false;
+                    }
+                }
+                std::cout << "[OBSERVE] list_nodes " << nodesArr->d.size() << " nodes" << std::endl;
+            }
+            CHECK(hasPeer, "list_nodes 含 test-svc-peer（SPDP participant_name 端到端传播）");
+            CHECK(noBadLine, "list_nodes 无空名/\"/\"名/GUID 串行（无效名参与者跳过）");
+            CHECK(noSelf, "list_nodes 不含调试节点自身（自身不在发现回调中）");
+
+            dds::DomainParticipantFactory::get_instance()->delete_participant(peerParticipant);
+        }
+        if (slashParticipant != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(slashParticipant);
+        }
+    }
 
     // ---- topic_info 命中用例：远端最小发布端（仅建端点触发 EDP 发现，不发布数据）----
     // 复用重建后的域 200 调试节点；时序模式同 TestFastDDSDebugNode 多端点用例：

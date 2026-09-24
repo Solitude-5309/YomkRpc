@@ -22,6 +22,10 @@
  *   计数    同主题 2 个 DataWriter + 1 个 DataReader → topicInfo 独立收敛查询返回
  *         typeName（原始 DDS 类型名，无转换）、publisherCount=2、subscriptionCount=1；
  *         未发现主题 topicInfo → false（单次快照快速路径）。
+ *   参与者  命名 peer（FastDDSNode setDomainId 带名）+ 空名 peer + "/" 名 peer（ROS2 占位名）
+ *         入域 → nodeList 独立收敛查询含命名 peer（SPDP participant_name 端到端传播）、不含
+ *         调试节点自身（自身不在发现回调）、无空名/"/"名/GUID 串行（无效名参与者跳过）；
+ *         未 setDomainId 时 nodeList → false。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -37,6 +41,7 @@
 
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp> // 纯订阅端 participant（仅订阅者用例）
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -60,7 +65,9 @@ int main()
     {
         FastDDSDebugNode dbg;
         std::vector<std::pair<std::string, std::string>> listed;
+        std::vector<std::string> nodes;
         CHECK(!dbg.listTopics(listed), "未 setDomainId 时 listTopics → false（participant 未创建）");
+        CHECK(!dbg.nodeList(nodes), "未 setDomainId 时 nodeList → false（participant 未创建）");
         CHECK(!dbg.subscribeTopic(TEST_TOPIC), "未 setDomainId 时 subscribeTopic → false（participant 未创建）");
         CHECK(dbg.setDomainId(TEST_DOMAIN), "setDomainId(200) → true");
         CHECK(!dbg.setDomainId(TEST_DOMAIN), "重复 setDomainId(200) → false（仅可成功一次）");
@@ -88,7 +95,8 @@ int main()
     {
         // 发布端：真实 YomkRpcMsg 类型制造被观察流量（RELIABLE 默认 QoS）
         FastDDSNode pub;
-        CHECK(pub.setDomainId(TEST_DOMAIN), "发布端 setDomainId(200) → true");
+        CHECK(pub.setDomainId(TEST_DOMAIN, "test-pub"),
+              "发布端 setDomainId(200, \"test-pub\") → true（test 前缀命名）");
         CHECK(pub.registerPubTopic(TEST_TOPIC, new YomkRpc::MStringPubSubType()),
               "发布端 registerPubTopic(t_debug, MString) → true");
 
@@ -306,6 +314,65 @@ int main()
                 countParticipant->delete_subscriber(sub);
             }
             dds::DomainParticipantFactory::get_instance()->delete_participant(countParticipant);
+        }
+    }
+
+    // ---- 参与者发现用例：命名 peer + 空名 peer 入域 → nodeList 收敛查询（空名跳过） ----
+    {
+        // peer 先于被测端入域（late joiner 经 PDP 全量重放既有 participant 发现信息）：
+        // 命名 peer 复用改造后 setDomainId 带名路径，恰好端到端验证名称经 SPDP 传播
+        FastDDSNode peer;
+        CHECK(peer.setDomainId(TEST_DOMAIN, "test-peer-node"),
+              "命名 peer setDomainId(200, \"test-peer-node\") → true（test 前缀命名）");
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 造匿名参与者
+        // 匿名 peer：Fast DDS 默认参与者名为 "RTPSParticipant"（DomainParticipantQos 默认值
+        // 非空），须显式 qos.name("") 才得真空名参与者，用于验证 nodeList 的空名跳过语义
+        dds::DomainParticipantQos anonQos = dds::PARTICIPANT_QOS_DEFAULT;
+        anonQos.name(std::string());
+        auto* anonParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, anonQos);
+        CHECK(anonParticipant != nullptr, "匿名 peer participant 创建成功（显式 qos.name(\"\")）");
+        // "/" 名 peer：ROS2 rmw_fastrtps 把参与者名统一置为根 enclave "/"（rcl_init 兜底，
+        // 节点名走另一通道），显式 qos.name("/") 复现该形态，验证 nodeList 的 "/" 过滤语义
+        dds::DomainParticipantQos slashQos = dds::PARTICIPANT_QOS_DEFAULT;
+        slashQos.name(std::string("/"));
+        auto* slashParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, slashQos);
+        CHECK(slashParticipant != nullptr, "slash peer participant 创建成功（显式 qos.name(\"/\")）");
+
+        FastDDSDebugNode dbg;
+        CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（参与者发现场景）");
+        std::vector<std::string> nodes;
+        CHECK(dbg.nodeList(nodes, 5, 100), "nodeList(5,100ms) → true（参与者发现收敛查询）");
+        bool hasNamed = false;
+        bool noBadLine = true;  // 每行均非空、非 "/" 且不含 GUID 串特征 '|'（无效名参与者跳过的证据）
+        for (const auto& name : nodes)
+        {
+            if (name == "test-peer-node")
+            {
+                hasNamed = true;
+            }
+            if (name.empty() || name == "/" || name.find('|') != std::string::npos)
+            {
+                noBadLine = false;
+            }
+        }
+        CHECK(hasNamed, "nodeList 含 test-peer-node（SPDP participant_name 端到端传播）");
+        CHECK(noBadLine, "nodeList 无空名/\"/\"名/GUID 串行（无效名参与者跳过，每行均为有效命名节点）");
+        CHECK(std::find(nodes.begin(), nodes.end(), "yomkrpc-debug") == nodes.end(),
+              "nodeList 不含调试节点自身（自身不在发现回调中）");
+        std::cout << "[OBSERVE] nodeList " << nodes.size() << " nodes:" << std::endl;
+        for (const auto& name : nodes)
+        {
+            std::cout << "[OBSERVE]   - " << name << std::endl;
+        }
+        if (anonParticipant != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(anonParticipant);
+        }
+        if (slashParticipant != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(slashParticipant);
         }
     }
 

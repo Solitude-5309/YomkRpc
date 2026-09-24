@@ -85,6 +85,21 @@ public:
         }
     }
 
+    // 仅处理 DISCOVERED_PARTICIPANT（QoS 变更/移除忽略）；回调内仅缓存 GUID 与名称，
+    // 供 nodeList 列出域内命名参与者（不参与订阅建立链路）。
+    void on_participant_discovery(
+            DomainParticipant* /*participant*/,
+            rtps::ParticipantDiscoveryStatus reason,
+            const ParticipantBuiltinTopicData& info,
+            bool& should_be_ignored) override
+    {
+        should_be_ignored = false;
+        if (reason == rtps::ParticipantDiscoveryStatus::DISCOVERED_PARTICIPANT)
+        {
+            node_.onParticipantDiscovered(info);
+        }
+    }
+
 private:
     FastDDSDebugNode& node_;
 };
@@ -236,9 +251,12 @@ bool FastDDSDebugNode::setDomainId(uint32_t domainId)
     }
 
     // listener 仅服务发现回调（RTPS 层直接派发，不受 mask 控制）；mask 用 none() 对齐
-    // FastDDSNode——实测 all() 会使本节点上的动态 reader 匹配成功但数据不交付
+    // FastDDSNode——实测 all() 会使本节点上的动态 reader 匹配成功但数据不交付。
+    // 调试节点固定名：入域即被同域 nodeList 列出（发现层面可辨识），创建后不可改
+    DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
+    qos.name(std::string("yomkrpc-debug"));
     participant_ = DomainParticipantFactory::get_instance()->create_participant(
-        domainId, PARTICIPANT_QOS_DEFAULT, listener_.get(), StatusMask::none());
+        domainId, qos, listener_.get(), StatusMask::none());
     if (participant_ == nullptr)
     {
         return false;
@@ -334,6 +352,27 @@ bool FastDDSDebugNode::topicInfo(const std::string& topicName, std::string& type
         topicName, typeName, publisherCount, subscriptionCount, stableRounds, intervalMs);
 }
 
+bool FastDDSDebugNode::nodeList(std::vector<std::string>& names,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    return waitForNodesStable(names, stableRounds, intervalMs);
+}
+
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
         uint32_t stableRounds, uint32_t intervalMs)
 {
@@ -427,6 +466,48 @@ bool FastDDSDebugNode::waitForTopicInfoStable(const std::string& topicName, std:
     return found;
 }
 
+bool FastDDSDebugNode::waitForNodesStable(std::vector<std::string>& names,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    // 快照：锁内拷贝参与者名称列表（仅有效命名参与者：名称非空且非 "/"——"/" 是 ROS2 参与
+    // 者的默认占位名，rmw_fastrtps 把参与者名统一置为根 enclave "/"（rcl_init 兜底），节点名
+    // 走另一通道，无辨识价值——跳过），末尾按名称排序。同名多参与者各自一行（缓存以 GUID 串
+    // 为 key，每参与者一项）。只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
+    auto snapshot = [this]()
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        std::vector<std::string> items;
+        items.reserve(seenParticipants_.size());
+        for (const auto& kv : seenParticipants_)
+        {
+            if (!kv.second.empty() && kv.second != "/")
+            {
+                items.push_back(kv.second);
+            }
+        }
+        std::sort(items.begin(), items.end());
+        return items;
+    };
+    std::vector<std::string> prev = snapshot();
+    uint32_t unchanged = 1;
+    while (unchanged < stableRounds)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        std::vector<std::string> cur = snapshot();
+        if (cur == prev)
+        {
+            ++unchanged;
+        }
+        else
+        {
+            prev = std::move(cur);  // 又有新参与者入域，重置不变计数
+            unchanged = 1;
+        }
+    }
+    names = std::move(prev);
+    return true;
+}
+
 // 发现线程回调入口：新见 writer 追加进 seen_ 列表并唤醒工作线程；回调内不建订阅。
 // 仅拿 seenMtx_ 叶子锁：本回调在 Fast DDS EDP 锁临界区内被调用，拿 mtx_ 会与工作线程
 // （持 mtx_ 建 reader 内部等 PDP/EDP 锁）锁序倒置死锁（详见 seenMtx_ 成员注释）。
@@ -450,6 +531,17 @@ bool FastDDSDebugNode::onReaderDiscovered(const std::string& topicName,
     std::lock_guard<std::mutex> lock(seenMtx_);
     seenReaders_[topicName].push_back(info);
     return true;
+}
+
+// 发现线程回调入口：新见 participant 缓存 GUID 串与名称（GUID 串仅作幂等去重 key，emplace
+// 重复发现不覆盖）；不唤醒工作线程（订阅建立链路不依赖参与者发现）。仅拿 seenMtx_ 叶子锁
+//（本回调在 Fast DDS PDP 大锁临界区内被调用，锁序倒置防护同上）。
+void FastDDSDebugNode::onParticipantDiscovered(const rtps::ParticipantBuiltinTopicData& info)
+{
+    std::ostringstream os;
+    os << info.guid;
+    std::lock_guard<std::mutex> lock(seenMtx_);
+    seenParticipants_.emplace(os.str(), std::string(info.participant_name.to_string()));
 }
 
 // 官方文档 15.16 "Remote type discovery and endpoint matching" 接收端形态：

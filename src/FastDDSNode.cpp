@@ -143,7 +143,7 @@ FastDDSNode::~FastDDSNode()
     DomainParticipantFactory::get_instance()->delete_participant(participant_);
 }
 
-bool FastDDSNode::setDomainId(uint32_t domainId)
+bool FastDDSNode::setDomainId(uint32_t domainId, const std::string& nodeName)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ != nullptr)
@@ -151,8 +151,15 @@ bool FastDDSNode::setDomainId(uint32_t domainId)
         return false;
     }
 
+    // nodeName 非空时下沉为参与者名称：SPDP 发现数据原生携带 participant_name，同域对端经
+    // 发现机制可读（创建时固化不可改）；string_255 定长 256 字节，超长自动截断
+    DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
+    if (!nodeName.empty())
+    {
+        qos.name(nodeName);
+    }
     participant_ = DomainParticipantFactory::get_instance()->create_participant(
-        domainId, PARTICIPANT_QOS_DEFAULT, nullptr, StatusMask::none());
+        domainId, qos, nullptr, StatusMask::none());
     if (participant_ == nullptr)
     {
         return false;

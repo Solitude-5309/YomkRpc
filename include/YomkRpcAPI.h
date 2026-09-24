@@ -106,5 +106,15 @@
         "/YomkRpcDebugService/topic_info",                                   \
         YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs}))
 
+// 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
+// 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
+// stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，
+// 每行一个节点名（participant_name 非空才列出，空名参与者跳过，不输出 GUID 串），按名称
+// 排序；列表可为空（域内无命名参与者）。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_NODE_LIST(stableRounds, intervalMs)                    \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/list_nodes",                                   \
+        YomkMkPtr(DDSNodeList, DDSNodeList{stableRounds, intervalMs}))
+
 // 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)

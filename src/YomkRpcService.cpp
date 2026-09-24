@@ -84,7 +84,7 @@ YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
     }
 
     auto node = std::make_unique<FastDDSNode>();
-    if (!node->setDomainId(p->msg.domainId))
+    if (!node->setDomainId(p->msg.domainId, p->msg.nodeName))
     {
         YOMK_ERROR_TAG("YomkRpcService::createNode", "create node [", p->msg.nodeName, "] failed: setDomainId error");
         return YomkResponse(YomkResponse::eNo, "create node [" + p->msg.nodeName + "] failed: setDomainId error");
