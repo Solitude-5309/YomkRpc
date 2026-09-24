@@ -17,9 +17,9 @@
 | `YOMKRPC_LOAN(nodeName, topicName, outPtr)` | `/YomkRpcService/loan` | 借出发送缓冲 | outPtr 为输出参数，成功指向 `DDSLoanResult{sample}` 池内样本、失败置 nullptr；仅 plain 类型支持 |
 | `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | `/YomkRpcService/discard_loan` | 归还未发布的借出缓冲 | 打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
 | `YOMKRPC_DEBUG_NODE(domainId)` | `/YomkRpcDebugService/create_node` | 创建调试节点 | 打包 `DDSDebugNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试 |
-| `YOMKRPC_DEBUG_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误 |
-| `YOMKRPC_DEBUG_LIST(stableRounds, intervalMs)` | `/YomkRpcDebugService/list_topics` | 列出域内主题 | 打包 `DDSDebugList{stableRounds, intervalMs}`；自适应收敛查询：内部每 ~200ms 轮询一次发现缓存快照，连续 stableRounds 次集合不变即返回（0 值钳制默认 5 次/200ms，最长阻塞约 stableRounds\*intervalMs）；远端 DataWriter 与 DataReader 均记录（仅有订阅者而无发布者的主题同样列出）；返回 StringArray 包，每行一个 topicName（仅主题名，不含类型）按主题名排序；须先创建调试节点，列表可为空（域内无 writer/reader） |
-| `YOMKRPC_DEBUG_INFO(topicName, stableRounds, intervalMs)` | `/YomkRpcDebugService/topic_info` | 查询主题详情 | 打包 `DDSDebugInfo{topicName, stableRounds, intervalMs}`；独立收敛查询单个主题的发现详情（不依赖 list_topics），连续 stableRounds 次快照不变即返回（0 值钳制默认 5 次/200ms）；命中返回 StringArray 三行：`Type: 原始 DDS 类型名`（不做任何风格转换）、`Publisher count: N`、`Subscription count: N`；未发现主题返回错误；须先创建调试节点 |
+| `YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误 |
+| `YOMKRPC_DEBUG_TOPIC_LIST(stableRounds, intervalMs)` | `/YomkRpcDebugService/list_topics` | 列出域内主题 | 打包 `DDSDebugList{stableRounds, intervalMs}`；自适应收敛查询：内部每 ~200ms 轮询一次发现缓存快照，连续 stableRounds 次集合不变即返回（0 值钳制默认 5 次/200ms，最长阻塞约 stableRounds\*intervalMs）；远端 DataWriter 与 DataReader 均记录（仅有订阅者而无发布者的主题同样列出）；返回 StringArray 包，每行一个 topicName（仅主题名，不含类型）按主题名排序；须先创建调试节点，列表可为空（域内无 writer/reader） |
+| `YOMKRPC_DEBUG_TOPIC_INFO(topicName, stableRounds, intervalMs)` | `/YomkRpcDebugService/topic_info` | 查询主题详情 | 打包 `DDSDebugInfo{topicName, stableRounds, intervalMs}`；独立收敛查询单个主题的发现详情（不依赖 list_topics），连续 stableRounds 次快照不变即返回（0 值钳制默认 5 次/200ms）；命中返回 StringArray 三行：`Type: 原始 DDS 类型名`（不做任何风格转换）、`Publisher count: N`、`Subscription count: N`；未发现主题返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_NODE_LIST(stableRounds, intervalMs)` | `/YomkRpcDebugService/list_nodes` | 列出域内节点 | 打包 `DDSNodeList{stableRounds, intervalMs}`；独立收敛查询域内已发现的命名参与者（不依赖 list_topics/topic_info），连续 stableRounds 次快照不变即返回（0 值钳制默认 5 次/200ms）；返回 StringArray，每行一个节点名（participant_name 非空且非 "/" 才列出，空名与 ROS2 参与者默认占位名 "/" 跳过，不输出 GUID 串）按名称排序；调试节点自身不在自身发现回调中，天然不列出；须先创建调试节点，列表可为空（域内无有效命名参与者） |
 | `YOMKRPC_DEBUG_QUIT()` | `/YomkRpcDebugService/delete_node` | 退出调试 | 无参宏（载荷 nullptr）；删除调试节点并销毁其全部 DDS 实体，未创建时返回错误 |
 
@@ -324,7 +324,7 @@ int main(int argc, char *argv[])
 
     // 2. 登记调试主题：发现匹配远端 DataWriter 后自动建订阅，
     //    消息文本逐条投递 output 回调（输出权在调用方，服务层不打印）
-    resp = YOMKRPC_DEBUG_PRINT("hello_world", [](const std::string &text)
+    resp = YOMKRPC_DEBUG_TOPIC_PRINT("hello_world", [](const std::string &text)
         { std::cout << text << std::endl; });
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -377,7 +377,7 @@ hello_world
 YOMK_INIT();
 YOMK_NEW_SERVICE(YomkRpcDebugService);
 auto resp = YOMKRPC_DEBUG_NODE(0);          // 1. 创建调试节点
-resp = YOMKRPC_DEBUG_LIST(5, 200);          // 2. 收敛查询：连续 5 次 200ms 快照不变即返回 StringArray 包
+resp = YOMKRPC_DEBUG_TOPIC_LIST(5, 200);          // 2. 收敛查询：连续 5 次 200ms 快照不变即返回 StringArray 包
 YomkUnPackPkg(resp.m_data, StringArray, arr);
 if (arr != nullptr)
 {
@@ -421,7 +421,7 @@ Subscription count: 0
 YOMK_INIT();
 YOMK_NEW_SERVICE(YomkRpcDebugService);
 auto resp = YOMKRPC_DEBUG_NODE(0);                 // 1. 创建调试节点
-resp = YOMKRPC_DEBUG_INFO("hello_world", 5, 200);  // 2. 独立收敛查询：连续 5 次 200ms 快照不变即返回 StringArray 三行
+resp = YOMKRPC_DEBUG_TOPIC_INFO("hello_world", 5, 200);  // 2. 独立收敛查询：连续 5 次 200ms 快照不变即返回 StringArray 三行
 YomkUnPackPkg(resp.m_data, StringArray, arr);
 if (arr != nullptr)
 {

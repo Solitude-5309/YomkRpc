@@ -81,7 +81,7 @@
 
 // 登记调试主题：发现匹配的远端 DataWriter 后自动解析类型并建立订阅，消息 JSON 文本逐条投递
 // output（DDSDebugOutputFunc，用户自定义，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误。返回 YomkResponse。
-#define YOMKRPC_DEBUG_PRINT(topicName, output) \
+#define YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output) \
     YOMK_REQUEST(                              \
         "/YomkRpcDebugService/topic_print",    \
         YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, output}))
@@ -91,7 +91,7 @@
 // stableRounds*intervalMs）。远端 DataWriter 与 DataReader 均记录——仅有订阅者而无发布者的主题
 // 同样列出。返回 StringArray 包，每行一个 topicName（仅主题名，不含类型），按主题名排序；
 // 列表可为空（域内无 writer/reader）。须先创建调试节点。返回 YomkResponse。
-#define YOMKRPC_DEBUG_LIST(stableRounds, intervalMs)                         \
+#define YOMKRPC_DEBUG_TOPIC_LIST(stableRounds, intervalMs)                   \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/list_topics",                                  \
         YomkMkPtr(DDSDebugList, DDSDebugList{stableRounds, intervalMs}))
@@ -101,7 +101,7 @@
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。命中返回 StringArray
 // 三行：Type: <原始 DDS 类型名>、Publisher count: <N>、Subscription count: <N>（类型名原样输出，
 // 无任何风格转换）；未发现主题返回错误。须先创建调试节点。返回 YomkResponse。
-#define YOMKRPC_DEBUG_INFO(topicName, stableRounds, intervalMs)              \
+#define YOMKRPC_DEBUG_TOPIC_INFO(topicName, stableRounds, intervalMs)        \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/topic_info",                                   \
         YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs}))

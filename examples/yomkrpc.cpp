@@ -157,7 +157,7 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
     {
         std::cout << text << std::endl; // 逐条直出并刷新
     };
-    resp = YOMKRPC_DEBUG_PRINT(topicName, onMessage);
+    resp = YOMKRPC_DEBUG_TOPIC_PRINT(topicName, onMessage);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "register debug topic failed: ", resp.m_msg);
@@ -201,7 +201,7 @@ static int runList(uint32_t domainId, uint32_t waitRounds)
 
     // 2. 收敛查询：节点内部轮询发现缓存快照（~200ms 间隔），连续 waitRounds 次集合不变即返回，
     //    发现重放完成即立即输出，无需固定等待窗口
-    resp = YOMKRPC_DEBUG_LIST(waitRounds, 200);
+    resp = YOMKRPC_DEBUG_TOPIC_LIST(waitRounds, 200);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "list topics failed: ", resp.m_msg);
@@ -257,7 +257,7 @@ static int runInfo(uint32_t domainId, const std::string &topicName, uint32_t wai
     // 2. 独立收敛查询单主题详情（与 list 查询完全分开的路径）：命中返回 StringArray 三行，
     //    三行文案由服务层拼装（Type / Publisher count / Subscription count），原样直出；
     //    未发现主题（含收敛窗口内始终不可见）返回 eNo
-    resp = YOMKRPC_DEBUG_INFO(topicName, waitRounds, 200);
+    resp = YOMKRPC_DEBUG_TOPIC_INFO(topicName, waitRounds, 200);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "topic info failed: ", resp.m_msg);
