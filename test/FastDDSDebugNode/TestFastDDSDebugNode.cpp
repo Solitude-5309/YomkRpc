@@ -19,6 +19,9 @@
 *         listTopics(2,100ms) 收敛快照与 listTopics(1) 一致（含 t_debug 与类型名）。
  *   仅订阅者 纯订阅端仅建 DataReader（t_reader_only，无任何 writer）→ listTopics 同样
  *         列出该主题与类型名（远端 DataReader 发现缓存，writer 优先 reader 补缺）。
+ *   计数    同主题 2 个 DataWriter + 1 个 DataReader → topicInfo 独立收敛查询返回
+ *         typeName（原始 DDS 类型名，无转换）、publisherCount=2、subscriptionCount=1；
+ *         未发现主题 topicInfo → false（单次快照快速路径）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -221,6 +224,88 @@ int main()
                 subParticipant->delete_subscriber(sub);
             }
             dds::DomainParticipantFactory::get_instance()->delete_participant(subParticipant);
+        }
+    }
+
+    // ---- 多端点计数用例：同主题 2 个 DataWriter + 1 个 DataReader → topicInfo 计数正确 ----
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 搭建多端点场景
+        constexpr const char* COUNT_TOPIC = "t_info_counts";
+        auto* countParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(countParticipant != nullptr, "多端点场景 participant 创建成功（计数用例）");
+        if (countParticipant != nullptr)
+        {
+            // TypeSupport 须活过 topic/writer/reader 使用期（声明顺序同"仅有订阅者"块）
+            dds::TypeSupport ts(new YomkRpc::MStringPubSubType());
+            ts.register_type(countParticipant);
+            auto* pub = countParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            auto* sub = countParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            auto* topic = countParticipant->create_topic(
+                COUNT_TOPIC, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+            auto* w1 = (pub != nullptr && topic != nullptr)
+                ? pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+            auto* w2 = (pub != nullptr && topic != nullptr)
+                ? pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+            auto* r1 = (sub != nullptr && topic != nullptr)
+                ? sub->create_datareader(topic, dds::DATAREADER_QOS_DEFAULT) : nullptr;
+            CHECK(w1 != nullptr && w2 != nullptr && r1 != nullptr,
+                  "2 个 DataWriter + 1 个 DataReader 创建成功（同主题 t_info_counts）");
+
+            if (w1 != nullptr && w2 != nullptr && r1 != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（计数场景）");
+                // 先经 listTopics 收敛确认发现完成（late joiner 经 EDP 重放），再独立收敛查询：
+                // topicInfo 不依赖 listTopics，此调用仅为本用例的时序前置
+                std::vector<std::pair<std::string, std::string>> listed;
+                CHECK(dbg.listTopics(listed, 5, 100), "listTopics(5,100ms) → true（计数场景收敛）");
+                std::string typeName;
+                size_t pubCount = 0;
+                size_t subCount = 0;
+                CHECK(dbg.topicInfo(COUNT_TOPIC, typeName, pubCount, subCount, 5, 100),
+                      "topicInfo(t_info_counts,5,100ms) → true（独立收敛查询命中）");
+                CHECK(typeName == "YomkRpc::MString",
+                      "topicInfo 类型名为原始 DDS 类型名（YomkRpc::MString，无转换）");
+                CHECK(pubCount == 2, "topicInfo publisherCount == 2（同主题两个远端 DataWriter）");
+                CHECK(subCount == 1, "topicInfo subscriptionCount == 1（同主题一个远端 DataReader）");
+                std::cout << "[OBSERVE] topicInfo pub=" << pubCount << " sub=" << subCount
+                          << " type=" << typeName << std::endl;
+
+                // 未发现主题：单次快照快速路径（stableRounds=1 免等待）→ false
+                std::string missType;
+                size_t missPub = 0;
+                size_t missSub = 0;
+                CHECK(!dbg.topicInfo("t_not_exist", missType, missPub, missSub, 1, 50),
+                      "topicInfo(t_not_exist,1,50) → false（未发现主题，单次快照快速路径）");
+            } // dbg 析构：reader/topic/subscriber/participant 逆序清理，随后 ts 析构
+
+            // 清理：writer/reader → topic → publisher/subscriber → participant（同既有块模式）
+            if (w1 != nullptr && pub != nullptr)
+            {
+                pub->delete_datawriter(w1);
+            }
+            if (w2 != nullptr && pub != nullptr)
+            {
+                pub->delete_datawriter(w2);
+            }
+            if (r1 != nullptr && sub != nullptr)
+            {
+                sub->delete_datareader(r1);
+            }
+            if (topic != nullptr)
+            {
+                countParticipant->delete_topic(topic);
+            }
+            if (pub != nullptr)
+            {
+                countParticipant->delete_publisher(pub);
+            }
+            if (sub != nullptr)
+            {
+                countParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(countParticipant);
         }
     }
 

@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 #include <fastdds/dds/core/status/StatusMask.hpp>
@@ -310,12 +311,35 @@ bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string
     return waitForTopicsStable(topics, stableRounds, intervalMs);
 }
 
+bool FastDDSDebugNode::topicInfo(const std::string& topicName, std::string& typeName,
+        size_t& publisherCount, size_t& subscriptionCount,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    return waitForTopicInfoStable(
+        topicName, typeName, publisherCount, subscriptionCount, stableRounds, intervalMs);
+}
+
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
         uint32_t stableRounds, uint32_t intervalMs)
 {
     // 快照：锁内合并拷贝 seen_（writer）与 seenReaders_（reader——仅有订阅者的主题同样
-    // 列出），writer 优先、reader 补缺，末尾按主题名排序（两 map 各自有序但合并后交错）。
-    // 只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
+    // 列出），类型名取各主题列表首项，writer 优先、reader 补缺，末尾按主题名排序
+    //（两 map 各自有序但合并后交错）。只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
     auto snapshot = [this]()
     {
         std::lock_guard<std::mutex> lock(seenMtx_);
@@ -323,13 +347,13 @@ bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, st
         items.reserve(seen_.size() + seenReaders_.size());
         for (const auto& kv : seen_)
         {
-            items.emplace_back(kv.first, kv.second.type_name.to_string());
+            items.emplace_back(kv.first, kv.second.front().type_name.to_string());
         }
         for (const auto& kv : seenReaders_)
         {
             if (seen_.count(kv.first) == 0)
             {
-                items.emplace_back(kv.first, kv.second.type_name.to_string());
+                items.emplace_back(kv.first, kv.second.front().type_name.to_string());
             }
         }
         std::sort(items.begin(), items.end());
@@ -355,7 +379,55 @@ bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, st
     return true;
 }
 
-// 发现线程回调入口：首见 writer 记入缓存并唤醒工作线程；回调内不建订阅。
+bool FastDDSDebugNode::waitForTopicInfoStable(const std::string& topicName, std::string& typeName,
+        size_t& publisherCount, size_t& subscriptionCount,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    // 快照：锁内构建目标主题详情四元组（found 标志 / 类型名 / 发布者数 / 订阅者数）；类型名
+    // writer 优先、reader 补缺；只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
+    auto snapshot = [this, &topicName]()
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        auto w = seen_.find(topicName);
+        auto r = seenReaders_.find(topicName);
+        if (w == seen_.end() && r == seenReaders_.end())
+        {
+            return std::make_tuple(false, std::string(), size_t{0}, size_t{0});
+        }
+        const std::string name = (w != seen_.end())
+            ? w->second.front().type_name.to_string()
+            : r->second.front().type_name.to_string();
+        const size_t pubCount = (w != seen_.end()) ? w->second.size() : size_t{0};
+        const size_t subCount = (r != seenReaders_.end()) ? r->second.size() : size_t{0};
+        return std::make_tuple(true, name, pubCount, subCount);
+    };
+    auto prev = snapshot();
+    uint32_t unchanged = 1;
+    while (unchanged < stableRounds)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        auto cur = snapshot();
+        if (cur == prev)
+        {
+            ++unchanged;
+        }
+        else
+        {
+            prev = std::move(cur);  // 端点变化，重置不变计数
+            unchanged = 1;
+        }
+    }
+    const bool found = std::get<0>(prev);
+    if (found)
+    {
+        typeName = std::get<1>(prev);
+        publisherCount = std::get<2>(prev);
+        subscriptionCount = std::get<3>(prev);
+    }
+    return found;
+}
+
+// 发现线程回调入口：新见 writer 追加进 seen_ 列表并唤醒工作线程；回调内不建订阅。
 // 仅拿 seenMtx_ 叶子锁：本回调在 Fast DDS EDP 锁临界区内被调用，拿 mtx_ 会与工作线程
 // （持 mtx_ 建 reader 内部等 PDP/EDP 锁）锁序倒置死锁（详见 seenMtx_ 成员注释）。
 bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
@@ -363,23 +435,21 @@ bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
 {
     {
         std::lock_guard<std::mutex> lock(seenMtx_);
-        if (!seen_.emplace(topicName, info).second)
-        {
-            return false;
-        }
+        seen_[topicName].push_back(info);
     }
     cv_.notify_all();
     return true;
 }
 
-// 发现线程回调入口：首见 reader 记入 seenReaders_ 缓存；不唤醒工作线程（订阅建立仅由
-// writer 驱动，reader 缓存仅供 listTopics 列出仅有订阅者的主题）。仅拿 seenMtx_ 叶子锁
-//（本回调在 Fast DDS PDP 大锁临界区内被调用，锁序倒置防护同上）。
+// 发现线程回调入口：新见 reader 追加进 seenReaders_ 列表；不唤醒工作线程（订阅建立仅由
+// writer 驱动，reader 缓存供 listTopics 列出仅有订阅者的主题与 topicInfo 统计订阅者数）。
+// 仅拿 seenMtx_ 叶子锁（本回调在 Fast DDS PDP 大锁临界区内被调用，锁序倒置防护同上）。
 bool FastDDSDebugNode::onReaderDiscovered(const std::string& topicName,
         const rtps::SubscriptionBuiltinTopicData& info)
 {
     std::lock_guard<std::mutex> lock(seenMtx_);
-    return seenReaders_.emplace(topicName, info).second;
+    seenReaders_[topicName].push_back(info);
+    return true;
 }
 
 // 官方文档 15.16 "Remote type discovery and endpoint matching" 接收端形态：
@@ -485,7 +555,7 @@ void FastDDSDebugNode::workerLoop()
                 if (it != seen_.end())
                 {
                     todo = name;
-                    info = it->second;  // 快照，解锁后使用
+                    info = it->second.front();  // 取任一同主题 writer 发现信息快照，解锁后使用
                     break;
                 }
             }

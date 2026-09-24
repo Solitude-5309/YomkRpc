@@ -31,6 +31,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/create_node", YomkRpcDebugService::createNode);
     YomkInstallFunc("/topic_print", YomkRpcDebugService::topicPrint);
     YomkInstallFunc("/list_topics", YomkRpcDebugService::listTopics);
+    YomkInstallFunc("/topic_info", YomkRpcDebugService::topicInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
     return 0;
 }
@@ -117,6 +118,36 @@ YomkResponse YomkRpcDebugService::listTopics(YomkPkgPtr pkg)
     {
         lines.emplace_back(entry.first);
     }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::topicInfo(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugInfo, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicInfo", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // node_ 非空即已入域；持锁对单个目标主题做独立收敛查询（最长约 stableRounds*intervalMs）：
+    // 锁保护 node_ 生命周期不被并发 deleteNode 破坏（同 listTopics 既有约定）；0 值参数由节点层钳制
+    std::string typeName;
+    size_t publisherCount = 0;
+    size_t subscriptionCount = 0;
+    if (!node_->topicInfo(p->msg.topicName, typeName, publisherCount, subscriptionCount,
+                p->msg.stableRounds, p->msg.intervalMs))
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicInfo", "topic [", p->msg.topicName, "] not found");
+        return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
+    }
+    // 三行详情：类型名原样输出（不做任何风格转换）+ 输出两端点计数
+    std::vector<std::string> lines;
+    lines.reserve(3);
+    lines.emplace_back("Type: " + typeName);
+    lines.emplace_back("Publisher count: " + std::to_string(publisherCount));
+    lines.emplace_back("Subscription count: " + std::to_string(subscriptionCount));
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
 

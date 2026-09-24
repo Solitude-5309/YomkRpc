@@ -24,6 +24,7 @@ private:
     YomkResponse createNode(YomkPkgPtr pkg);
     YomkResponse topicPrint(YomkPkgPtr pkg);
     YomkResponse listTopics(YomkPkgPtr pkg);
+    YomkResponse topicInfo(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
 
 private:
@@ -57,9 +58,18 @@ struct DDSDebugList
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
+// topic_info 请求负载：单主题详情查询（独立收敛参数，语义同 list_topics，0 值由节点层钳制为默认）
+struct DDSDebugInfo
+{
+    std::string topicName;  // 待查询主题
+    uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
+    uint32_t intervalMs;    // 快照轮询间隔毫秒
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
 YomkMsg(DDSDebugNode, DDSDebugNode, msg)
 YomkMsg(DDSDebugTopic, DDSDebugTopic, msg)
 YomkMsg(DDSDebugList, DDSDebugList, msg)
+YomkMsg(DDSDebugInfo, DDSDebugInfo, msg)

@@ -34,7 +34,7 @@ target_link_libraries(ExampleYomkRpcPub PRIVATE YomkRpc::YomkRpc YomkServer::Yom
 add_executable(ExampleYomkRpcSub ExampleYomkRpcSub.cpp)
 target_link_libraries(ExampleYomkRpcSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
-# 命令行工具：yomkrpc topic print [-d N] <主题名>（观察任意 DDS 主题，控制台直出消息内容；
+# 命令行工具：yomkrpc topic print/list/info（观察任意 DDS 主题 / 列出域内主题 / 查询主题详情；
 # 类型无关，无需 YomkRpcMsg）
 add_executable(yomkrpc yomkrpc.cpp)
 target_link_libraries(yomkrpc PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer)

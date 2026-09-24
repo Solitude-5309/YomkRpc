@@ -19,6 +19,7 @@
 | `YOMKRPC_DEBUG_NODE(domainId)` | `/YomkRpcDebugService/create_node` | 创建调试节点 | 打包 `DDSDebugNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试 |
 | `YOMKRPC_DEBUG_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误 |
 | `YOMKRPC_DEBUG_LIST(stableRounds, intervalMs)` | `/YomkRpcDebugService/list_topics` | 列出域内主题 | 打包 `DDSDebugList{stableRounds, intervalMs}`；自适应收敛查询：内部每 ~200ms 轮询一次发现缓存快照，连续 stableRounds 次集合不变即返回（0 值钳制默认 5 次/200ms，最长阻塞约 stableRounds\*intervalMs）；远端 DataWriter 与 DataReader 均记录（仅有订阅者而无发布者的主题同样列出）；返回 StringArray 包，每行一个 topicName（仅主题名，不含类型）按主题名排序；须先创建调试节点，列表可为空（域内无 writer/reader） |
+| `YOMKRPC_DEBUG_INFO(topicName, stableRounds, intervalMs)` | `/YomkRpcDebugService/topic_info` | 查询主题详情 | 打包 `DDSDebugInfo{topicName, stableRounds, intervalMs}`；独立收敛查询单个主题的发现详情（不依赖 list_topics），连续 stableRounds 次快照不变即返回（0 值钳制默认 5 次/200ms）；命中返回 StringArray 三行：`Type: 原始 DDS 类型名`（不做任何风格转换）、`Publisher count: N`、`Subscription count: N`；未发现主题返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_QUIT()` | `/YomkRpcDebugService/delete_node` | 退出调试 | 无参宏（载荷 nullptr）；删除调试节点并销毁其全部 DDS 实体，未创建时返回错误 |
 
 > 除 `YOMKRPC_VERSION()` 外，其余宏均返回 `YomkResponse`，调用后须判 `m_status == YomkResponse::eOk`；失败时可读 `m_msg` 获取错误信息。
@@ -52,7 +53,7 @@ source build_ubuntu.sh
 | `ExampleYomkRpcTopicLoan` | loan 借出机制演示 |
 | `ExampleYomkRpcPub` | 跨进程发布端示例（每 1s 发布 hello world，持续 60 秒） |
 | `ExampleYomkRpcSub` | 跨进程订阅端示例（订阅 hello_world，Ctrl+C 退出） |
-| `yomkrpc` | 命令行工具，观察任意 DDS 主题（`yomkrpc topic print [-d N] <主题名>`，详见使用示例） |
+| `yomkrpc` | 命令行工具：观察任意 DDS 主题（topic print）、列出域内主题（topic list）、查询单个主题详情（topic info），详见使用示例 |
 
 ## 工程结构
 
@@ -382,6 +383,50 @@ if (arr != nullptr)
     for (const auto &line : arr->d) { std::cout << line << "\n"; }
 }
 resp = YOMKRPC_DEBUG_QUIT();                // 3. 退出前显式清理
+```
+
+### 查询主题详情（yomkrpc topic info）
+
+`yomkrpc topic info <主题名>` 查询单个主题的发现详情，命中输出三行：消息类型名（原始 DDS 类型名，不做任何风格转换）、发布者数量、订阅者数量：
+
+```bash
+yomkrpc topic info hello_world        # 默认域 0
+yomkrpc topic info -d 5 sensor_data   # 指定 DDS 域号
+yomkrpc topic info -w 7 hello_world   # 收敛判定放宽为连续 7 次快照不变（默认 5）
+```
+
+域 id 指定方式与 `topic print` 相同：`-d N` 临时指定（显式覆盖，不写环境变量）；或设置环境变量 `YOMKRPC_DDS_DOMAIN_ID`（启动时无则自动创建默认 0，可持久化到 .bashrc）后免 `-d` 运行。`-w N` 为收敛判定次数（默认 5，`topic list` 与 `topic info` 生效）。
+
+与发布端配合观察（先启动发布端——工具创建调试节点入域后对该主题独立收敛查询：节点内部每 ~200ms 轮询一次该主题详情快照，连续 5 次不变即返回）：
+
+```bash
+# 终端 1（先启动发布端）
+ExampleYomkRpcPub
+# 终端 2
+yomkrpc topic info hello_world
+```
+
+输出示例（三行详情，类型名与计数直出）：
+
+```
+Type: YomkRpc::MString
+Publisher count: 1
+Subscription count: 0
+```
+
+目标主题在收敛窗口内始终未被发现时报错退出（`topic [<主题名>] not found`）。等价宏调用序列（流程与 list 示例同构，链接库相同，宏定义见上表）：
+
+```cpp
+YOMK_INIT();
+YOMK_NEW_SERVICE(YomkRpcDebugService);
+auto resp = YOMKRPC_DEBUG_NODE(0);                 // 1. 创建调试节点
+resp = YOMKRPC_DEBUG_INFO("hello_world", 5, 200);  // 2. 独立收敛查询：连续 5 次 200ms 快照不变即返回 StringArray 三行
+YomkUnPackPkg(resp.m_data, StringArray, arr);
+if (arr != nullptr)
+{
+    for (const auto &line : arr->d) { std::cout << line << "\n"; }
+}
+resp = YOMKRPC_DEBUG_QUIT();                       // 3. 退出前显式清理
 ```
 
 ## 测试

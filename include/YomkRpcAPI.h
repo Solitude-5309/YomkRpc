@@ -96,5 +96,15 @@
         "/YomkRpcDebugService/list_topics",                                  \
         YomkMkPtr(DDSDebugList, DDSDebugList{stableRounds, intervalMs}))
 
+// 查询单个主题的发现详情（独立收敛，与 list_topics 完全分开）：轮询该主题详情快照（存在标志 +
+// 类型名 + 端点计数），连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
+// stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。命中返回 StringArray
+// 三行：Type: <原始 DDS 类型名>、Publisher count: <N>、Subscription count: <N>（类型名原样输出，
+// 无任何风格转换）；未发现主题返回错误。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_INFO(topicName, stableRounds, intervalMs)              \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/topic_info",                                   \
+        YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs}))
+
 // 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)

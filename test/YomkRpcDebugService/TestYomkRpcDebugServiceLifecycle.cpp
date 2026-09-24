@@ -5,11 +5,13 @@
  * 范围：契约测试（DDS-free）刻意豁免的 /create_node 成功路径（经 setDomainId 创建真实
  *       participant）、/topic_print 登记契约与 /delete_node 析构清理，及 domainId 边界行为。
  *       节点层守卫（setDomainId 重复/未入域登记）与端到端流量（发现→动态类型→订阅→JSON 输出）
- *       已由 TestFastDDSDebugNode 覆盖，本测试不重复。
+ *       已由 TestFastDDSDebugNode 覆盖，本测试不重复；topic_info 命中用例仅直连 FastDDS 建最小
+ *       远端发布端触发 EDP 发现（不发布数据），覆盖服务层拼行路径。
  * 覆盖：
- *   A-1 生命周期：创建 → list_topics 收敛空列表 → 重复创建拒绝 → topicPrint 空回调拒绝 →
- *       正常登记 → 同主题重复登记拒绝 → 异主题登记 → 删除 → 重复删除拒绝 → 删除后
- *       list_topics 拒绝 → 删除后重建 → 退出前清理；
+ *   A-1 生命周期：创建 → list_topics 收敛空列表 → topic_info 未发现主题 eNo → 重复创建拒绝 →
+ *       topicPrint 空回调拒绝 → 正常登记 → 同主题重复登记拒绝 → 异主题登记 → 删除 →
+ *       重复删除拒绝 → 删除后 list_topics/topic_info 拒绝 → 删除后重建 → topic_info 命中三行
+ *       断言（Type/Publisher count/Subscription count）→ 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
  *
  * 关键不变式：每个 eOk 创建的调试节点必须在 main 返回前经 /delete_node 显式删除，以规避
@@ -20,7 +22,16 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcDebugService.h" // 服务/DDSDebugNode/DDSDebugTopic/YOMK_* 宏
+#include "YomkRpcDebugService.h" // 服务/DDSDebugNode/DDSDebugTopic/DDSDebugInfo/YOMK_* 宏
+
+#include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅 topic_info 命中用例的最小远端发布端）
+
+#include <fastdds/dds/domain/DomainParticipant.hpp>        // 直连 FastDDS API 搭建远端发布端（命中用例）
+#include <fastdds/dds/domain/DomainParticipantFactory.hpp> // participant 创建/删除
+#include <fastdds/dds/publisher/DataWriter.hpp>
+#include <fastdds/dds/publisher/Publisher.hpp>
+#include <fastdds/dds/topic/Topic.hpp>
+#include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include <cstdint>
 #include <string>
@@ -47,6 +58,12 @@ namespace
     {
         return YomkMkPtr(DDSDebugList, DDSDebugList{1, 100});
     }
+
+    // 构造 /topic_info 请求包（未发现用例传 rounds=1 走单次快照快速路径；命中用例传收敛参数）
+    YomkPkgPtr mkInfo(const std::string &topicName, uint32_t stableRounds, uint32_t intervalMs)
+    {
+        return YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs});
+    }
 } // namespace
 
 int main()
@@ -67,6 +84,12 @@ int main()
           "list_topics（入域无 writer，单次快照）→ eOk（空列表路径）");
     YomkUnPackPkg(listed.m_data, StringArray, arr);
     CHECK(arr != nullptr && arr->d.empty(), "list_topics 返回包可解包为空 StringArray");
+
+    // topic_info 未发现主题：node_ 已建、域内无该主题，单次快照快速路径 → eNo
+    auto infoAbsent = svc->invoke("/topic_info", mkInfo("t_info_absent", 1, 50));
+    CHECK(infoAbsent.m_status == YomkResponse::eNo &&
+              infoAbsent.m_msg.find("not found") != std::string::npos,
+          "topicInfo 未发现主题（单次快照）→ eNo topic not found");
 
     auto dup = svc->invoke("/create_node", mkNode(TEST_DOMAIN));
     CHECK(dup.m_status == YomkResponse::eNo && dup.m_msg.find("already exists") != std::string::npos,
@@ -99,8 +122,75 @@ int main()
               listAfterDel.m_msg.find("not created") != std::string::npos,
           "删除后 list_topics → eNo debug node not created");
 
+    auto infoAfterDel = svc->invoke("/topic_info", mkInfo("t_info_absent", 1, 50));
+    CHECK(infoAfterDel.m_status == YomkResponse::eNo &&
+              infoAfterDel.m_msg.find("not created") != std::string::npos,
+          "删除后 topic_info → eNo debug node not created");
+
     CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN)).m_status == YomkResponse::eOk,
           "删除后重建调试节点 → eOk（delete/create 闭环）");
+
+    // ---- topic_info 命中用例：远端最小发布端（仅建端点触发 EDP 发现，不发布数据）----
+    // 复用重建后的域 200 调试节点；时序模式同 TestFastDDSDebugNode 多端点用例：
+    // list 预热（约 400ms）+ info 独立收敛窗口（500ms 起）覆盖本地 EDP 发现延迟
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 搭建远端发布端
+        constexpr const char *HIT_TOPIC = "t_info_hit";
+        auto *hitParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(hitParticipant != nullptr, "远端发布端 participant 创建成功（topic_info 命中用例）");
+        if (hitParticipant != nullptr)
+        {
+            // TypeSupport 须活过 topic/writer 使用期（声明顺序同 TestFastDDSDebugNode 计数用例）
+            dds::TypeSupport ts(new YomkRpc::MStringPubSubType());
+            ts.register_type(hitParticipant);
+            auto *pub = hitParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            auto *topic = hitParticipant->create_topic(
+                HIT_TOPIC, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+            auto *writer = (pub != nullptr && topic != nullptr)
+                ? pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT)
+                : nullptr;
+            CHECK(writer != nullptr, "远端 DataWriter 创建成功（t_info_hit，仅建端点不发布数据）");
+
+            if (writer != nullptr)
+            {
+                // list_topics 预热仅为本用例时序前置（late joiner 经 EDP 重放发现信息）；
+                // topic_info 内部独立收敛查询，不依赖 list_topics
+                auto warm = svc->invoke("/list_topics", YomkMkPtr(DDSDebugList, DDSDebugList{5, 100}));
+                CHECK(warm.m_status == YomkResponse::eOk, "list_topics(5,100ms) 预热 → eOk（发现时序前置）");
+
+                auto hit = svc->invoke("/topic_info", mkInfo(HIT_TOPIC, 5, 100));
+                CHECK(hit.m_status == YomkResponse::eOk && hit.m_data != nullptr,
+                      "topicInfo(t_info_hit,5,100ms) → eOk（独立收敛命中）");
+                YomkUnPackPkg(hit.m_data, StringArray, infoArr);
+                CHECK(infoArr != nullptr && infoArr->d.size() == 3,
+                      "topicInfo 返回包可解包为 3 行 StringArray");
+                if (infoArr != nullptr && infoArr->d.size() == 3)
+                {
+                    CHECK(infoArr->d[0] == "Type: YomkRpc::MString",
+                          "topicInfo 第 1 行 Type 为原始 DDS 类型名（YomkRpc::MString，无转换）");
+                    CHECK(infoArr->d[1] == "Publisher count: 1", "topicInfo 第 2 行 Publisher count == 1");
+                    CHECK(infoArr->d[2] == "Subscription count: 0",
+                          "topicInfo 第 3 行 Subscription count == 0");
+                }
+            }
+
+            // 清理：writer → topic → publisher → participant（同 TestFastDDSDebugNode 计数用例顺序）
+            if (writer != nullptr && pub != nullptr)
+            {
+                pub->delete_datawriter(writer);
+            }
+            if (topic != nullptr)
+            {
+                hitParticipant->delete_topic(topic);
+            }
+            if (pub != nullptr)
+            {
+                hitParticipant->delete_publisher(pub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(hitParticipant);
+        }
+    }
 
     // ---- A-2：domainId 边界（有效域下界/上界，创建后即删） ----
     CHECK(svc->invoke("/delete_node").m_status == YomkResponse::eOk, "删除重建节点 → eOk（A-2 前清理）");
