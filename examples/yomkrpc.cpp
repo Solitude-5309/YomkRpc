@@ -1,13 +1,14 @@
 /**
  * @file yomkrpc.cpp
  * @brief yomkrpc 命令行工具：观察任意 DDS 主题（持续打印消息）、列出域内主题或节点、
- *       查询单个主题详情
+ *       查询单个主题或单个节点的详情
  *
  * 用法：
  *   yomkrpc topic print [-d N | --domain N] <topic-name>
  *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] <topic-name>
  *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
+ *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -17,6 +18,7 @@
  *   yomkrpc topic list -w 3
  *   yomkrpc topic info hello_world
  *   yomkrpc node list
+ *   yomkrpc node info my_node
  *
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
@@ -30,7 +32,11 @@
  * node list：创建节点后独立收敛查询域内已发现的命名参与者（每 ~200ms 轮询一次参与者
  * 发现缓存快照，连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空
  * 才列出，空名参与者跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出。
- * 四种子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，规避 FastDDS 静态析构期段错误
+ * node info：创建节点后独立收敛查询指定节点名参与者的发布/订阅主题清单（归属判定基于
+ * RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"），输出对齐 ros2 node info
+ * 形态：节点名行 + "  Subscribers:" 段 + 每行 "    topic: type" + "  Publishers:" 段同
+ * 形态（类型名原样输出；空段仅打段头）；未发现节点名报错退出。
+ * 五种子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，规避 FastDDS 静态析构期段错误
  * （同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
  *
  * 域 id 两种指定方式（优先级 -d > 环境变量 > 0）：
@@ -69,13 +75,14 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
+          "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
           "  -d N, --domain N    DDS 域号（0-232），临时指定，不写环境变量；未指定时读\n"
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
-          "                      （默认 5，topic list、topic info 与 node list 生效）\n"
+          "                      （默认 5，topic list、topic info、node list 与 node info 生效）\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
@@ -85,6 +92,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic list -w 3\n"
           "  yomkrpc topic info hello_world\n"
           "  yomkrpc node list\n"
+          "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后免 -d，等价于 -d 5\n";
 }
@@ -342,6 +350,57 @@ static int runNodeList(uint32_t domainId, uint32_t waitRounds)
     return 0;
 }
 
+// node info 子命令：独立收敛查询指定节点名（participant_name）参与者的发布/订阅主题清单
+// （节点内部轮询归属快照，连续 waitRounds 次不变即返回；归属判定基于 RTPS 规范保证的
+// "端点 GUID 前缀 == 所属参与者 GUID 前缀"），输出对齐 ros2 node info 形态：节点名行 +
+// "  Subscribers:" 段 + 每行 "    topic: type" + "  Publishers:" 段同形态（类型名原样输出；
+// 空段仅打段头）；未发现节点名报错退出（无 Ctrl+C 循环，查完即退）
+static int runNodeInfo(uint32_t domainId, const std::string &nodeName, uint32_t waitRounds)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 独立收敛查询单节点清单（与 list 查询完全分开的路径）：命中返回 StringArray 多行，
+    //    行文案由服务层拼装（节点名 + Subscribers/Publishers 段），原样直出；
+    //    未发现节点名（含收敛窗口内始终不可见）返回 eNo
+    resp = YOMKRPC_DEBUG_NODE_INFO(nodeName, waitRounds, 200);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "node info failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    YomkUnPackPkg(resp.m_data, StringArray, arr);
+    if (arr == nullptr)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "node info failed: unexpected response payload");
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    for (const auto &line : arr->d)
+    {
+        std::cout << line << "\n";
+    }
+    std::cout.flush();
+
+    // 3. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同其余子命令不变式）
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     // ---- 环境变量：无 YOMKRPC_DDS_DOMAIN_ID 则创建并设默认值 0（进程内生效），并幂等
@@ -355,7 +414,7 @@ int main(int argc, char *argv[])
     // ---- 参数解析：-h/--help 即刻退出；-d/--domain 与 -w/--wait 可选；位置参数 ----
     uint32_t domainId = 0;
     bool hasDomainId = false;
-    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info 与 node list 生效）
+    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、node list 与 node info 生效）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -414,7 +473,8 @@ int main(int argc, char *argv[])
         }
     }
 
-    // ---- 子命令分派：topic print <topic-name> / topic list / topic info <topic-name> / node list ----
+    // ---- 子命令分派：topic print <topic-name> / topic list / topic info <topic-name> /
+    //      node list / node info <node-name> ----
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "print" && !pos[2].empty())
     {
         return runPrint(domainId, pos[2]);
@@ -430,6 +490,10 @@ int main(int argc, char *argv[])
     if (pos.size() == 2 && pos[0] == "node" && pos[1] == "list")
     {
         return runNodeList(domainId, waitRounds);
+    }
+    if (pos.size() == 3 && pos[0] == "node" && pos[1] == "info" && !pos[2].empty())
+    {
+        return runNodeInfo(domainId, pos[2], waitRounds);
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node"))
     {

@@ -33,6 +33,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/list_topics", YomkRpcDebugService::listTopics);
     YomkInstallFunc("/topic_info", YomkRpcDebugService::topicInfo);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
+    YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
     return 0;
 }
@@ -168,6 +169,43 @@ YomkResponse YomkRpcDebugService::listNodes(YomkPkgPtr pkg)
     std::vector<std::string> names;
     node_->nodeList(names, p->msg.stableRounds, p->msg.intervalMs);
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, names));
+}
+
+YomkResponse YomkRpcDebugService::nodeInfo(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSNodeInfo, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::nodeInfo", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // node_ 非空即已入域；持锁对单个目标节点名做独立收敛查询（最长约 stableRounds*intervalMs）：
+    // 锁保护 node_ 生命周期不被并发 deleteNode 破坏（同 listNodes 既有约定）；0 值参数由节点层钳制
+    std::vector<std::pair<std::string, std::string>> publishers;
+    std::vector<std::pair<std::string, std::string>> subscribers;
+    if (!node_->nodeInfo(p->msg.nodeName, publishers, subscribers, p->msg.stableRounds, p->msg.intervalMs))
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::nodeInfo", "node [", p->msg.nodeName, "] not found");
+        return YomkResponse(YomkResponse::eNo, "node [" + p->msg.nodeName + "] not found");
+    }
+    // 输出行（对齐 ros2 node info 形态）：节点名行 + Subscribers 段 + Publishers 段，每条主题
+    // 一行 "    <topic>: <type>"（类型名原样输出，无任何风格转换）；空段仅打段头
+    std::vector<std::string> lines;
+    lines.reserve(3 + publishers.size() + subscribers.size());
+    lines.emplace_back(p->msg.nodeName);
+    lines.emplace_back("  Subscribers:");
+    for (const auto& entry : subscribers)
+    {
+        lines.emplace_back("    " + entry.first + ": " + entry.second);
+    }
+    lines.emplace_back("  Publishers:");
+    for (const auto& entry : publishers)
+    {
+        lines.emplace_back("    " + entry.first + ": " + entry.second);
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
 
 YomkResponse YomkRpcDebugService::deleteNode(YomkPkgPtr pkg)

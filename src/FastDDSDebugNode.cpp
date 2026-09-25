@@ -373,6 +373,29 @@ bool FastDDSDebugNode::nodeList(std::vector<std::string>& names,
     return waitForNodesStable(names, stableRounds, intervalMs);
 }
 
+bool FastDDSDebugNode::nodeInfo(const std::string& nodeName,
+        std::vector<std::pair<std::string, std::string>>& publishers,
+        std::vector<std::pair<std::string, std::string>>& subscribers,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    return waitForNodeInfoStable(nodeName, publishers, subscribers, stableRounds, intervalMs);
+}
+
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
         uint32_t stableRounds, uint32_t intervalMs)
 {
@@ -471,7 +494,7 @@ bool FastDDSDebugNode::waitForNodesStable(std::vector<std::string>& names,
 {
     // 快照：锁内拷贝参与者名称列表（仅有效命名参与者：名称非空且非 "/"——"/" 是 ROS2 参与
     // 者的默认占位名，rmw_fastrtps 把参与者名统一置为根 enclave "/"（rcl_init 兜底），节点名
-    // 走另一通道，无辨识价值——跳过），末尾按名称排序。同名多参与者各自一行（缓存以 GUID 串
+    // 走另一通道，无辨识价值——跳过），末尾按名称排序。同名多参与者各自一行（缓存以 GUID 前缀
     // 为 key，每参与者一项）。只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
     auto snapshot = [this]()
     {
@@ -508,6 +531,80 @@ bool FastDDSDebugNode::waitForNodesStable(std::vector<std::string>& names,
     return true;
 }
 
+bool FastDDSDebugNode::waitForNodeInfoStable(const std::string& nodeName,
+        std::vector<std::pair<std::string, std::string>>& publishers,
+        std::vector<std::pair<std::string, std::string>>& subscribers,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    // 快照：锁内先收集目标名称参与者的 GUID 前缀集合（同名多参与者均归属——匹配源为 RTPS
+    // 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"，不依赖 participant_guid 字段），
+    // 再扫 writer/reader 缓存：前缀命中 → 每主题一条 (topic, 类型名)（同主题去重，取首命中
+    // 端点的类型名），两列表末尾按主题名排序。只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件
+    // 线程可并行写入）
+    auto snapshot = [this, &nodeName]()
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        std::set<rtps::GuidPrefix_t> prefixes;
+        for (const auto& kv : seenParticipants_)
+        {
+            if (kv.second == nodeName)
+            {
+                prefixes.insert(kv.first);
+            }
+        }
+        std::vector<std::pair<std::string, std::string>> pubs;
+        std::vector<std::pair<std::string, std::string>> subs;
+        for (const auto& kv : seen_)
+        {
+            for (const auto& w : kv.second)
+            {
+                if (prefixes.count(w.guid.guidPrefix) > 0)
+                {
+                    pubs.emplace_back(kv.first, w.type_name.to_string());
+                    break;  // 同主题去重：任一归属 writer 命中即计一条
+                }
+            }
+        }
+        for (const auto& kv : seenReaders_)
+        {
+            for (const auto& r : kv.second)
+            {
+                if (prefixes.count(r.guid.guidPrefix) > 0)
+                {
+                    subs.emplace_back(kv.first, r.type_name.to_string());
+                    break;  // 同主题去重：任一归属 reader 命中即计一条
+                }
+            }
+        }
+        std::sort(pubs.begin(), pubs.end());
+        std::sort(subs.begin(), subs.end());
+        return std::make_tuple(!prefixes.empty(), std::move(pubs), std::move(subs));
+    };
+    auto prev = snapshot();
+    uint32_t unchanged = 1;
+    while (unchanged < stableRounds)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        auto cur = snapshot();
+        if (cur == prev)
+        {
+            ++unchanged;
+        }
+        else
+        {
+            prev = std::move(cur);  // 新发现使快照变化，重置不变计数
+            unchanged = 1;
+        }
+    }
+    if (!std::get<0>(prev))
+    {
+        return false;  // 收敛时仍无此名参与者
+    }
+    publishers = std::move(std::get<1>(prev));
+    subscribers = std::move(std::get<2>(prev));
+    return true;
+}
+
 // 发现线程回调入口：新见 writer 追加进 seen_ 列表并唤醒工作线程；回调内不建订阅。
 // 仅拿 seenMtx_ 叶子锁：本回调在 Fast DDS EDP 锁临界区内被调用，拿 mtx_ 会与工作线程
 // （持 mtx_ 建 reader 内部等 PDP/EDP 锁）锁序倒置死锁（详见 seenMtx_ 成员注释）。
@@ -533,15 +630,14 @@ bool FastDDSDebugNode::onReaderDiscovered(const std::string& topicName,
     return true;
 }
 
-// 发现线程回调入口：新见 participant 缓存 GUID 串与名称（GUID 串仅作幂等去重 key，emplace
-// 重复发现不覆盖）；不唤醒工作线程（订阅建立链路不依赖参与者发现）。仅拿 seenMtx_ 叶子锁
-//（本回调在 Fast DDS PDP 大锁临界区内被调用，锁序倒置防护同上）。
+// 发现线程回调入口：新见 participant 缓存 GUID 前缀与名称（前缀仅作幂等去重与 nodeInfo
+// 归属匹配，emplace 重复发现不覆盖）；不唤醒工作线程（订阅建立链路不依赖参与者发现）。
+// 仅拿 seenMtx_ 叶子锁（本回调在 Fast DDS PDP 大锁临界区内被调用，锁序倒置防护同上）。
 void FastDDSDebugNode::onParticipantDiscovered(const rtps::ParticipantBuiltinTopicData& info)
 {
-    std::ostringstream os;
-    os << info.guid;
     std::lock_guard<std::mutex> lock(seenMtx_);
-    seenParticipants_.emplace(os.str(), std::string(info.participant_name.to_string()));
+    seenParticipants_.emplace(info.guid.guidPrefix,
+            std::string(info.participant_name.to_string()));
 }
 
 // 官方文档 15.16 "Remote type discovery and endpoint matching" 接收端形态：

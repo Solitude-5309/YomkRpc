@@ -26,6 +26,11 @@
  *         入域 → nodeList 独立收敛查询含命名 peer（SPDP participant_name 端到端传播）、不含
  *         调试节点自身（自身不在发现回调）、无空名/"/"名/GUID 串行（无效名参与者跳过）；
  *         未 setDomainId 时 nodeList → false。
+ *   节点信息 命名 peer（发布+订阅端点）+ 匿名 peer（带端点）+ "/" 名 peer → nodeInfo 归属
+ *         查询：publishers 含 pub 主题与类型、subscribers 含 sub 主题与类型，匿名 peer 端点
+ *         不串入（GUID 前缀归属隔离）；未发现名 → false（单次快照快速路径）；"/" 名可查
+ *         且清单为空（名称过滤不在节点层）；重复调用结果一致（收敛一致性）；
+ *         未 setDomainId 时 nodeInfo → false。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -57,6 +62,11 @@ namespace
     constexpr uint32_t TEST_DOMAIN = 200;
     constexpr const char *TEST_TOPIC = "t_debug";
     constexpr const char *TEST_PAYLOAD = "hello_debug";
+    // node info 用例常量：命名 peer 名称与三个用例主题（发布/订阅/匿名 peer 发布主题）
+    constexpr const char *NODEINFO_PEER_NAME = "test-nodeinfo-peer";
+    constexpr const char *NODEINFO_PUB_TOPIC = "t_nodeinfo_pub";
+    constexpr const char *NODEINFO_SUB_TOPIC = "t_nodeinfo_sub";
+    constexpr const char *NODEINFO_ANON_TOPIC = "t_nodeinfo_anon";
 } // namespace
 
 int main()
@@ -375,6 +385,129 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(slashParticipant);
         }
     }
+
+    // ---- 节点信息用例：命名 peer（发布+订阅端点）+ 匿名 peer（带端点）+ "/" 名 peer → nodeInfo 归属查询 ----
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 搭建匿名与 "/" 名 peer
+        // 命名 peer（FastDDSNode）同时持一个发布端点与一个订阅端点：验证 nodeInfo 两份端点清单。
+        // peer 先于被测端入域（late joiner 经 EDP/PDP 全量重放其参与者与端点发现信息）
+        FastDDSNode peer;
+        CHECK(peer.setDomainId(TEST_DOMAIN, NODEINFO_PEER_NAME),
+              "命名 peer setDomainId(200, test-nodeinfo-peer) → true（test 前缀命名）");
+        CHECK(peer.registerPubTopic(NODEINFO_PUB_TOPIC, new YomkRpc::MStringPubSubType()),
+              "命名 peer registerPubTopic(t_nodeinfo_pub, MString) → true");
+        CHECK(peer.registerSubTopic(NODEINFO_SUB_TOPIC, new YomkRpc::MStringPubSubType(),
+                  [](const void *) {}),
+              "命名 peer registerSubTopic(t_nodeinfo_sub, MString) → true（空回调，本用例无流量）");
+        // 匿名 peer（显式 qos.name("")）带一个发布端点：验证其他参与者的端点不串入命名 peer 清单
+        dds::DomainParticipantQos anonQos = dds::PARTICIPANT_QOS_DEFAULT;
+        anonQos.name(std::string());
+        auto* anonParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, anonQos);
+        CHECK(anonParticipant != nullptr, "匿名 peer participant 创建成功（带端点，归属隔离用例）");
+        // TypeSupport 须活过 writer 使用期（participant 类型表不接管所有权），块内声明于 dbg 之前
+        dds::TypeSupport anonTs(new YomkRpc::MStringPubSubType());
+        if (anonParticipant != nullptr)
+        {
+            anonTs.register_type(anonParticipant);
+        }
+        auto* anonTopic = (anonParticipant != nullptr)
+            ? anonParticipant->create_topic(
+                NODEINFO_ANON_TOPIC, anonTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+        auto* anonPub = (anonParticipant != nullptr)
+            ? anonParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT) : nullptr;
+        auto* anonWriter = (anonPub != nullptr && anonTopic != nullptr)
+            ? anonPub->create_datawriter(anonTopic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+        CHECK(anonWriter != nullptr, "匿名 peer DataWriter 创建成功（t_nodeinfo_anon）");
+        // "/" 名 peer（ROS2 占位名形态，无端点）：验证 nodeInfo 的名称过滤不在节点层（"/" 可查）
+        dds::DomainParticipantQos slashQos = dds::PARTICIPANT_QOS_DEFAULT;
+        slashQos.name(std::string("/"));
+        auto* slashParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, slashQos);
+        CHECK(slashParticipant != nullptr, "slash peer participant 创建成功（显式 qos.name(\"/\")）");
+
+        FastDDSDebugNode dbg;
+        std::vector<std::pair<std::string, std::string>> pubs;
+        std::vector<std::pair<std::string, std::string>> subs;
+        CHECK(!dbg.nodeInfo(NODEINFO_PEER_NAME, pubs, subs),
+              "未 setDomainId 时 nodeInfo → false（participant 未创建）");
+        CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（节点信息场景）");
+        CHECK(dbg.nodeInfo(NODEINFO_PEER_NAME, pubs, subs, 5, 100),
+              "nodeInfo(test-nodeinfo-peer,5,100ms) → true（peer 参与者与端点发现命中）");
+        bool hasPub = false;
+        bool hasSub = false;
+        bool noAnon = true;  // 匿名 peer 的主题不得出现在命名 peer 的任一清单中
+        for (const auto& entry : pubs)
+        {
+            if (entry.first == NODEINFO_PUB_TOPIC && entry.second == "YomkRpc::MString")
+            {
+                hasPub = true;
+            }
+            if (entry.first == NODEINFO_ANON_TOPIC)
+            {
+                noAnon = false;
+            }
+        }
+        for (const auto& entry : subs)
+        {
+            if (entry.first == NODEINFO_SUB_TOPIC && entry.second == "YomkRpc::MString")
+            {
+                hasSub = true;
+            }
+            if (entry.first == NODEINFO_ANON_TOPIC)
+            {
+                noAnon = false;
+            }
+        }
+        CHECK(hasPub, "nodeInfo publishers 含 (t_nodeinfo_pub, YomkRpc::MString)（writer GUID 前缀归属）");
+        CHECK(hasSub, "nodeInfo subscribers 含 (t_nodeinfo_sub, YomkRpc::MString)（reader GUID 前缀归属）");
+        CHECK(noAnon, "nodeInfo 不含匿名 peer 的 t_nodeinfo_anon（GUID 前缀归属隔离）");
+        std::cout << "[OBSERVE] nodeInfo pubs=" << pubs.size()
+                  << " subs=" << subs.size() << std::endl;
+
+        // not-found：单次快照快速路径（stableRounds=1 免等待）→ false
+        std::vector<std::pair<std::string, std::string>> missPubs;
+        std::vector<std::pair<std::string, std::string>> missSubs;
+        CHECK(!dbg.nodeInfo("t_no_such_node", missPubs, missSubs, 1, 50),
+              "nodeInfo(t_no_such_node,1,50) → false（未发现该名参与者，单次快照快速路径）");
+
+        // "/" 名可查：slash peer 已入域且无端点 → true 且两清单为空（名称过滤不在节点层）
+        std::vector<std::pair<std::string, std::string>> slashPubs;
+        std::vector<std::pair<std::string, std::string>> slashSubs;
+        CHECK(dbg.nodeInfo("/", slashPubs, slashSubs, 5, 100),
+              "nodeInfo(\"/\",5,100ms) → true（\"/\" 名参与者存在，可查）");
+        CHECK(slashPubs.empty() && slashSubs.empty(),
+              "nodeInfo(\"/\") 两端点清单为空（slash peer 无端点）");
+
+        // 收敛一致性：重复调用与首调结果一致
+        std::vector<std::pair<std::string, std::string>> pubs2;
+        std::vector<std::pair<std::string, std::string>> subs2;
+        CHECK(dbg.nodeInfo(NODEINFO_PEER_NAME, pubs2, subs2, 5, 100),
+              "nodeInfo 重复调用 → true（收敛后查询）");
+        CHECK(pubs2 == pubs && subs2 == subs, "nodeInfo 重复调用结果与首调一致（收敛快照一致性）");
+
+        // 清理：writer → topic → publisher → participant（顺序与既有块一致）
+        if (anonWriter != nullptr && anonPub != nullptr)
+        {
+            anonPub->delete_datawriter(anonWriter);
+        }
+        if (anonTopic != nullptr && anonParticipant != nullptr)
+        {
+            anonParticipant->delete_topic(anonTopic);
+        }
+        if (anonPub != nullptr && anonParticipant != nullptr)
+        {
+            anonParticipant->delete_publisher(anonPub);
+        }
+        if (slashParticipant != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(slashParticipant);
+        }
+        if (anonParticipant != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(anonParticipant);
+        }
+    } // dbg/peer 析构；anonTs（TypeSupport）随块退出释放
 
     return testReport("TestFastDDSDebugNode");
 }

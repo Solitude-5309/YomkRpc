@@ -54,7 +54,7 @@ source build_ubuntu.sh
 | `ExampleYomkRpcTopicLoan` | loan 借出机制演示 |
 | `ExampleYomkRpcPub` | 跨进程发布端示例（每 1s 发布 hello world，持续 60 秒） |
 | `ExampleYomkRpcSub` | 跨进程订阅端示例（订阅 hello_world，Ctrl+C 退出） |
-| `yomkrpc` | 命令行工具：观察任意 DDS 主题（topic print）、列出域内主题（topic list）、查询单个主题详情（topic info）、列出域内节点（node list），详见 YomkRpc 调试章节 |
+| `yomkrpc` | 命令行工具：观察任意 DDS 主题（topic print）、列出域内主题（topic list）、查询单个主题详情（topic info）、列出域内节点（node list）、查询单个节点详情（node info），详见 YomkRpc 调试章节 |
 
 ## 4 工程结构
 
@@ -283,11 +283,12 @@ ExampleYomkRpcPub
 | `yomkrpc topic list` | 一次性列出域内全部已发现主题（每行一个主题名，按主题名排序） |
 | `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
+| `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
 公共参数（各命令通用）：
 
 - **`-d N`**：指定 DDS 域号（合法范围 [0,232]）。优先级 `-d` > 环境变量 > 0：`-d N` 为临时指定，直接使用该值（不读、也不写环境变量）；环境变量 `YOMKRPC_DDS_DOMAIN_ID` 为默认路径，yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行
-- **`-w N`**：收敛判定次数——查询类命令内部每 ~200ms 轮询一次发现缓存快照，连续 N 次集合不变即认为发现收敛、立即输出（默认 5；`topic list`、`topic info` 与 `node list` 生效，`topic print` 为持续订阅不用）
+- **`-w N`**：收敛判定次数——查询类命令内部每 ~200ms 轮询一次发现缓存快照，连续 N 次集合不变即认为发现收敛、立即输出（默认 5；`topic list`、`topic info`、`node list` 与 `node info` 生效，`topic print` 为持续订阅不用）
 
 ### 6.2 调试主题观察（yomkrpc topic print）
 
@@ -480,6 +481,49 @@ if (arr != nullptr)
     for (const auto &line : arr->d) { std::cout << line << "\n"; }
 }
 resp = YOMKRPC_DEBUG_QUIT();                  // 3. 退出前显式清理
+```
+
+### 6.6 查询节点详情（yomkrpc node info）
+
+`yomkrpc node info <节点名>` 独立收敛查询指定节点名参与者的发布/订阅主题清单（与 list 查询完全分开的路径；归属判定基于 RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"），输出形态对齐 `ros2 node info`：节点名行 + `Subscribers:` 段 + 每条订阅一行 `    <主题名>: <类型名>` + `Publishers:` 段同形态（类型名为原始 DDS 类型名，无任何风格转换；空段仅打段头）：
+
+```bash
+yomkrpc node info pub_node          # 默认域 0
+yomkrpc node info -d 5 my_node      # 指定 DDS 域号
+yomkrpc node info -w 7 pub_node     # 收敛判定放宽为连续 7 次快照不变（默认 5）
+```
+
+与发布端配合观察（先启动发布端并等待其稳定入域——工具每次运行创建全新调试节点，发现经 PDP/EDP 传播约需 1-3 秒，随后对该节点名独立收敛查询）：
+
+```bash
+# 终端 1（先启动发布端，等 2-3 秒）
+ExampleYomkRpcPub
+# 终端 2
+yomkrpc node info pub_node
+```
+
+输出示例（发布端仅注册发布主题：Subscribers 段空、Publishers 段一行）：
+
+```
+pub_node
+  Subscribers:
+  Publishers:
+    hello_world: YomkRpc::MString
+```
+
+订阅端（`ExampleYomkRpcSub`，节点 `sub_node`）则相反——Subscribers 段列出 `hello_world`。节点名在收敛窗口内始终未被发现时报错退出（`node [<节点名>] not found`）。同名多参与者的端点合并列出。等价宏调用序列（流程与 list/info 示例同构，链接库相同，宏定义见上表）：
+
+```cpp
+YOMK_INIT();
+YOMK_NEW_SERVICE(YomkRpcDebugService);
+auto resp = YOMKRPC_DEBUG_NODE(0);                      // 1. 创建调试节点
+resp = YOMKRPC_DEBUG_NODE_INFO("pub_node", 5, 200);     // 2. 独立收敛查询：连续 5 次 200ms 快照不变即返回 StringArray 多行
+YomkUnPackPkg(resp.m_data, StringArray, arr);
+if (arr != nullptr)
+{
+    for (const auto &line : arr->d) { std::cout << line << "\n"; }
+}
+resp = YOMKRPC_DEBUG_QUIT();                            // 3. 退出前显式清理
 ```
 
 ## 7 测试

@@ -11,6 +11,7 @@
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
+#include <fastdds/rtps/common/Guid.hpp>
 #include <functional>
 #include <map>
 #include <memory>
@@ -95,6 +96,21 @@ public:
     bool nodeList(std::vector<std::string>& names,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
+    // 查询指定节点名（participant_name）参与者的发布/订阅主题清单（独立收敛查询，与
+    // listTopics/topicInfo/nodeList 互不影响）：先检查入域状态，再轮询归属快照（found 标志 +
+    // 发布列表 + 订阅列表，均 (topicName, typeName) 对），连续 stableRounds 次不变即认为收敛
+    // 返回。归属判定：RTPS 规范保证端点 GUID 前缀 == 所属参与者 GUID 前缀，端点
+    // guid.guidPrefix 与目标名参与者前缀集合比对即得（不依赖 participant_guid 字段）。
+    // 命中返回 true 并填充 publishers/subscribers（按主题名排序、同主题去重取首命中端点类型
+    // 名；同名多参与者的端点合并归入同一清单）；收敛时仍无此名参与者返回 false（未
+    // setDomainId 亦 false）。"/" 与空名参与者不在此过滤（nodeList 的过滤仅是其快照私有
+    // 逻辑），按名可查——查 "/" 即该名称下全部参与者的端点合并。0 值钳制默认 5 次/200ms；
+    // 最长阻塞约 stableRounds*intervalMs；等待期间新发现使快照变化并重置计数。
+    bool nodeInfo(const std::string& nodeName,
+            std::vector<std::pair<std::string, std::string>>& publishers,
+            std::vector<std::pair<std::string, std::string>>& subscribers,
+            uint32_t stableRounds = kDefaultStableRounds,
+            uint32_t intervalMs = kDefaultIntervalMs);
 
 private:
     // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
@@ -114,6 +130,13 @@ private:
     // 排序），连续 stableRounds 次不变即收敛；caller 已完成入域检查。最终快照填充输出并返回 true。
     bool waitForNodesStable(std::vector<std::string>& names,
             uint32_t stableRounds, uint32_t intervalMs);
+    // nodeInfo 的收敛轮询辅助（独立于其余 waitFor*Stable）：快照为三元组（found 标志 +
+    // 发布列表 + 订阅列表，均 (topicName, typeName) 对），连续 stableRounds 次不变即收敛；
+    // caller 已完成入域检查。found 的最终快照填充输出并返回 true，无此名参与者返回 false。
+    bool waitForNodeInfoStable(const std::string& nodeName,
+            std::vector<std::pair<std::string, std::string>>& publishers,
+            std::vector<std::pair<std::string, std::string>>& subscribers,
+            uint32_t stableRounds, uint32_t intervalMs);
     // 发现线程回调入口（DebugParticipantListener 转发）：新见 writer 追加进 seen_ 列表后唤醒
     // 工作线程（发现事件对同一端点不重发，缓存供登记晚于发现时回放）；回调内不建订阅。回调运行于
     // Fast DDS 发现锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置死锁防护见成员注释）。
@@ -124,7 +147,7 @@ private:
     // 的主题与 topicInfo 统计订阅者数）。回调运行于 Fast DDS PDP 锁临界区内，仅拿 seenMtx_ 叶子锁。
     bool onReaderDiscovered(const std::string& topicName,
                             const eprosima::fastdds::rtps::SubscriptionBuiltinTopicData& info);
-    // 发现线程回调入口（DebugParticipantListener 转发）：新见 participant 缓存 GUID 串与
+    // 发现线程回调入口（DebugParticipantListener 转发）：新见 participant 缓存 GUID 前缀与
     // 名称（幂等去重；不唤醒工作线程——订阅建立链路不依赖参与者发现）。回调运行于 Fast DDS
     // PDP 锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置防护同上）。
     void onParticipantDiscovered(const eprosima::fastdds::rtps::ParticipantBuiltinTopicData& info);
@@ -150,9 +173,10 @@ private:
     // 已发现 reader 缓存（topic → 发现信息列表）：与 seen_ 并列，供 listTopics 列出仅有
     // 订阅者而无发布者的主题、供 topicInfo 统计订阅者数（订阅建立链路不依赖此缓存）
     std::map<std::string, std::vector<eprosima::fastdds::rtps::SubscriptionBuiltinTopicData>> seenReaders_;
-    // 已发现参与者缓存（GUID 串 → participant_name）：与 seen_/seenReaders_ 并列，供
-    // nodeList 列出域内命名参与者（GUID 串仅作幂等去重 key，不对外输出）
-    std::map<std::string, std::string> seenParticipants_;
+    // 已发现参与者缓存（GUID 前缀 → participant_name）：与 seen_/seenReaders_ 并列，供
+    // nodeList 列出域内命名参与者，供 nodeInfo 端点归属匹配（RTPS 规范保证端点 GUID 前缀 ==
+    // 所属参与者 GUID 前缀；前缀仅作幂等去重与归属匹配，不对外输出）
+    std::map<eprosima::fastdds::rtps::GuidPrefix_t, std::string> seenParticipants_;
     std::map<std::string, DebugSub> subs_;  // 已建立订阅
     std::mutex mtx_;  // 串行化公开方法与工作线程（participant_/pending_/subs_/workerRunning_）
     // 发现缓存专用叶子锁（保护 seen_/seenReaders_/seenParticipants_）：发现回调在 Fast DDS 持有 PDP/EDP 内部

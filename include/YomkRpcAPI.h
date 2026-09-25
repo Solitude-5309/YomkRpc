@@ -116,5 +116,17 @@
         "/YomkRpcDebugService/list_nodes",                                   \
         YomkMkPtr(DDSNodeList, DDSNodeList{stableRounds, intervalMs}))
 
+// 查询指定节点名（participant_name）的发布/订阅主题清单（独立收敛，与 list_nodes 完全
+// 分开）：轮询归属快照（存在标志 + 发布/订阅 (topicName, typeName) 清单），连续 stableRounds
+// 次不变即收敛返回（0 值钳制为默认 5 次/200ms；stableRounds=1 即单次快照免等待；最长阻塞约
+// stableRounds*intervalMs）。归属判定基于 RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID
+// 前缀"。命中返回 StringArray 输出行：节点名行、"  Subscribers:" 段 + 每行 "    <topic>:
+// <type>"、"  Publishers:" 段同形态（类型名原样输出，无任何风格转换；空段仅打段头）；未发现
+// 节点名返回错误。同名多参与者端点合并。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_NODE_INFO(nodeName, stableRounds, intervalMs)          \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/node_info",                                    \
+        YomkMkPtr(DDSNodeInfo, DDSNodeInfo{nodeName, stableRounds, intervalMs}))
+
 // 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)

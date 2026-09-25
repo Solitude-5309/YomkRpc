@@ -5,14 +5,15 @@
  * 范围：契约测试（DDS-free）刻意豁免的 /create_node 成功路径（经 setDomainId 创建真实
  *       participant）、/topic_print 登记契约与 /delete_node 析构清理，及 domainId 边界行为。
  *       节点层守卫（setDomainId 重复/未入域登记）与端到端流量（发现→动态类型→订阅→JSON 输出）
- *       已由 TestFastDDSDebugNode 覆盖，本测试不重复；topic_info 命中用例仅直连 FastDDS 建最小
- *       远端发布端触发 EDP 发现（不发布数据），覆盖服务层拼行路径。
+ *       已由 TestFastDDSDebugNode 覆盖，本测试不重复；topic_info/node_info 命中用例仅直连
+ *       FastDDS 建最小远端发布端触发 EDP 发现（不发布数据），覆盖服务层拼行路径。
  * 覆盖：
  *   A-1 生命周期：创建 → list_topics 收敛空列表 → list_nodes 单次快照空列表 → topic_info 未发现
  *       主题 eNo → 重复创建拒绝 → topicPrint 空回调拒绝 → 正常登记 → 同主题重复登记拒绝 →
- *       异主题登记 → 删除 → 重复删除拒绝 → 删除后 list_topics/list_nodes/topic_info 拒绝 →
- *       删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
- *       （Type/Publisher count/Subscription count）→ 退出前清理；
+ *       异主题登记 → 删除 → 重复删除拒绝 → 删除后 list_topics/list_nodes/topic_info/node_info
+ *       拒绝 → 删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
+ *       （Type/Publisher count/Subscription count）→ node_info 命中五行断言（节点名/Subscribers
+ *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
  *
  * 关键不变式：每个 eOk 创建的调试节点必须在 main 返回前经 /delete_node 显式删除，以规避
@@ -25,12 +26,14 @@
 #include "TestCheck.h"
 #include "YomkRpcDebugService.h" // 服务/DDSDebugNode/DDSDebugTopic/DDSDebugInfo/YOMK_* 宏
 
-#include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅 topic_info 命中用例的最小远端发布端）
+#include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅 topic_info/node_info 命中用例的最小远端发布端）
 
-#include <fastdds/dds/domain/DomainParticipant.hpp>        // 直连 FastDDS API 搭建远端发布端（命中用例）
+#include <fastdds/dds/domain/DomainParticipant.hpp>        // 直连 FastDDS API 搭建远端发布端/订阅端（命中用例）
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp> // participant 创建/删除
 #include <fastdds/dds/publisher/DataWriter.hpp>
 #include <fastdds/dds/publisher/Publisher.hpp>
+#include <fastdds/dds/subscriber/DataReader.hpp>
+#include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
@@ -71,6 +74,12 @@ namespace
     YomkPkgPtr mkNodeList()
     {
         return YomkMkPtr(DDSNodeList, DDSNodeList{1, 50});
+    }
+
+    // 构造 /node_info 请求包（未发现用例传 rounds=1 走单次快照快速路径；命中用例传收敛参数）
+    YomkPkgPtr mkNodeInfo(const std::string &nodeName, uint32_t stableRounds, uint32_t intervalMs)
+    {
+        return YomkMkPtr(DDSNodeInfo, DDSNodeInfo{nodeName, stableRounds, intervalMs});
     }
 } // namespace
 
@@ -147,6 +156,11 @@ int main()
     CHECK(nodesAfterDel.m_status == YomkResponse::eNo &&
               nodesAfterDel.m_msg.find("not created") != std::string::npos,
           "删除后 list_nodes → eNo debug node not created");
+
+    auto nodeInfoAfterDel = svc->invoke("/node_info", mkNodeInfo("t_no_node", 1, 50));
+    CHECK(nodeInfoAfterDel.m_status == YomkResponse::eNo &&
+              nodeInfoAfterDel.m_msg.find("not created") != std::string::npos,
+          "删除后 node_info → eNo debug node not created");
 
     CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN)).m_status == YomkResponse::eOk,
           "删除后重建调试节点 → eOk（delete/create 闭环）");
@@ -272,6 +286,100 @@ int main()
                 hitParticipant->delete_publisher(pub);
             }
             dds::DomainParticipantFactory::get_instance()->delete_participant(hitParticipant);
+        }
+    }
+
+    // ---- node_info 命中用例：远端命名 participant（pub+sub 双端点触发 EDP 发现，不发布数据）----
+    // 复用重建后的域 200 调试节点；时序模式同 topic_info 命中用例：list 预热 + node_info 独立
+    // 收敛窗口（500ms 起）覆盖本地 PDP/EDP 发现延迟；断言对齐 ros2 node info 输出形态
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 搭建远端双端点
+        constexpr const char *PEER_NAME = "test-svc-nodeinfo";
+        constexpr const char *HIT_PUB_TOPIC = "t_nodeinfo_hit_pub";
+        constexpr const char *HIT_SUB_TOPIC = "t_nodeinfo_hit_sub";
+        dds::DomainParticipantQos peerQos = dds::PARTICIPANT_QOS_DEFAULT;
+        peerQos.name(std::string(PEER_NAME));
+        auto *nodeinfoParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, peerQos);
+        CHECK(nodeinfoParticipant != nullptr, "命名 peer participant 创建成功（node_info 命中用例）");
+        if (nodeinfoParticipant != nullptr)
+        {
+            // TypeSupport 须活过 topic/writer/reader 使用期（声明顺序同 topic_info 命中用例）
+            dds::TypeSupport ts(new YomkRpc::MStringPubSubType());
+            ts.register_type(nodeinfoParticipant);
+            auto *pub = nodeinfoParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            auto *pubTopic = nodeinfoParticipant->create_topic(
+                HIT_PUB_TOPIC, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+            auto *writer = (pub != nullptr && pubTopic != nullptr)
+                ? pub->create_datawriter(pubTopic, dds::DATAWRITER_QOS_DEFAULT)
+                : nullptr;
+            auto *sub = nodeinfoParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            auto *subTopic = nodeinfoParticipant->create_topic(
+                HIT_SUB_TOPIC, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+            auto *reader = (sub != nullptr && subTopic != nullptr)
+                ? sub->create_datareader(subTopic, dds::DATAREADER_QOS_DEFAULT)
+                : nullptr;
+            CHECK(writer != nullptr && reader != nullptr,
+                  "远端 DataWriter/DataReader 创建成功（t_nodeinfo_hit_pub/sub，仅建端点不发布数据）");
+
+            if (writer != nullptr && reader != nullptr)
+            {
+                // list_topics 预热仅为本用例时序前置（late joiner 经 EDP 重放发现信息）；
+                // node_info 内部独立收敛查询，不依赖 list_topics
+                auto warm = svc->invoke("/list_topics", YomkMkPtr(DDSDebugList, DDSDebugList{5, 100}));
+                CHECK(warm.m_status == YomkResponse::eOk, "list_topics(5,100ms) 预热 → eOk（发现时序前置）");
+
+                auto hitNodeInfo = svc->invoke("/node_info", mkNodeInfo(PEER_NAME, 5, 100));
+                CHECK(hitNodeInfo.m_status == YomkResponse::eOk && hitNodeInfo.m_data != nullptr,
+                      "nodeInfo(test-svc-nodeinfo,5,100ms) → eOk（独立收敛命中）");
+                YomkUnPackPkg(hitNodeInfo.m_data, StringArray, nodeInfoArr);
+                CHECK(nodeInfoArr != nullptr && nodeInfoArr->d.size() == 5,
+                      "nodeInfo 返回包可解包为 5 行 StringArray");
+                if (nodeInfoArr != nullptr && nodeInfoArr->d.size() == 5)
+                {
+                    CHECK(nodeInfoArr->d[0] == PEER_NAME, "nodeInfo 第 1 行为节点名（participant_name 原样输出）");
+                    CHECK(nodeInfoArr->d[1] == "  Subscribers:", "nodeInfo 第 2 行为 Subscribers 段头");
+                    CHECK(nodeInfoArr->d[2] == std::string("    ") + HIT_SUB_TOPIC + ": YomkRpc::MString",
+                          "nodeInfo 第 3 行为订阅主题行（缩进 + topic: type 原始类型名）");
+                    CHECK(nodeInfoArr->d[3] == "  Publishers:", "nodeInfo 第 4 行为 Publishers 段头");
+                    CHECK(nodeInfoArr->d[4] == std::string("    ") + HIT_PUB_TOPIC + ": YomkRpc::MString",
+                          "nodeInfo 第 5 行为发布主题行（缩进 + topic: type 原始类型名）");
+                    std::cout << "[OBSERVE] node_info " << nodeInfoArr->d.size() << " lines" << std::endl;
+                }
+
+                // 未发现节点名：单次快照快速路径 → eNo（归属判定不命中即早退）
+                auto absentNode = svc->invoke("/node_info", mkNodeInfo("t_no_such_node", 1, 50));
+                CHECK(absentNode.m_status == YomkResponse::eNo &&
+                          absentNode.m_msg.find("not found") != std::string::npos,
+                      "nodeInfo 未发现节点名（单次快照）→ eNo node not found");
+            }
+
+            // 清理：reader → writer → topic → publisher/subscriber → participant
+            if (reader != nullptr && sub != nullptr)
+            {
+                sub->delete_datareader(reader);
+            }
+            if (writer != nullptr && pub != nullptr)
+            {
+                pub->delete_datawriter(writer);
+            }
+            if (subTopic != nullptr)
+            {
+                nodeinfoParticipant->delete_topic(subTopic);
+            }
+            if (pubTopic != nullptr)
+            {
+                nodeinfoParticipant->delete_topic(pubTopic);
+            }
+            if (sub != nullptr)
+            {
+                nodeinfoParticipant->delete_subscriber(sub);
+            }
+            if (pub != nullptr)
+            {
+                nodeinfoParticipant->delete_publisher(pub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(nodeinfoParticipant);
         }
     }
 
