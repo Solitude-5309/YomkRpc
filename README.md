@@ -52,7 +52,7 @@ source build_ubuntu.sh
 |---|---|
 | `ExampleYomkRpcTopic` | 发布订阅完整流程演示 |
 | `ExampleYomkRpcTopicLoan` | loan 借出机制演示 |
-| `ExampleYomkRpcPub` | 跨进程发布端示例（每 1s 发布 hello world，持续 60 秒） |
+| `ExampleYomkRpcPub` | 跨进程发布端示例（每 1s 发布 hello world，Ctrl+C 退出） |
 | `ExampleYomkRpcSub` | 跨进程订阅端示例（订阅 hello_world，Ctrl+C 退出） |
 | `yomkrpc` | 命令行工具：观察任意 DDS 主题（topic print）、列出域内主题（topic list）、查询单个主题详情（topic info）、列出域内节点（node list）、查询单个节点详情（node info），详见 YomkRpc 调试章节 |
 
@@ -78,7 +78,7 @@ YomkRpc/
 │   ├── CMakeLists.txt              # 示例程序构建（随主库安装到 bin/）
 │   ├── ExampleYomkRpcTopic.cpp     # 发布订阅完整流程演示
 │   ├── ExampleYomkRpcTopicLoan.cpp # loan 借出机制演示
-│   ├── ExampleYomkRpcPub.cpp       # 发布端示例程序（每 1s 发布 hello world，持续 60 秒）
+│   ├── ExampleYomkRpcPub.cpp       # 发布端示例程序（每 1s 发布 hello world，Ctrl+C 退出）
 │   ├── ExampleYomkRpcSub.cpp       # 订阅端示例程序（订阅 hello_world，Ctrl+C 退出）
 │   └── yomkrpc.cpp                 # yomkrpc 命令行工具（topic print 观察任意主题）
 ├── cmake/
@@ -259,7 +259,7 @@ auto onMessage = [&](const void *data)
 
 `examples/` 下提供两个独立进程的参考程序（纯宏 API，编译后可直接运行）：
 
-- `ExampleYomkRpcPub`：创建 `pub_node`，注册 `hello_world` 主题（MString），每隔 1s 发布一次，持续 60 秒后自行干净退出
+- `ExampleYomkRpcPub`：创建 `pub_node`，注册 `hello_world` 主题（MString），每隔 1s 发布一次，收到 Ctrl+C 退出信号后停止发布并干净退出
 - `ExampleYomkRpcSub`：创建 `sub_node`，订阅 `hello_world`，收到每条消息打印 `[RECV]` 内容，Ctrl+C 退出并打印累计接收条数
 
 另开两个终端分别运行即可观察跨进程发布/订阅（安装脚本已将扩展 lib 注册进系统动态库缓存，无需手动设置 LD_LIBRARY_PATH）：

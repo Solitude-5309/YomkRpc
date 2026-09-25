@@ -3,13 +3,23 @@
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <string>
 #include <thread>
 
 using namespace yomk;
 
-// 发布端示例：演示 创建节点 → 注册 MString 发布主题 → 每隔 1s 发布一条、共 60 条 → 销毁节点 的代码流程。
+static std::atomic<bool> g_stop{false};  // SIGINT（Ctrl+C）退出标志
+
+static void onSignal(int)
+{
+    g_stop.store(true);
+}
+
+// 发布端示例：演示 创建节点 → 注册 MString 发布主题 → 每隔 1s 发布一条 → 收到 Ctrl+C 退出信号后
+// 停止发布并销毁节点 的代码流程。
 // 跨进程运行方式（与 ExampleYomkRpcSub 配合、启动顺序）见 README。
 int main(int argc, char* argv[])
 {
@@ -33,13 +43,15 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // 3. 等待 DDS discovery 完成后，每隔 1s 发布一次，共 60 次
+    // 3. 等待 DDS discovery 完成后，每隔 1s 发布一次，直到收到 Ctrl+C 退出信号
+    std::signal(SIGINT, onSignal);
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    int total = 0;  // 已发布条数（含失败，作消息序号）
     int failCount = 0;
-    for (int i = 0; i < 60; ++i)
+    while (!g_stop.load())
     {
         YomkRpc::MString msg;
-        msg.data("hello world " + std::to_string(i));
+        msg.data("hello world " + std::to_string(total));
         resp = YOMKRPC_PUB_MSG("pub_node", "hello_world", &msg);
         if (resp.m_status != YomkResponse::eOk)
         {
@@ -55,11 +67,12 @@ int main(int argc, char* argv[])
         {
             YOMK_INFO_TAG("ExampleYomkRpcPub", "[SEND] ", msg.data());
         }
+        total++;
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
     // 4. 退出前显式销毁节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理
-    YOMK_INFO_TAG("ExampleYomkRpcPub", "publish done: total=60 failed=", failCount);
+    YOMK_INFO_TAG("ExampleYomkRpcPub", "publish done: total=", total, " failed=", failCount);
     resp = YOMKRPC_DEL_NODE("pub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
