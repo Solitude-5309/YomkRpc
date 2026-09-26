@@ -13,8 +13,8 @@
  *       异主题登记 → 删除 → 重复删除拒绝 → 删除后 list_topics/list_nodes/topic_info/node_info
  *       拒绝 → 删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
  *       → topic_info verbose 逐行断言（Type/空行/端点块 Node name+Endpoint type+GUID+QoS、
- *       count 为 0 无清单段）→ list_topics types 模式唯一行断言（主题名 [类型名]）
- *       （Type/Publisher count/Subscription count）→ node_info 命中五行断言（节点名/Subscribers
+ *       count 为 0 无清单段）→ list_topics types 模式唯一行断言（主题名 [类型名]）→
+ *       topic_find 按类型名反查命中唯一行与未匹配类型 eNo → node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
  *
@@ -321,6 +321,21 @@ int main()
                 CHECK(listArrT != nullptr && listArrT->d.size() == 1 &&
                           listArrT->d[0] == std::string(HIT_TOPIC) + " [YomkRpc::MString]",
                       "list_topics(types) 唯一行为主题名 [类型名]（单空格 + 方括号，类型名原样）");
+
+                // topic find：按类型名精确匹配反查（域 200 纯净唯一类型）→ 唯一行 HIT_TOPIC；
+                // 未匹配类型报错退出（info 族语义，可发现类型名拼写错误）
+                auto findHit = svc->invoke(
+                        "/topic_find", YomkMkPtr(DDSDebugFind, DDSDebugFind{"YomkRpc::MString", 5, 100}));
+                CHECK(findHit.m_status == YomkResponse::eOk,
+                      "topic_find(YomkRpc::MString,5,100ms) → eOk（按类型反查命中）");
+                YomkUnPackPkg(findHit.m_data, StringArray, findArr);
+                CHECK(findArr != nullptr && findArr->d.size() == 1 && findArr->d[0] == HIT_TOPIC,
+                      "topic_find 命中唯一行为主题名（类型精确匹配，按主题名排序）");
+                auto findMiss = svc->invoke(
+                        "/topic_find", YomkMkPtr(DDSDebugFind, DDSDebugFind{"Not::Exist", 1, 50}));
+                CHECK(findMiss.m_status == YomkResponse::eNo &&
+                          findMiss.m_msg.find("type [Not::Exist] not found") != std::string::npos,
+                      "topic_find 未匹配类型 → eNo type [Not::Exist] not found（info 族语义）");
             }
 
             // 清理：writer → topic → publisher → participant（同 TestFastDDSDebugNode 计数用例顺序）

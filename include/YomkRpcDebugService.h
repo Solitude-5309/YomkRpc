@@ -25,6 +25,7 @@ private:
     YomkResponse topicPrint(YomkPkgPtr pkg);
     YomkResponse listTopics(YomkPkgPtr pkg);
     YomkResponse topicInfo(YomkPkgPtr pkg);
+    YomkResponse topicFind(YomkPkgPtr pkg);
     YomkResponse listNodes(YomkPkgPtr pkg);
     YomkResponse nodeInfo(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
@@ -86,6 +87,15 @@ struct DDSNodeInfo
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
+// topic_find 请求负载：按数据类型名反查主题列表（独立收敛参数，语义同 list_topics，
+// 0 值由节点层钳制为默认）
+struct DDSDebugFind
+{
+    std::string typeName;   // 待查询数据类型名（精确匹配）
+    uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
+    uint32_t intervalMs;    // 快照轮询间隔毫秒
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
@@ -95,3 +105,4 @@ YomkMsg(DDSDebugList, DDSDebugList, msg)
 YomkMsg(DDSDebugInfo, DDSDebugInfo, msg)
 YomkMsg(DDSNodeList, DDSNodeList, msg)
 YomkMsg(DDSNodeInfo, DDSNodeInfo, msg)
+YomkMsg(DDSDebugFind, DDSDebugFind, msg)

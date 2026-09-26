@@ -8,6 +8,7 @@
  *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N] [-t | --types]
  *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>
  *   yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>
+ *   yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>
  *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
  *   yomkrpc -h | --help
@@ -21,6 +22,7 @@
  *   yomkrpc topic info hello_world
  *   yomkrpc topic info -v hello_world
  *   yomkrpc topic type hello_world
+ *   yomkrpc topic find YomkRpc::MString
  *   yomkrpc node list
  *   yomkrpc node info my_node
  *
@@ -39,6 +41,8 @@
  * 未发现主题报错退出。
  * topic type：topic info 的单值快捷方式（复用 /topic_info 非 verbose 端点），输出单行裸类型名
  * （去 "Type: " 前缀，对齐 ros2 topic type，便于脚本 $() 取用）；未发现主题报错退出。
+ * topic find：按数据类型名反查域内主题列表（类型名精确匹配，对齐 ros2 topic find），命中
+ * 每行输出一个主题名（按主题名排序）；无匹配主题报错退出（可发现类型名拼写错误）。
  * node list：创建节点后独立收敛查询域内已发现的命名参与者（每 ~200ms 轮询一次参与者
  * 发现缓存快照，连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空
  * 才列出，空名参与者跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出。
@@ -85,6 +89,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N] [-t | --types]\n"
           "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>\n"
           "  yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
+          "  yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -93,7 +98,7 @@ static void printUsage(std::ostream &os)
           "  -d N, --domain N    DDS 域号（0-232），临时指定，不写环境变量；未指定时读\n"
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
-          "                      （默认 5，topic list、topic info、node list 与 node info 生效）\n"
+          "                      （默认 5，topic list、topic info、topic find、node list 与 node info 生效）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -108,6 +113,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic info hello_world\n"
           "  yomkrpc topic info -v hello_world\n"
           "  yomkrpc topic type hello_world\n"
+          "  yomkrpc topic find YomkRpc::MString\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -383,6 +389,53 @@ static int runTopicType(uint32_t domainId, const std::string &topicName, uint32_
     return 0;
 }
 
+// topic find 子命令：按数据类型名反查域内主题列表（类型名精确匹配，对齐 ros2 topic find）：
+// 命中每行输出一个主题名（按主题名排序）；无匹配主题报错退出（可发现类型名拼写错误）。
+// 无 Ctrl+C 循环，查完即退
+static int runTopicFind(uint32_t domainId, const std::string &typeName, uint32_t waitRounds)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 独立收敛按类型名反查主题列表
+    resp = YOMKRPC_DEBUG_TOPIC_FIND(typeName, waitRounds, 200);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "topic find failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    YomkUnPackPkg(resp.m_data, StringArray, arr);
+    if (arr == nullptr || arr->d.empty())
+    {
+        YOMK_ERROR_TAG("yomkrpc", "topic find failed: unexpected response payload");
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    for (const auto &line : arr->d)
+    {
+        std::cout << line << "\n";
+    }
+    std::cout.flush();
+
+    // 3. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同 print/list 不变式）
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
 // 连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空才列出，空名参与者
 // 跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出（无 Ctrl+C 循环，查完即退）
@@ -502,7 +555,7 @@ int main(int argc, char *argv[])
     // ---- 参数解析：-h/--help 即刻退出；-d/--domain 与 -w/--wait 可选；位置参数 ----
     uint32_t domainId = 0;
     bool hasDomainId = false;
-    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、node list 与 node info 生效）
+    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、topic find、node list 与 node info 生效）
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     std::vector<std::string> pos;
@@ -586,6 +639,10 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "type" && !pos[2].empty())
     {
         return runTopicType(domainId, pos[2], waitRounds);
+    }
+    if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "find" && !pos[2].empty())
+    {
+        return runTopicFind(domainId, pos[2], waitRounds);
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "info" && !pos[2].empty())
     {

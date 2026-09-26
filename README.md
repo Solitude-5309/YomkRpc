@@ -284,6 +284,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic list [-t]` | 列出域内全部已发现主题（按名称排序；-t 每行附类型名：主题名 [类型名]） |
 | `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行；-v 逐端点 Node name/GUID/QoS 详情段） |
 | `yomkrpc topic type <主题名>` | 查询单主题数据类型名（单行裸输出，对齐 ros2 topic type，便于脚本取用） |
+| `yomkrpc topic find <类型名>` | 按数据类型名反查域内主题列表（每行一个主题名，精确匹配，对齐 ros2 topic find） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -496,6 +497,18 @@ yomkrpc topic type -w 7 hello_world   # 收敛判定放宽（默认 5）
 ```
 
 未发现主题时报错退出（`topic [<主题名>] not found`，与 topic info 同语义）。等价宏调用同上（`YOMKRPC_DEBUG_TOPIC_INFO` 取首行去前缀）。
+
+#### topic find：按数据类型反查主题
+
+`yomkrpc topic find <类型名>` 按数据类型名精确匹配反查域内主题（独立 `/topic_find` 端点，收敛语义同 topic list），命中时每行输出一个主题名（按主题名排序，对齐 `ros2 topic find`）：
+
+```bash
+yomkrpc topic find YomkRpc::MString       # 输出：hello_world
+yomkrpc topic find -d 5 YomkRpc::MString  # 指定域号
+yomkrpc topic find -w 7 YomkRpc::MString  # 收敛判定放宽（默认 5）
+```
+
+域内无该类型主题时报错退出（`type [<类型名>] not found`，info 族语义，可发现类型名拼写错误）。等价宏调用：`YOMKRPC_DEBUG_TOPIC_FIND(typeName, stableRounds, intervalMs)`。
 
 ### 6.5 列出域内节点（yomkrpc node list）
 

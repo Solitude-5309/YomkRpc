@@ -32,6 +32,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/topic_print", YomkRpcDebugService::topicPrint);
     YomkInstallFunc("/list_topics", YomkRpcDebugService::listTopics);
     YomkInstallFunc("/topic_info", YomkRpcDebugService::topicInfo);
+    YomkInstallFunc("/topic_find", YomkRpcDebugService::topicFind);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
@@ -120,6 +121,36 @@ YomkResponse YomkRpcDebugService::listTopics(YomkPkgPtr pkg)
     for (const auto& entry : pairs)
     {
         lines.emplace_back(p->msg.types ? entry.first + " [" + entry.second + "]" : entry.first);
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::topicFind(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugFind, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicFind", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // 持锁取发现缓存全集快照（listTopics 已按主题名排序），按类型名精确匹配过滤；
+    // 无匹配按查询失败处理（info 族语义），便于调用方发现类型名拼写错误
+    std::vector<std::pair<std::string, std::string>> pairs;
+    node_->listTopics(pairs, p->msg.stableRounds, p->msg.intervalMs);
+    std::vector<std::string> lines;
+    for (const auto& entry : pairs)
+    {
+        if (entry.second == p->msg.typeName)
+        {
+            lines.emplace_back(entry.first);
+        }
+    }
+    if (lines.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicFind", "type [", p->msg.typeName, "] not found");
+        return YomkResponse(YomkResponse::eNo, "type [" + p->msg.typeName + "] not found");
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }

@@ -123,6 +123,14 @@
         "/YomkRpcDebugService/topic_info",                                   \
         YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs, true}))
 
+// 按数据类型名反查域内主题列表（独立收敛，语义同 list_topics）：类型名精确匹配，命中返回
+// StringArray 每行一个主题名（按主题名排序）；无匹配主题返回错误（type [...] not found）。
+// 须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_FIND(typeName, stableRounds, intervalMs)         \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/topic_find",                                   \
+        YomkMkPtr(DDSDebugFind, DDSDebugFind{typeName, stableRounds, intervalMs}))
+
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，
