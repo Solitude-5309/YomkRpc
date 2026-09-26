@@ -134,22 +134,55 @@ YomkResponse YomkRpcDebugService::topicInfo(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "debug node not created");
     }
     // node_ 非空即已入域；持锁对单个目标主题做独立收敛查询（最长约 stableRounds*intervalMs）：
-    // 锁保护 node_ 生命周期不被并发 deleteNode 破坏（同 listTopics 既有约定）；0 值参数由节点层钳制
+    // 锁保护 node_ 生命周期不被并发 deleteNode 破坏（同 listTopics 既有约定）；0 值参数由节点层钳制；
+    // verbose 模式同一次查询顺带取端点详情（避免二次收敛轮询）
     std::string typeName;
     size_t publisherCount = 0;
     size_t subscriptionCount = 0;
+    std::vector<FastDDSDebugNode::EndpointDetail> pubDetails;
+    std::vector<FastDDSDebugNode::EndpointDetail> subDetails;
     if (!node_->topicInfo(p->msg.topicName, typeName, publisherCount, subscriptionCount,
-                p->msg.stableRounds, p->msg.intervalMs))
+                p->msg.stableRounds, p->msg.intervalMs,
+                p->msg.verbose ? &pubDetails : nullptr,
+                p->msg.verbose ? &subDetails : nullptr))
     {
         YOMK_ERROR_TAG("YomkRpcDebugService::topicInfo", "topic [", p->msg.topicName, "] not found");
         return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
     }
-    // 三行详情：类型名原样输出（不做任何风格转换）+ 输出两端点计数
+    // 非 verbose 三行：类型名原样输出（不做任何风格转换）+ 两端点计数；verbose 追加逐端点
+    // 详情段（空行规则：Type 后一段、每端点块前一段；count 为 0 的端点类型无清单段）
     std::vector<std::string> lines;
-    lines.reserve(3);
+    if (!p->msg.verbose)
+    {
+        lines.reserve(3);
+        lines.emplace_back("Type: " + typeName);
+        lines.emplace_back("Publisher count: " + std::to_string(publisherCount));
+        lines.emplace_back("Subscription count: " + std::to_string(subscriptionCount));
+        return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+    }
     lines.emplace_back("Type: " + typeName);
+    lines.emplace_back("");
     lines.emplace_back("Publisher count: " + std::to_string(publisherCount));
+    for (const auto& detail : pubDetails)
+    {
+        lines.emplace_back("");
+        lines.emplace_back("Node name: " + detail.nodeName);
+        lines.emplace_back("Endpoint type: PUBLISHER");
+        lines.emplace_back("GUID: " + detail.guid);
+        lines.emplace_back("QoS profile:");
+        lines.insert(lines.end(), detail.qosLines.begin(), detail.qosLines.end());
+    }
+    lines.emplace_back("");
     lines.emplace_back("Subscription count: " + std::to_string(subscriptionCount));
+    for (const auto& detail : subDetails)
+    {
+        lines.emplace_back("");
+        lines.emplace_back("Node name: " + detail.nodeName);
+        lines.emplace_back("Endpoint type: SUBSCRIPTION");
+        lines.emplace_back("GUID: " + detail.guid);
+        lines.emplace_back("QoS profile:");
+        lines.insert(lines.end(), detail.qosLines.begin(), detail.qosLines.end());
+    }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
 

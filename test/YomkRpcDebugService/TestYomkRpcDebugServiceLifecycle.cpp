@@ -12,6 +12,8 @@
  *       主题 eNo → 重复创建拒绝 → topicPrint 空回调拒绝 → 正常登记 → 同主题重复登记拒绝 →
  *       异主题登记 → 删除 → 重复删除拒绝 → 删除后 list_topics/list_nodes/topic_info/node_info
  *       拒绝 → 删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
+ *       → topic_info verbose 逐行断言（Type/空行/端点块 Node name+Endpoint type+GUID+QoS、
+ *       count 为 0 无清单段）
  *       （Type/Publisher count/Subscription count）→ node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
@@ -64,10 +66,12 @@ namespace
         return YomkMkPtr(DDSDebugList, DDSDebugList{1, 100});
     }
 
-    // 构造 /topic_info 请求包（未发现用例传 rounds=1 走单次快照快速路径；命中用例传收敛参数）
-    YomkPkgPtr mkInfo(const std::string &topicName, uint32_t stableRounds, uint32_t intervalMs)
+    // 构造 /topic_info 请求包（未发现用例传 rounds=1 走单次快照快速路径；命中用例传收敛参数；
+    // verbose=true 为端点详情模式，默认 false 与非 verbose 调用零改动兼容）
+    YomkPkgPtr mkInfo(const std::string &topicName, uint32_t stableRounds, uint32_t intervalMs,
+                      bool verbose = false)
     {
-        return YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs});
+        return YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs, verbose});
     }
 
     // 构造 /list_nodes 请求包（stableRounds=1 单次快照路径，免收敛等待）
@@ -269,6 +273,45 @@ int main()
                     CHECK(infoArr->d[1] == "Publisher count: 1", "topicInfo 第 2 行 Publisher count == 1");
                     CHECK(infoArr->d[2] == "Subscription count: 0",
                           "topicInfo 第 3 行 Subscription count == 0");
+                }
+
+                // verbose 端点详情：同 writer 仍在域内，逐行断言完整段（仅发布端点场景）
+                auto hitV = svc->invoke("/topic_info", mkInfo(HIT_TOPIC, 5, 100, true));
+                CHECK(hitV.m_status == YomkResponse::eOk && hitV.m_data != nullptr,
+                      "topicInfo(t_info_hit, verbose) → eOk（端点详情模式命中）");
+                YomkUnPackPkg(hitV.m_data, StringArray, infoArrV);
+                CHECK(infoArrV != nullptr && infoArrV->d.size() >= 9,
+                      "verbose 返回包可解包为 StringArray（至少 9 行）");
+                if (infoArrV != nullptr && infoArrV->d.size() >= 9)
+                {
+                    CHECK(infoArrV->d[0] == "Type: YomkRpc::MString",
+                          "verbose 第 1 行 Type 为原始 DDS 类型名");
+                    CHECK(infoArrV->d[1].empty(), "verbose 第 2 行为空行（Type 段后分隔）");
+                    CHECK(infoArrV->d[2] == "Publisher count: 1", "verbose 第 3 行 Publisher count == 1");
+                    CHECK(infoArrV->d[3].empty(), "verbose 第 4 行为空行（端点块前分隔）");
+                    CHECK(infoArrV->d[4].rfind("Node name: ", 0) == 0,
+                          "verbose 第 5 行 Node name（归属参与者名）");
+                    CHECK(infoArrV->d[5] == "Endpoint type: PUBLISHER",
+                          "verbose 第 6 行 Endpoint type: PUBLISHER");
+                    CHECK(infoArrV->d[6].rfind("GUID: ", 0) == 0 &&
+                              infoArrV->d[6].find('|') != std::string::npos,
+                          "verbose 第 7 行 GUID 为 FastDDS 原生 prefix|entity 形态");
+                    CHECK(infoArrV->d[7] == "QoS profile:", "verbose 第 8 行 QoS profile 段头");
+                    CHECK(infoArrV->d[8].rfind("  Reliability: ", 0) == 0,
+                          "verbose 第 9 行起为两空格缩进 QoS 键值行");
+                    bool hasSubCount0 = false;
+                    for (const auto &line : infoArrV->d)
+                    {
+                        if (line == "Subscription count: 0")
+                        {
+                            hasSubCount0 = true;
+                        }
+                    }
+                    CHECK(hasSubCount0, "verbose 含 Subscription count: 0 行（无订阅者，无清单段）");
+                    for (const auto &line : infoArrV->d)
+                    {
+                        std::cout << "[OBSERVE] verbose |" << line << "|" << std::endl;
+                    }
                 }
             }
 

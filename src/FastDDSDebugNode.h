@@ -75,16 +75,36 @@ public:
     bool listTopics(std::vector<std::pair<std::string, std::string>>& topics,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
+    // 单个远端端点的发现详情（topicInfo verbose 模式输出单元）：nodeName 经 GUID 前缀归属
+    // 匹配（RTPS 规范：端点 GUID 前缀 == 所属参与者 GUID 前缀），未发现对应参与者时为空串；
+    // guid 为 FastDDS 原生格式（ostringstream << GUID_t，“前缀|实体ID”点分十六进制）；
+    // qosLines 为已缩进（两空格）的 ROS2 风格键值行（QoS profile 段落，逐行输出）
+    struct EndpointDetail
+    {
+        std::string nodeName;
+        std::string guid;
+        std::vector<std::string> qosLines;
+
+        // 相等比较：供收敛轮询的快照相等性判定（std::tuple/vector 比较要求元素可比较）
+        bool operator==(const EndpointDetail& rhs) const
+        {
+            return nodeName == rhs.nodeName && guid == rhs.guid && qosLines == rhs.qosLines;
+        }
+    };
     // 查询单主题发现详情（独立收敛查询，与 listTopics 互不影响）：先检查入域状态，再轮询
-    // 该主题的详情快照（found 标志 + 类型名 + writer/reader 端点计数），连续 stableRounds
-    // 次不变即认为收敛返回。命中（任一 writer 或 reader 已发现）返回 true 并填充 typeName
-    // （原始 DDS 类型名，不做任何转换）、publisherCount/subscriptionCount（远端端点实例数）；
-    // 收敛时仍未见该主题返回 false（未 setDomainId 亦 false）。0 值钳制默认 5 次/200ms；
-    // 最长阻塞约 stableRounds*intervalMs；等待期间远端新增端点使快照变化并重置计数。
+    // 该主题的详情快照（found 标志 + 类型名 + writer/reader 端点计数 + 可选端点详情），连续
+    // stableRounds 次不变即认为收敛返回。命中（任一 writer 或 reader 已发现）返回 true 并填充
+    // typeName（原始 DDS 类型名，不做任何转换）、publisherCount/subscriptionCount（远端端点
+    // 实例数）；publishers/subscribers 非 nullptr 时（verbose 模式）额外填充各端点详情
+    // （EndpointDetail；快照相等性含端点详情——等待期间端点变化会重置不变计数）；收敛时仍未
+    // 见该主题返回 false（未 setDomainId 亦 false，verbose 输出保持为空）。0 值钳制默认
+    // 5 次/200ms；最长阻塞约 stableRounds*intervalMs。
     bool topicInfo(const std::string& topicName, std::string& typeName,
             size_t& publisherCount, size_t& subscriptionCount,
             uint32_t stableRounds = kDefaultStableRounds,
-            uint32_t intervalMs = kDefaultIntervalMs);
+            uint32_t intervalMs = kDefaultIntervalMs,
+            std::vector<EndpointDetail>* publishers = nullptr,
+            std::vector<EndpointDetail>* subscribers = nullptr);
     // 列出域内已发现的命名参与者（独立收敛查询，与 listTopics/topicInfo 互不影响）：先检查
     // 入域状态，再轮询参与者名称快照，连续 stableRounds 次不变即认为收敛返回。仅列出
     // participant_name 非空且非 "/" 的参与者（空名跳过；"/" 是 ROS2 参与者的默认占位名——
@@ -119,12 +139,15 @@ private:
     // writer/reader 使快照变化并重置计数。
     bool waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
             uint32_t stableRounds, uint32_t intervalMs);
-    // topicInfo 的收敛轮询辅助（独立于 waitForTopicsStable）：快照为单个目标主题的详情四元组
-    // （found 标志 + 类型名 + writer 端点计数 + reader 端点计数），连续 stableRounds 次不变即
-    // 收敛；caller 已完成入域检查。命中的最终快照填充输出并返回 true，未发现返回 false。
+    // topicInfo 的收敛轮询辅助（独立于 waitForTopicsStable）：快照为单个目标主题的详情
+    // （found 标志 + 类型名 + writer 端点计数 + reader 端点计数 + 可选的 writer/reader 端点
+    // 详情列表），连续 stableRounds 次不变即收敛；caller 已完成入域检查。命中的最终快照填充
+    // 输出（verbose 指针非空才填充对应详情列表）并返回 true，未发现返回 false。
     bool waitForTopicInfoStable(const std::string& topicName, std::string& typeName,
             size_t& publisherCount, size_t& subscriptionCount,
-            uint32_t stableRounds, uint32_t intervalMs);
+            uint32_t stableRounds, uint32_t intervalMs,
+            std::vector<EndpointDetail>* publishers = nullptr,
+            std::vector<EndpointDetail>* subscribers = nullptr);
     // nodeList 的收敛轮询辅助（独立于 waitForTopicsStable/waitForTopicInfoStable）：快照为
     // 域内有效命名参与者名称列表（名称非空且非 "/" 者——空名与 ROS2 占位名 "/" 跳过——按名称
     // 排序），连续 stableRounds 次不变即收敛；caller 已完成入域检查。最终快照填充输出并返回 true。

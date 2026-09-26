@@ -49,6 +49,257 @@ std::string nowStamp()
        << std::setw(kMicroDigits) << std::setfill('0') << us;
     return os.str();
 }
+
+// ---- topic info verbose 的端点详情辅助（EndpointDetail.qosLines 的行来源） ----
+// 展示名对齐 ros2 topic info -v 的输出习惯（去 _QOS 后缀），枚举拼写对齐 FastDDS 3.6.1
+// QosPolicies.hpp；Duration 判 Infinite 用官方 Time_t::is_infinite（时长结构 seconds/nanosec）
+
+// Duration_t → "Infinite" 或 "<秒>.<纳秒> s"（dds::Time_t 公开成员 seconds/nanosec，
+// Infinite 判定用官方 Time_t::is_infinite）
+std::string formatDuration(const Duration_t& duration)
+{
+    if (Time_t::is_infinite(duration))
+    {
+        return "Infinite";
+    }
+    std::ostringstream os;
+    os << duration.seconds;
+    if (duration.nanosec != 0)
+    {
+        // 纳秒部分固定位数补零
+        constexpr int kNanosDigits = 9;              // 纳秒位数（10^-9 秒）
+        os << '.' << std::setw(kNanosDigits) << std::setfill('0') << duration.nanosec;
+    }
+    os << " s";
+    return os.str();
+}
+
+// 端点 GUID → FastDDS 原生格式（ostringstream << GUID_t，“12字节前缀|4字节实体ID”点分十六进制）
+std::string guidString(const rtps::GUID_t& guid)
+{
+    std::ostringstream os;
+    os << guid;
+    return os.str();
+}
+
+// 端点归属参与者名（GUID 前缀比对，RTPS 规范保证端点 GUID 前缀 == 所属参与者 GUID 前缀）；
+// 调用方须已持 seenMtx_（快照锁内调用），未发现对应参与者返回空串
+std::string participantNameOf(
+        const std::map<rtps::GuidPrefix_t, std::string>& participants, const rtps::GUID_t& guid)
+{
+    const auto it = participants.find(guid.guidPrefix);
+    return (it != participants.end()) ? it->second : std::string();
+}
+
+const char* reliabilityKindName(ReliabilityQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case RELIABLE_RELIABILITY_QOS:
+            return "RELIABLE";
+        case BEST_EFFORT_RELIABILITY_QOS:
+            return "BEST_EFFORT";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+const char* durabilityKindName(DurabilityQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case TRANSIENT_LOCAL_DURABILITY_QOS:
+            return "TRANSIENT_LOCAL";
+        case TRANSIENT_DURABILITY_QOS:
+            return "TRANSIENT";
+        case PERSISTENT_DURABILITY_QOS:
+            return "PERSISTENT";
+        case VOLATILE_DURABILITY_QOS:
+            return "VOLATILE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+const char* livelinessKindName(LivelinessQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case MANUAL_BY_PARTICIPANT_LIVELINESS_QOS:
+            return "MANUAL_BY_PARTICIPANT";
+        case MANUAL_BY_TOPIC_LIVELINESS_QOS:
+            return "MANUAL_BY_TOPIC";
+        case AUTOMATIC_LIVELINESS_QOS:
+            return "AUTOMATIC";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+const char* ownershipKindName(OwnershipQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case EXCLUSIVE_OWNERSHIP_QOS:
+            return "EXCLUSIVE";
+        case SHARED_OWNERSHIP_QOS:
+            return "SHARED";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+const char* destinationOrderKindName(DestinationOrderQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case BY_SOURCE_TIMESTAMP_DESTINATIONORDER_QOS:
+            return "BY_SOURCE_TIMESTAMP";
+        case BY_RECEPTION_TIMESTAMP_DESTINATIONORDER_QOS:
+            return "BY_RECEPTION_TIMESTAMP";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+// Partition 名单 → "[a, b]"（空名单 "[]"；Partition_t 内部为长度前缀 + C 字符串）
+std::string partitionNames(const PartitionQosPolicy& partition)
+{
+    std::string out = "[";
+    bool first = true;
+    for (auto it = partition.begin(); it != partition.end(); ++it)
+    {
+        if (!first)
+        {
+            out += ", ";
+        }
+        out.append(it->name(), it->size());
+        first = false;
+    }
+    out += "]";
+    return out;
+}
+
+// 扩展组（fastcdr::optional）：发现数据携带（has_value）才追加行
+void appendHistoryLine(std::vector<std::string>& lines, const HistoryQosPolicy& history)
+{
+    std::string line = "  History: ";
+    if (history.kind == KEEP_ALL_HISTORY_QOS)
+    {
+        line += "KEEP_ALL";
+    }
+    else
+    {
+        line += "KEEP_LAST (depth " + std::to_string(history.depth) + ")";
+    }
+    lines.push_back(std::move(line));
+}
+
+void appendResourceLimitsLine(std::vector<std::string>& lines,
+        const ResourceLimitsQosPolicy& limits)
+{
+    lines.push_back("  Resource Limits: max_samples=" + std::to_string(limits.max_samples) +
+            ", max_instances=" + std::to_string(limits.max_instances) +
+            ", max_samples_per_instance=" + std::to_string(limits.max_samples_per_instance));
+}
+
+// writer 端点的 QoS profile 行集：核心组恒输出（11 行）+ 扩展组按发现数据携带情况追加
+std::vector<std::string> writerQosLines(const rtps::PublicationBuiltinTopicData& writer)
+{
+    std::vector<std::string> lines;
+    lines.emplace_back(std::string("  Reliability: ") +
+            reliabilityKindName(writer.reliability.kind));
+    lines.emplace_back(std::string("  Durability: ") + durabilityKindName(writer.durability.kind));
+    lines.emplace_back("  Deadline: " + formatDuration(writer.deadline.period));
+    lines.emplace_back("  Latency Budget: " + formatDuration(writer.latency_budget.duration));
+    lines.emplace_back("  Lifespan: " + formatDuration(writer.lifespan.duration));
+    lines.emplace_back(std::string("  Liveliness: ") + livelinessKindName(writer.liveliness.kind));
+    lines.emplace_back(
+        "  Liveliness lease duration: " + formatDuration(writer.liveliness.lease_duration));
+    lines.emplace_back(std::string("  Ownership: ") + ownershipKindName(writer.ownership.kind));
+    lines.emplace_back("  Ownership Strength: " + std::to_string(writer.ownership_strength.value));
+    lines.emplace_back(std::string("  Destination Order: ") +
+            destinationOrderKindName(writer.destination_order.kind));
+    lines.emplace_back("  Partition: " + partitionNames(writer.partition));
+    if (writer.history.has_value())
+    {
+        appendHistoryLine(lines, *writer.history);
+    }
+    if (writer.resource_limits.has_value())
+    {
+        appendResourceLimitsLine(lines, *writer.resource_limits);
+    }
+    if (writer.publish_mode.has_value())
+    {
+        lines.emplace_back(std::string("  Publish Mode: ") +
+                (writer.publish_mode->kind == ASYNCHRONOUS_PUBLISH_MODE ?
+                "ASYNCHRONOUS" : "SYNCHRONOUS"));
+    }
+    if (writer.transport_priority.has_value())
+    {
+        lines.emplace_back(
+            "  Transport Priority: " + std::to_string(writer.transport_priority->value));
+    }
+    if (writer.writer_data_lifecycle.has_value())
+    {
+        lines.emplace_back(
+            std::string("  Writer Data Lifecycle: autodispose_unregistered_instances=") +
+            (writer.writer_data_lifecycle->autodispose_unregistered_instances ? "true" : "false"));
+    }
+    return lines;
+}
+
+// reader 端点的 QoS profile 行集：核心组恒输出（11 行，无 Ownership Strength、多 Time Based
+// Filter）+ 扩展组按发现数据携带情况追加
+std::vector<std::string> readerQosLines(const rtps::SubscriptionBuiltinTopicData& reader)
+{
+    std::vector<std::string> lines;
+    lines.emplace_back(std::string("  Reliability: ") +
+            reliabilityKindName(reader.reliability.kind));
+    lines.emplace_back(std::string("  Durability: ") + durabilityKindName(reader.durability.kind));
+    lines.emplace_back("  Deadline: " + formatDuration(reader.deadline.period));
+    lines.emplace_back("  Latency Budget: " + formatDuration(reader.latency_budget.duration));
+    lines.emplace_back("  Lifespan: " + formatDuration(reader.lifespan.duration));
+    lines.emplace_back(std::string("  Liveliness: ") + livelinessKindName(reader.liveliness.kind));
+    lines.emplace_back(
+        "  Liveliness lease duration: " + formatDuration(reader.liveliness.lease_duration));
+    lines.emplace_back(std::string("  Ownership: ") + ownershipKindName(reader.ownership.kind));
+    lines.emplace_back(
+        "  Time Based Filter: " + formatDuration(reader.time_based_filter.minimum_separation));
+    lines.emplace_back(std::string("  Destination Order: ") +
+            destinationOrderKindName(reader.destination_order.kind));
+    lines.emplace_back("  Partition: " + partitionNames(reader.partition));
+    if (reader.history.has_value())
+    {
+        appendHistoryLine(lines, *reader.history);
+    }
+    if (reader.resource_limits.has_value())
+    {
+        appendResourceLimitsLine(lines, *reader.resource_limits);
+    }
+    return lines;
+}
+
+// 单端点详情拼装：归属节点名 + FastDDS 原生 GUID + QoS profile 行集
+FastDDSDebugNode::EndpointDetail makeWriterDetail(
+        const rtps::PublicationBuiltinTopicData& writer, const std::string& nodeName)
+{
+    FastDDSDebugNode::EndpointDetail detail;
+    detail.nodeName = nodeName;
+    detail.guid = guidString(writer.guid);
+    detail.qosLines = writerQosLines(writer);
+    return detail;
+}
+
+FastDDSDebugNode::EndpointDetail makeReaderDetail(
+        const rtps::SubscriptionBuiltinTopicData& reader, const std::string& nodeName)
+{
+    FastDDSDebugNode::EndpointDetail detail;
+    detail.nodeName = nodeName;
+    detail.guid = guidString(reader.guid);
+    detail.qosLines = readerQosLines(reader);
+    return detail;
+}
 }  // namespace
 
 class FastDDSDebugNode::DebugParticipantListener : public DomainParticipantListener
@@ -331,7 +582,8 @@ bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string
 
 bool FastDDSDebugNode::topicInfo(const std::string& topicName, std::string& typeName,
         size_t& publisherCount, size_t& subscriptionCount,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs,
+        std::vector<EndpointDetail>* publishers, std::vector<EndpointDetail>* subscribers)
 {
     if (stableRounds == 0)
     {
@@ -349,7 +601,8 @@ bool FastDDSDebugNode::topicInfo(const std::string& topicName, std::string& type
         }
     }
     return waitForTopicInfoStable(
-        topicName, typeName, publisherCount, subscriptionCount, stableRounds, intervalMs);
+        topicName, typeName, publisherCount, subscriptionCount, stableRounds, intervalMs,
+        publishers, subscribers);
 }
 
 bool FastDDSDebugNode::nodeList(std::vector<std::string>& names,
@@ -443,25 +696,58 @@ bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, st
 
 bool FastDDSDebugNode::waitForTopicInfoStable(const std::string& topicName, std::string& typeName,
         size_t& publisherCount, size_t& subscriptionCount,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs,
+        std::vector<EndpointDetail>* publishers, std::vector<EndpointDetail>* subscribers)
 {
-    // 快照：锁内构建目标主题详情四元组（found 标志 / 类型名 / 发布者数 / 订阅者数）；类型名
-    // writer 优先、reader 补缺；只拿 seenMtx_ 叶子锁（不持锁睡眠，发现事件线程可并行写入）
-    auto snapshot = [this, &topicName]()
+    // 快照：锁内构建目标主题详情（found 标志 / 类型名 / 发布者数 / 订阅者数 / verbose 端点
+    // 详情列表——仅调用方传入对应指针时构建）；类型名 writer 优先、reader 补缺；只拿 seenMtx_
+    // 叶子锁（不持锁睡眠，发现事件线程可并行写入）。端点详情纳入快照相等性：等待期间远端
+    // 端点新增（含 QoS 重发）会使快照变化并重置不变计数
+    auto snapshot = [this, &topicName, publishers, subscribers]()
     {
         std::lock_guard<std::mutex> lock(seenMtx_);
         auto w = seen_.find(topicName);
         auto r = seenReaders_.find(topicName);
         if (w == seen_.end() && r == seenReaders_.end())
         {
-            return std::make_tuple(false, std::string(), size_t{0}, size_t{0});
+            return std::make_tuple(false, std::string(), size_t{0}, size_t{0},
+                std::vector<EndpointDetail>(), std::vector<EndpointDetail>());
         }
-        const std::string name = (w != seen_.end())
-            ? w->second.front().type_name.to_string()
-            : r->second.front().type_name.to_string();
+        // 类型名 writer 优先、reader 补缺（前述早退保证至少一端命中；else-if 守卫消除
+        // cppcheck 对 r 迭代器有效性的路径分析盲区）
+        std::string name;
+        if (w != seen_.end())
+        {
+            name = w->second.front().type_name.to_string();
+        }
+        else if (r != seenReaders_.end())
+        {
+            name = r->second.front().type_name.to_string();
+        }
         const size_t pubCount = (w != seen_.end()) ? w->second.size() : size_t{0};
         const size_t subCount = (r != seenReaders_.end()) ? r->second.size() : size_t{0};
-        return std::make_tuple(true, name, pubCount, subCount);
+        std::vector<EndpointDetail> pubDetails;
+        if (publishers != nullptr && w != seen_.end())
+        {
+            pubDetails.reserve(w->second.size());
+            for (const auto& writer : w->second)
+            {
+                pubDetails.push_back(makeWriterDetail(writer,
+                    participantNameOf(seenParticipants_, writer.guid)));
+            }
+        }
+        std::vector<EndpointDetail> subDetails;
+        if (subscribers != nullptr && r != seenReaders_.end())
+        {
+            subDetails.reserve(r->second.size());
+            for (const auto& reader : r->second)
+            {
+                subDetails.push_back(makeReaderDetail(reader,
+                    participantNameOf(seenParticipants_, reader.guid)));
+            }
+        }
+        return std::make_tuple(true, name, pubCount, subCount, std::move(pubDetails),
+            std::move(subDetails));
     };
     auto prev = snapshot();
     uint32_t unchanged = 1;
@@ -482,9 +768,19 @@ bool FastDDSDebugNode::waitForTopicInfoStable(const std::string& topicName, std:
     const bool found = std::get<0>(prev);
     if (found)
     {
+        // 快照 tuple 元素序号（0-4 在既有 get 调用中直用；详情列表序号命名以免 magic number）
+        constexpr size_t kSubDetailsIdx = 5;  // 订阅者端点详情列表的元素序号
         typeName = std::get<1>(prev);
         publisherCount = std::get<2>(prev);
         subscriptionCount = std::get<3>(prev);
+        if (publishers != nullptr)
+        {
+            *publishers = std::move(std::get<4>(prev));
+        }
+        if (subscribers != nullptr)
+        {
+            *subscribers = std::move(std::get<kSubDetailsIdx>(prev));
+        }
     }
     return found;
 }

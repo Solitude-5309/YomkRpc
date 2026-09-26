@@ -51,7 +51,7 @@ namespace
     }
 
     // T3：/create_node、/topic_print、/list_topics、/topic_info、/list_nodes、/node_info 的解包双守卫
-    // （nullptr / 异类包 / 改名伪造）
+    // （nullptr / 异类包 / 改名伪造；DDSDebugInfo 加 verbose 字段后守卫包名不变，无需改断言）
     void testUnpackGuards(YomkRpcDebugService *svc)
     {
         auto checkGuards = [&](const char *ep, const char *expectName, YomkPkgPtr wrongPkg)
@@ -140,7 +140,8 @@ namespace
     // T7：/topic_info 未建节点早退（node_ 空检查先于独立收敛触达）
     void testTopicInfoNoNode(YomkRpcDebugService *svc)
     {
-        // stableRounds=1 为单次快照快速路径；未建节点时 node_ 空检查先行返回，不触 DDS
+        // stableRounds=1 为单次快照快速路径；未建节点时 node_ 空检查先行返回，不触 DDS；
+        // 3 字段聚合初始化在 DDSDebugInfo 加 verbose（默认 false）后仍兼容（编译级验证）
         auto rValid = svc->invoke("/topic_info", YomkMkPtr(DDSDebugInfo, DDSDebugInfo{"t_info", 1, 50}));
         CHECK(rValid.m_status == YomkResponse::eNo &&
                   rValid.m_msg.find("debug node not created") != std::string::npos,

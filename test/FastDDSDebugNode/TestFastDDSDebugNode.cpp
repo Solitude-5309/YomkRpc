@@ -31,6 +31,9 @@
  *         不串入（GUID 前缀归属隔离）；未发现名 → false（单次快照快速路径）；"/" 名可查
  *         且清单为空（名称过滤不在节点层）；重复调用结果一致（收敛一致性）；
  *         未 setDomainId 时 nodeInfo → false。
+ *   主题详情 verbose 同命名 peer 端点 → topicInfo verbose 模式（指针非空）填充端点详情：
+ *         归属节点名（GUID 前缀归属）、FastDDS 原生 prefix|entity GUID、QoS 行集（核心组
+ *         Reliability/Durability 等键行）；未发现主题 verbose 指针传入 → false 且列表为空。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -485,6 +488,45 @@ int main()
         CHECK(dbg.nodeInfo(NODEINFO_PEER_NAME, pubs2, subs2, 5, 100),
               "nodeInfo 重复调用 → true（收敛后查询）");
         CHECK(pubs2 == pubs && subs2 == subs, "nodeInfo 重复调用结果与首调一致（收敛快照一致性）");
+
+        // topic info verbose：同 peer 端点详情（归属节点名 + FastDDS 原生 GUID + QoS 行集）
+        std::string vTypeName;
+        size_t vPubCount = 0;
+        size_t vSubCount = 0;
+        std::vector<FastDDSDebugNode::EndpointDetail> vPubs;
+        std::vector<FastDDSDebugNode::EndpointDetail> vSubs;
+        CHECK(dbg.topicInfo(NODEINFO_PUB_TOPIC, vTypeName, vPubCount, vSubCount, 5, 100,
+                  &vPubs, nullptr),
+            "topicInfo(t_nodeinfo_pub, verbose) → true（writer 端点详情命中）");
+        CHECK(vTypeName == "YomkRpc::MString" && vPubCount == 1,
+            "topicInfo(t_nodeinfo_pub, verbose) 类型名与发布者计数正确");
+        CHECK(vPubs.size() == 1 && vPubs[0].nodeName == NODEINFO_PEER_NAME,
+            "writer 端点详情归属节点名 == test-nodeinfo-peer（GUID 前缀归属）");
+        CHECK(vPubs[0].guid.find('|') != std::string::npos,
+            "writer GUID 为 FastDDS 原生 prefix|entity 形态");
+        bool hasReliability = false;
+        bool hasDurability = false;
+        for (const auto& line : vPubs[0].qosLines)
+        {
+            hasReliability = hasReliability || line.rfind("  Reliability: ", 0) == 0;
+            hasDurability = hasDurability || line.rfind("  Durability: ", 0) == 0;
+            std::cout << "[OBSERVE] writer qos |" << line << "|" << std::endl;
+        }
+        CHECK(hasReliability && hasDurability,
+            "writer QoS 行集含 Reliability 与 Durability 键行");
+        CHECK(dbg.topicInfo(NODEINFO_SUB_TOPIC, vTypeName, vPubCount, vSubCount, 5, 100,
+                  nullptr, &vSubs),
+            "topicInfo(t_nodeinfo_sub, verbose) → true（reader 端点详情命中）");
+        CHECK(vSubCount == 1 && vSubs.size() == 1 && vSubs[0].nodeName == NODEINFO_PEER_NAME,
+            "reader 端点详情归属节点名 == test-nodeinfo-peer（GUID 前缀归属）");
+        std::cout << "[OBSERVE] writer guid=" << vPubs[0].guid
+                  << " reader guid=" << vSubs[0].guid << std::endl;
+        // 未发现主题：verbose 指针传入 → false 且输出保持为空（单次快照快速路径）
+        std::vector<FastDDSDebugNode::EndpointDetail> missDetails;
+        CHECK(!dbg.topicInfo("t_not_exist_verbose", vTypeName, vPubCount, vSubCount, 1, 50,
+                  &missDetails, nullptr),
+            "topicInfo(t_not_exist_verbose, verbose) → false（未发现主题）");
+        CHECK(missDetails.empty(), "未发现主题时 verbose 输出保持为空");
 
         // 清理：writer → topic → publisher → participant（顺序与既有块一致）
         if (anonWriter != nullptr && anonPub != nullptr)

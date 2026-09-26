@@ -403,12 +403,13 @@ resp = YOMKRPC_DEBUG_QUIT();                // 3. 退出前显式清理
 
 ### 6.4 查询主题详情（yomkrpc topic info）
 
-`yomkrpc topic info <主题名>` 查询单个主题的发现详情，命中输出三行：消息类型名（原始 DDS 类型名，不做任何风格转换）、发布者数量、订阅者数量：
+`yomkrpc topic info <主题名>` 查询单个主题的发现详情，命中输出三行：消息类型名（原始 DDS 类型名，不做任何风格转换）、发布者数量、订阅者数量；加 `-v`（`--verbose`）进入端点详情模式，在计数之外逐端点列出 Node name（归属参与者名）、Endpoint type（PUBLISHER/SUBSCRIPTION）、GUID（FastDDS 原生格式）与 QoS profile（ROS2 风格键值行）：
 
 ```bash
 yomkrpc topic info hello_world        # 默认域 0
 yomkrpc topic info -d 5 sensor_data   # 指定 DDS 域号
 yomkrpc topic info -w 7 hello_world   # 收敛判定放宽为连续 7 次快照不变（默认 5）
+yomkrpc topic info -v hello_world     # 端点详情模式：逐端点列出 Node name/GUID/QoS profile
 ```
 
 与发布端配合观察（先启动发布端——工具创建调试节点入域后对该主题独立收敛查询：节点内部每 ~200ms 轮询一次该主题详情快照，连续 5 次不变即返回）：
@@ -428,7 +429,39 @@ Publisher count: 1
 Subscription count: 0
 ```
 
-目标主题在收敛窗口内始终未被发现时报错退出（`topic [<主题名>] not found`）。等价宏调用序列（流程与 list 示例同构，链接库相同，宏定义见上表）：
+`-v` 端点详情模式输出示例（实测；count 为 0 的端点类型无清单段，多端点时逐端点块以空行分隔）：
+
+```
+Type: YomkRpc::MString
+
+Publisher count: 1
+
+Node name: pub_node
+Endpoint type: PUBLISHER
+GUID: 01.0f.b3.36.8d.c3.21.fa.00.00.00.00|0.0.1.3
+QoS profile:
+  Reliability: RELIABLE
+  Durability: TRANSIENT_LOCAL
+  Deadline: Infinite
+  Latency Budget: 0 s
+  Lifespan: Infinite
+  Liveliness: AUTOMATIC
+  Liveliness lease duration: Infinite
+  Ownership: SHARED
+  Ownership Strength: 0
+  Destination Order: BY_RECEPTION_TIMESTAMP
+  Partition: []
+
+Subscription count: 0
+```
+
+QoS 键值行说明：核心组（Reliability / Durability / Deadline / Latency Budget / Lifespan /
+Liveliness / Liveliness lease duration / Ownership / Ownership Strength——仅发布端 /
+Destination Order / Partition）恒输出；扩展组（History / Resource Limits / Publish Mode /
+Transport Priority 等）仅当发现数据携带时追加。GUID 为 FastDDS 原生格式直出（"12 字节前缀 |
+4 字节实体 ID"点分十六进制，实体段不补零）。
+
+目标主题在收敛窗口内始终未被发现时报错退出（`topic [<主题名>] not found`，verbose 模式同）。`-v` 模式对应 4 参宏 `YOMKRPC_DEBUG_TOPIC_INFO_V(主题名, 收敛次数, 间隔ms)`，输出内容与 CLI 一致。等价宏调用序列（流程与 list 示例同构，链接库相同，宏定义见上表）：
 
 ```cpp
 YOMK_INIT();

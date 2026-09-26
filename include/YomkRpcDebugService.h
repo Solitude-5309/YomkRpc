@@ -66,6 +66,7 @@ struct DDSDebugInfo
     std::string topicName;  // 待查询主题
     uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
     uint32_t intervalMs;    // 快照轮询间隔毫秒
+    bool verbose = false;   // 端点详情模式：true 时逐端点输出 Node name/GUID/QoS profile
 };
 
 // list_nodes 请求负载：域内命名参与者列表查询（独立收敛参数，语义同 topic_info，0 值由节点层钳制为默认）

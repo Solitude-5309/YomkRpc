@@ -6,7 +6,7 @@
  * 用法：
  *   yomkrpc topic print [-d N | --domain N] <topic-name>
  *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N]
- *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] <topic-name>
+ *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>
  *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
  *   yomkrpc -h | --help
@@ -17,6 +17,7 @@
  *   yomkrpc topic list
  *   yomkrpc topic list -w 3
  *   yomkrpc topic info hello_world
+ *   yomkrpc topic info -v hello_world
  *   yomkrpc node list
  *   yomkrpc node info my_node
  *
@@ -28,7 +29,10 @@
  * 即认为发现收敛、立即输出，无需固定等待窗口；
  * topic info：创建节点后独立收敛查询单个目标主题的发现详情（节点内部轮询该主题快照，
  * 连续 waitRounds 次不变即返回），输出三行：Type（原始 DDS 类型名，无风格转换）、
- * Publisher count、Subscription count；未发现主题报错退出。
+ * Publisher count、Subscription count；-v/--verbose 端点详情模式：追加逐端点 Node name
+ * （归属参与者名）、Endpoint type（PUBLISHER/SUBSCRIPTION）、GUID（FastDDS 原生格式）与
+ * QoS profile（ROS2 风格键值行）详情段（段间空行，count 为 0 的端点类型无清单段）；
+ * 未发现主题报错退出。
  * node list：创建节点后独立收敛查询域内已发现的命名参与者（每 ~200ms 轮询一次参与者
  * 发现缓存快照，连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空
  * 才列出，空名参与者跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出。
@@ -73,7 +77,7 @@ static void printUsage(std::ostream &os)
     os << "Usage:\n"
           "  yomkrpc topic print [-d N | --domain N] <topic-name>\n"
           "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N]\n"
-          "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
+          "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -83,6 +87,8 @@ static void printUsage(std::ostream &os)
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
           "                      （默认 5，topic list、topic info、node list 与 node info 生效）\n"
+          "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
+          "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
@@ -91,6 +97,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic list\n"
           "  yomkrpc topic list -w 3\n"
           "  yomkrpc topic info hello_world\n"
+          "  yomkrpc topic info -v hello_world\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -248,8 +255,11 @@ static int runList(uint32_t domainId, uint32_t waitRounds)
 
 // topic info 子命令：独立收敛查询单个主题的发现详情（节点内部轮询该主题快照——存在标志 +
 // 类型名 + 端点计数，连续 waitRounds 次不变即返回），输出三行：Type / Publisher count /
-// Subscription count；未发现主题报错退出（无 Ctrl+C 循环，查完即退）
-static int runInfo(uint32_t domainId, const std::string &topicName, uint32_t waitRounds)
+// Subscription count；verbose 模式（-v）追加逐端点详情段（Node name/Endpoint type/GUID/
+// QoS profile，段间空行，count 为 0 的端点类型无清单段）；未发现主题报错退出（无 Ctrl+C
+// 循环，查完即退）
+static int runInfo(uint32_t domainId, const std::string &topicName, uint32_t waitRounds,
+                   bool verbose = false)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -262,10 +272,17 @@ static int runInfo(uint32_t domainId, const std::string &topicName, uint32_t wai
         return 1;
     }
 
-    // 2. 独立收敛查询单主题详情（与 list 查询完全分开的路径）：命中返回 StringArray 三行，
-    //    三行文案由服务层拼装（Type / Publisher count / Subscription count），原样直出；
+    // 2. 独立收敛查询单主题详情（与 list 查询完全分开的路径）：命中返回 StringArray，
+    //    行内容由服务层拼装（非 verbose 三行 / verbose 逐端点详情段），原样直出；
     //    未发现主题（含收敛窗口内始终不可见）返回 eNo
-    resp = YOMKRPC_DEBUG_TOPIC_INFO(topicName, waitRounds, 200);
+    if (verbose)
+    {
+        resp = YOMKRPC_DEBUG_TOPIC_INFO_V(topicName, waitRounds, 200);
+    }
+    else
+    {
+        resp = YOMKRPC_DEBUG_TOPIC_INFO(topicName, waitRounds, 200);
+    }
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "topic info failed: ", resp.m_msg);
@@ -415,6 +432,7 @@ int main(int argc, char *argv[])
     uint32_t domainId = 0;
     bool hasDomainId = false;
     uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、node list 与 node info 生效）
+    bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -458,6 +476,11 @@ int main(int argc, char *argv[])
             waitRounds = static_cast<uint32_t>(value);
             continue;
         }
+        if (arg == "-v" || arg == "--verbose")
+        {
+            verbose = true;
+            continue;
+        }
         pos.push_back(arg);
     }
 
@@ -485,7 +508,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "info" && !pos[2].empty())
     {
-        return runInfo(domainId, pos[2], waitRounds);
+        return runInfo(domainId, pos[2], waitRounds, verbose);
     }
     if (pos.size() == 2 && pos[0] == "node" && pos[1] == "list")
     {

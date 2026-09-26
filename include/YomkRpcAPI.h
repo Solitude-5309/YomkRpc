@@ -106,6 +106,15 @@
         "/YomkRpcDebugService/topic_info",                                   \
         YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs}))
 
+// 查询单主题端点详情（verbose，与 topic_info 同端点同收敛语义）：除 Type 与两端点计数外，
+// 逐端点输出 Node name（归属参与者名）、Endpoint type（PUBLISHER/SUBSCRIPTION）、GUID
+// （FastDDS 原生格式）与 QoS profile（ROS2 风格键值行，核心组恒输出、扩展组按发现数据
+// 携带情况追加）；count 为 0 的端点类型无清单段；未发现主题返回错误。须先创建调试节点。
+#define YOMKRPC_DEBUG_TOPIC_INFO_V(topicName, stableRounds, intervalMs)      \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/topic_info",                                   \
+        YomkMkPtr(DDSDebugInfo, DDSDebugInfo{topicName, stableRounds, intervalMs, true}))
+
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，
