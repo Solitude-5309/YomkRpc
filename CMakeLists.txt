@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.14)
 # 编译器预选模块：g++ 优先，回退 clang++（必须在 project() 之前 include）
 include(cmake/AbiInfo.cmake)
 
-project(YomkRpc VERSION 0.2.14 LANGUAGES CXX)
+project(YomkRpc VERSION 0.2.15 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

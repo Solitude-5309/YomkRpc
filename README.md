@@ -283,6 +283,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic list` | 一次性列出域内全部已发现主题（每行一个主题名，按主题名排序） |
 | `yomkrpc topic list [-t]` | 列出域内全部已发现主题（按名称排序；-t 每行附类型名：主题名 [类型名]） |
 | `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行；-v 逐端点 Node name/GUID/QoS 详情段） |
+| `yomkrpc topic type <主题名>` | 查询单主题数据类型名（单行裸输出，对齐 ros2 topic type，便于脚本取用） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -483,6 +484,18 @@ if (arr != nullptr)
 }
 resp = YOMKRPC_DEBUG_QUIT();                       // 3. 退出前显式清理
 ```
+
+#### topic type：单主题数据类型快捷查询
+
+`yomkrpc topic type <主题名>` 是 topic info 的单值快捷方式（复用同一 `/topic_info` 端点与收敛语义），输出单行裸类型名（去 `Type: ` 前缀，对齐 `ros2 topic type`，便于脚本 `$(...)` 取用）：
+
+```bash
+yomkrpc topic type hello_world        # 输出：YomkRpc::MString
+yomkrpc topic type -d 5 sensor_data   # 指定域号
+yomkrpc topic type -w 7 hello_world   # 收敛判定放宽（默认 5）
+```
+
+未发现主题时报错退出（`topic [<主题名>] not found`，与 topic info 同语义）。等价宏调用同上（`YOMKRPC_DEBUG_TOPIC_INFO` 取首行去前缀）。
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
