@@ -81,6 +81,9 @@ int main()
         std::vector<std::string> nodes;
         CHECK(!dbg.listTopics(listed), "未 setDomainId 时 listTopics → false（participant 未创建）");
         CHECK(!dbg.nodeList(nodes), "未 setDomainId 时 nodeList → false（participant 未创建）");
+        std::vector<std::string> ifaceGuard;
+        CHECK(!dbg.interfaceShow("Any::Type", ifaceGuard),
+              "未 setDomainId 时 interfaceShow → false（participant 未创建）");
         CHECK(!dbg.subscribeTopic(TEST_TOPIC), "未 setDomainId 时 subscribeTopic → false（participant 未创建）");
         CHECK(dbg.setDomainId(TEST_DOMAIN), "setDomainId(200) → true");
         CHECK(!dbg.setDomainId(TEST_DOMAIN), "重复 setDomainId(200) → false（仅可成功一次）");
@@ -527,6 +530,27 @@ int main()
                   &missDetails, nullptr),
             "topicInfo(t_not_exist_verbose, verbose) → false（未发现主题）");
         CHECK(missDetails.empty(), "未发现主题时 verbose 输出保持为空");
+
+        // interface show：按类型名输出 IDL 结构（TypeObject→DynamicType 纯类型内省，
+        // 不建订阅；peer 的 MString writer 在场，TypeInformation 经 TypeLookup 已就绪）
+        std::vector<std::string> iface;
+        CHECK(dbg.interfaceShow("YomkRpc::MString", iface, 5, 100),
+              "interfaceShow(YomkRpc::MString,5,100ms) → true（writer 在场类型命中）");
+        CHECK(iface.size() == 3, "IDL 行集恰好 3 行（struct 头/字段行/结尾）");
+        bool ifaceOk = iface.size() == 3 &&
+            iface[0] == "struct YomkRpc::MString {" &&
+            iface[1] == "    string data;" &&
+            iface[2] == "};";
+        CHECK(ifaceOk, "IDL 行集形态正确（struct 头/四空格缩进字段行/结尾 };）");
+        for (const auto& line : iface)
+        {
+            std::cout << "[OBSERVE] iface |" << line << "|" << std::endl;
+        }
+        // 未发现类型：单次快照快速路径 → false 且输出保持为空
+        std::vector<std::string> ifaceMiss;
+        CHECK(!dbg.interfaceShow("Not::Exist", ifaceMiss, 1, 50),
+              "interfaceShow(Not::Exist,1,50ms) → false（未发现类型）");
+        CHECK(ifaceMiss.empty(), "未发现类型时输出保持为空");
 
         // 清理：writer → topic → publisher → participant（顺序与既有块一致）
         if (anonWriter != nullptr && anonPub != nullptr)

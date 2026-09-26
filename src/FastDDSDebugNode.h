@@ -11,6 +11,7 @@
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
+#include <fastdds/dds/xtypes/type_representation/TypeObject.hpp>
 #include <fastdds/rtps/common/Guid.hpp>
 #include <functional>
 #include <map>
@@ -131,6 +132,16 @@ public:
             std::vector<std::pair<std::string, std::string>>& subscribers,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
+    // 按数据类型名查询单个类型的 IDL 结构描述（独立收敛查询，与 listTopics/topicInfo 互不影响）：
+    // 先检查入域状态，再轮询"类型命中 + 字段行快照"（发现缓存按 type_name 精确匹配，writer 优先、
+    // reader 补缺——两缓存均携带完整 TypeInformation），连续 stableRounds 次不变即认为收敛。命中
+    // 返回 true 并填充 lines（IDL 风格多行：struct 头 + 逐字段行 + 结尾 };；仅支持顶层为 struct
+    // 的类型）；未发现该类型（含 TypeObject 查询未就绪）返回 false（未 setDomainId 亦 false）。
+    // 0 值钳制默认 5 次/200ms；最长阻塞约 stableRounds*intervalMs。
+    bool interfaceShow(const std::string& typeName,
+            std::vector<std::string>& lines,
+            uint32_t stableRounds = kDefaultStableRounds,
+            uint32_t intervalMs = kDefaultIntervalMs);
 
 private:
     // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
@@ -160,6 +171,19 @@ private:
             std::vector<std::pair<std::string, std::string>>& publishers,
             std::vector<std::pair<std::string, std::string>>& subscribers,
             uint32_t stableRounds, uint32_t intervalMs);
+    // interfaceShow 的收敛轮询辅助（独立于其余 waitFor*Stable）：快照为二元组（found 标志 +
+    // IDL 行集），连续 stableRounds 次不变即收敛；caller 已完成入域检查。命中（发现缓存命中且
+    // TypeObject 可查询）的最终快照填充 lines 返回 true，未发现返回 false。
+    bool waitForInterfaceStable(const std::string& typeName,
+            std::vector<std::string>& lines,
+            uint32_t stableRounds, uint32_t intervalMs);
+    // TypeObject → DynamicType → IDL 行集拼装：struct 头 + 逐字段行（"    <IDL类型> <成员名>;"）
+    // + 结尾 };。字段类型名经 DynamicTypeKind → IDL 名映射（bool/int16/int32/int64/uint16/
+    // uint32/uint64/float32/float64/char/string/wstring/octet；有界 string<N>；sequence<T>[,N]；
+    // T[N]；嵌套 struct/enum/alias 等仅显示成员子类型名，不递归展开）；仅支持顶层为 struct 的
+    // 类型，否则 false。仅读取入参，不触及节点状态。
+    bool buildInterfaceLines(const eprosima::fastdds::dds::xtypes::TypeObject& type_object,
+            const std::string& typeName, std::vector<std::string>& lines);
     // 发现线程回调入口（DebugParticipantListener 转发）：新见 writer 追加进 seen_ 列表后唤醒
     // 工作线程（发现事件对同一端点不重发，缓存供登记晚于发现时回放）；回调内不建订阅。回调运行于
     // Fast DDS 发现锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置死锁防护见成员注释）。

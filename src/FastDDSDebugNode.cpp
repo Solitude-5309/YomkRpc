@@ -21,6 +21,9 @@
 #include <fastdds/dds/xtypes/dynamic_types/DynamicPubSubType.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicType.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicTypeBuilderFactory.hpp>
+#include <fastdds/dds/xtypes/dynamic_types/DynamicTypeMember.hpp>
+#include <fastdds/dds/xtypes/dynamic_types/MemberDescriptor.hpp>
+#include <fastdds/dds/xtypes/dynamic_types/TypeDescriptor.hpp>
 #include <fastdds/dds/xtypes/type_representation/TypeObject.hpp>
 #include <fastdds/dds/xtypes/utils.hpp>
 #include <fastdds/rtps/reader/ReaderDiscoveryStatus.hpp>
@@ -649,6 +652,28 @@ bool FastDDSDebugNode::nodeInfo(const std::string& nodeName,
     return waitForNodeInfoStable(nodeName, publishers, subscribers, stableRounds, intervalMs);
 }
 
+bool FastDDSDebugNode::interfaceShow(const std::string& typeName,
+        std::vector<std::string>& lines,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    return waitForInterfaceStable(typeName, lines, stableRounds, intervalMs);
+}
+
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
         uint32_t stableRounds, uint32_t intervalMs)
 {
@@ -898,6 +923,233 @@ bool FastDDSDebugNode::waitForNodeInfoStable(const std::string& nodeName,
     }
     publishers = std::move(std::get<1>(prev));
     subscribers = std::move(std::get<2>(prev));
+    return true;
+}
+
+// XTypes 无界 string/sequence 的 bound 专用表示（等同无界，非实际长度）
+constexpr uint32_t kUnboundedBound = 0xFFFFFFFFu;
+
+// DynamicType → IDL 类型名文本（递归展开容器类型）：基础标量直接映射（ROS2/IDL4 风格名），
+// 有界 string 携带 bound 上限，sequence/array 递归展开元素类型，其余（嵌套 struct/enum/alias
+// 等命名类型）仅显示子类型名不递归展开（IDL 源语法中的引用形态）。kind 无对应 IDL 文本
+// （如 map 匿名键值对、minimal TypeObject 下无名子类型）返回 false，宁可失败不输出非法 IDL
+bool idlTypeNameOf(const traits<DynamicType>::ref_type& type, std::string& out)
+{
+    if (type == nullptr)
+    {
+        return false;
+    }
+    switch (type->get_kind())
+    {
+        case xtypes::TK_BOOLEAN: out = "bool"; return true;
+        case xtypes::TK_BYTE: out = "octet"; return true;
+        case xtypes::TK_INT16: out = "int16"; return true;
+        case xtypes::TK_INT32: out = "int32"; return true;
+        case xtypes::TK_INT64: out = "int64"; return true;
+        case xtypes::TK_UINT16: out = "uint16"; return true;
+        case xtypes::TK_UINT32: out = "uint32"; return true;
+        case xtypes::TK_UINT64: out = "uint64"; return true;
+        case xtypes::TK_FLOAT32: out = "float32"; return true;
+        case xtypes::TK_FLOAT64: out = "float64"; return true;
+        case xtypes::TK_FLOAT128: out = "float128"; return true;
+        case xtypes::TK_INT8: out = "int8"; return true;
+        case xtypes::TK_UINT8: out = "uint8"; return true;
+        case xtypes::TK_CHAR8: out = "char"; return true;
+        case xtypes::TK_CHAR16: out = "wchar"; return true;
+        default: break;
+    }
+    // 容器与命名类型需读 TypeDescriptor（bound / 元素类型 / 子类型名）；descriptor 须预分配
+    // 非空实例（官方 traits<>::make_shared()），get_descriptor 以 overwrite 语义填充
+    auto desc = traits<TypeDescriptor>::make_shared();
+    if (RETCODE_OK != type->get_descriptor(desc) || desc == nullptr)
+    {
+        return false;
+    }
+    switch (type->get_kind())
+    {
+        case xtypes::TK_STRING8:
+        case xtypes::TK_STRING16:
+        {
+            out = (xtypes::TK_STRING16 == type->get_kind()) ? "wstring" : "string";
+            const auto& bound = desc->bound();
+            // 无界 string 的 bound 为 0xFFFFFFFF（XTypes 规范表示），等同无界
+            if (!bound.empty() && bound[0] > 0 && bound[0] != kUnboundedBound)
+            {
+                out += "<" + std::to_string(bound[0]) + ">";
+            }
+            return true;
+        }
+        case xtypes::TK_SEQUENCE:
+        {
+            std::string elem;
+            if (!idlTypeNameOf(desc->element_type(), elem))
+            {
+                return false;
+            }
+            const auto& bound = desc->bound();
+            if (!bound.empty() && bound[0] > 0 && bound[0] != kUnboundedBound)
+            {
+                out = "sequence<" + elem + ", " + std::to_string(bound[0]) + ">";
+            }
+            else
+            {
+                out = "sequence<" + elem + ">";
+            }
+            return true;
+        }
+        case xtypes::TK_ARRAY:
+        {
+            std::string elem;
+            if (!idlTypeNameOf(desc->element_type(), elem))
+            {
+                return false;
+            }
+            out = elem;
+            for (uint32_t dim : desc->bound())
+            {
+                out += "[" + std::to_string(dim) + "]";
+            }
+            return true;
+        }
+        default:
+        {
+            // 命名类型（嵌套 struct/union/enum/alias/bitmask 等）：仅显示子类型名
+            std::string name = desc->name().to_string();
+            if (name.empty())
+            {
+                return false;
+            }
+            out = name;
+            return true;
+        }
+    }
+}
+
+bool FastDDSDebugNode::waitForInterfaceStable(const std::string& typeName,
+        std::vector<std::string>& lines,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    // 快照：锁内（seenMtx_ 叶子锁，不持锁构造 DynamicType——registry 查询与类型拼装都在锁外
+    // 尾段）按类型名精确匹配发现缓存（两缓存 key 均为主题名，须遍历值列表比对 type_name；
+    // writer 优先、reader 补缺），命中即取其 TypeInformation（complete 优先、未设 TK_NONE 时
+    // 回退 minimal，对齐 tryStartSubscription）查 TypeObject registry 并拼装 IDL 行集；
+    // TypeObject 未就绪（TypeLookup 尚未取回）视为本轮未命中继续等待。快照为（found 标志 +
+    // 行集）对，连续 stableRounds 次不变即收敛
+    auto snapshot = [this, &typeName]() -> std::pair<bool, std::vector<std::string>>
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        // TypeInformation → TypeObject → IDL 行集（writer/reader 发现数据结构同构，泛型
+        // lambda 复用同一段取用逻辑）
+        auto buildFromInfo = [this, &typeName](const auto& info,
+                std::vector<std::string>& out) -> bool
+        {
+            const auto& ti = info.type_information.type_information;
+            const auto& tid =
+                    (xtypes::TK_NONE != ti.complete().typeid_with_size().type_id()._d())
+                    ? ti.complete().typeid_with_size().type_id()
+                    : ti.minimal().typeid_with_size().type_id();
+            xtypes::TypeObject type_object;
+            if (RETCODE_OK != DomainParticipantFactory::get_instance()->type_object_registry()
+                        .get_type_object(tid, type_object))
+            {
+                return false;  // TypeObject 未就绪，视为本轮未命中
+            }
+            return buildInterfaceLines(type_object, typeName, out);
+        };
+        for (const auto& entry : seen_)
+        {
+            for (const auto& info : entry.second)
+            {
+                if (info.type_name.to_string() == typeName)
+                {
+                    std::vector<std::string> out;
+                    if (buildFromInfo(info, out))
+                    {
+                        return {true, std::move(out)};
+                    }
+                    // writer 命中但 TypeObject 未就绪：不回退 reader（同类型同一 TypeObject）
+                    return {false, {}};
+                }
+            }
+        }
+        for (const auto& entry : seenReaders_)
+        {
+            for (const auto& info : entry.second)
+            {
+                if (info.type_name.to_string() == typeName)
+                {
+                    std::vector<std::string> out;
+                    if (buildFromInfo(info, out))
+                    {
+                        return {true, std::move(out)};
+                    }
+                    return {false, {}};
+                }
+            }
+        }
+        return {false, {}};
+    };
+    auto prev = snapshot();
+    uint32_t unchanged = 1;
+    while (unchanged < stableRounds)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        auto cur = snapshot();
+        if (cur == prev)
+        {
+            ++unchanged;
+        }
+        else
+        {
+            prev = std::move(cur);  // 发现变化（未命中→命中或行集变化），重置不变计数
+            unchanged = 1;
+        }
+    }
+    if (!prev.first)
+    {
+        return false;  // 收敛时仍无此类型（或 TypeObject 始终未就绪）
+    }
+    lines = std::move(prev.second);
+    return true;
+}
+
+bool FastDDSDebugNode::buildInterfaceLines(const xtypes::TypeObject& type_object,
+        const std::string& typeName, std::vector<std::string>& lines)
+{
+    // TypeObject → DynamicType（shared_ptr 持有，离开作用域自动释放；不注册类型不建订阅，
+    // 纯类型内省）
+    auto dyn_type = DynamicTypeBuilderFactory::get_instance()->create_type_w_type_object(
+                type_object)->build();
+    if (dyn_type == nullptr || xtypes::TK_STRUCTURE != dyn_type->get_kind())
+    {
+        return false;  // 仅支持顶层为 struct 的类型
+    }
+    // IDL 源语法行集：struct 头 + 逐字段行（四空格缩进）+ 结尾 }
+    lines.clear();
+    lines.push_back("struct " + typeName + " {");
+    const uint32_t count = dyn_type->get_member_count();
+    DynamicTypeMembersById members;
+    if (RETCODE_OK != dyn_type->get_all_members(members) || members.size() != count)
+    {
+        return false;
+    }
+    for (const auto& pair : members)  // map 按 MemberId 升序 == struct 成员声明序
+    {
+        // 成员 descriptor 须预分配非空实例（官方 traits<>::make_shared()），get_descriptor
+        // 以 overwrite 语义填充
+        auto desc = traits<MemberDescriptor>::make_shared();
+        if (RETCODE_OK != pair.second->get_descriptor(desc) || desc == nullptr)
+        {
+            return false;
+        }
+        std::string field;
+        if (!idlTypeNameOf(desc->type(), field))
+        {
+            return false;
+        }
+        lines.push_back("    " + field + " " + desc->name().to_string() + ";");
+    }
+    lines.push_back("};");
     return true;
 }
 

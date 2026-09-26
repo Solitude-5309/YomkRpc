@@ -14,7 +14,9 @@
  *       拒绝 → 删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
  *       → topic_info verbose 逐行断言（Type/空行/端点块 Node name+Endpoint type+GUID+QoS、
  *       count 为 0 无清单段）→ list_topics types 模式唯一行断言（主题名 [类型名]）→
- *       topic_find 按类型名反查命中唯一行与未匹配类型 eNo → node_info 命中五行断言（节点名/Subscribers
+ *       topic_find 按类型名反查命中唯一行与未匹配类型 eNo → interface_show 按类型名输出
+ *       IDL 结构（三行逐行断言 struct 头/四空格缩进字段行/结尾）与未发现类型 eNo →
+ *       node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
  *
@@ -336,6 +338,28 @@ int main()
                 CHECK(findMiss.m_status == YomkResponse::eNo &&
                           findMiss.m_msg.find("type [Not::Exist] not found") != std::string::npos,
                       "topic_find 未匹配类型 → eNo type [Not::Exist] not found（info 族语义）");
+
+                // interface show：按类型名输出 IDL 结构（域 200 纯净唯一类型，TypeObject
+                // 经 TypeLookup 已就绪）→ 恰好三行且逐行符合 IDL 源语法；未发现类型报错（find 族语义）
+                auto ifaceHit = svc->invoke("/interface_show", YomkMkPtr(
+                    DDSDebugInterfaceShow, DDSDebugInterfaceShow{"YomkRpc::MString", 5, 100}));
+                CHECK(ifaceHit.m_status == YomkResponse::eOk,
+                      "interface_show(YomkRpc::MString,5,100ms) → eOk（按类型名命中）");
+                YomkUnPackPkg(ifaceHit.m_data, StringArray, ifaceArr);
+                CHECK(ifaceArr != nullptr && ifaceArr->d.size() == 3 &&
+                          ifaceArr->d[0] == "struct YomkRpc::MString {" &&
+                          ifaceArr->d[1] == "    string data;" &&
+                          ifaceArr->d[2] == "};",
+                      "interface_show 三行逐行符合 IDL 源语法（struct 头/四空格缩进字段行/结尾 };）");
+                for (const auto &line : ifaceArr->d)
+                {
+                    std::cout << "[OBSERVE] iface |" << line << "|" << std::endl;
+                }
+                auto ifaceMiss = svc->invoke("/interface_show", YomkMkPtr(
+                    DDSDebugInterfaceShow, DDSDebugInterfaceShow{"Not::Exist", 1, 50}));
+                CHECK(ifaceMiss.m_status == YomkResponse::eNo &&
+                          ifaceMiss.m_msg.find("type [Not::Exist] not found") != std::string::npos,
+                      "interface_show 未发现类型 → eNo type [Not::Exist] not found（find 族语义）");
             }
 
             // 清理：writer → topic → publisher → participant（同 TestFastDDSDebugNode 计数用例顺序）

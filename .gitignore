@@ -88,3 +88,7 @@ test_logs/
 # 注意：否定目录本身不会递归包含内部文件，须用 `**` 显式重新包含；
 # 而被 bin/ 等规则排除的目录，内部文件无法直接重新包含，需先取消忽略目录本身。
 !thirdparty/**
+
+# Python __pycache__ 字节码缓存目录（运行 thirdparty Fast-DDS 官方 CLI 脚本时生成；
+# 须位于 !thirdparty/** 之后，否则被其否定而重新包含）
+__pycache__/

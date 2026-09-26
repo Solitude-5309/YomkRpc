@@ -33,6 +33,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/list_topics", YomkRpcDebugService::listTopics);
     YomkInstallFunc("/topic_info", YomkRpcDebugService::topicInfo);
     YomkInstallFunc("/topic_find", YomkRpcDebugService::topicFind);
+    YomkInstallFunc("/interface_show", YomkRpcDebugService::interfaceShow);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
@@ -150,6 +151,27 @@ YomkResponse YomkRpcDebugService::topicFind(YomkPkgPtr pkg)
     if (lines.empty())
     {
         YOMK_ERROR_TAG("YomkRpcDebugService::topicFind", "type [", p->msg.typeName, "] not found");
+        return YomkResponse(YomkResponse::eNo, "type [" + p->msg.typeName + "] not found");
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::interfaceShow(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugInterfaceShow, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::interfaceShow", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // 持锁取该类型的 IDL 行集（节点层收敛轮询：TypeInformation→TypeObject→DynamicType 内省）；
+    // 未发现该类型按查询失败处理（find 族语义），便于调用方发现类型名拼写错误
+    std::vector<std::string> lines;
+    if (!node_->interfaceShow(p->msg.typeName, lines, p->msg.stableRounds, p->msg.intervalMs))
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::interfaceShow", "type [", p->msg.typeName, "] not found");
         return YomkResponse(YomkResponse::eNo, "type [" + p->msg.typeName + "] not found");
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));

@@ -131,6 +131,14 @@
         "/YomkRpcDebugService/topic_find",                                   \
         YomkMkPtr(DDSDebugFind, DDSDebugFind{typeName, stableRounds, intervalMs}))
 
+// 按数据类型名输出该类型的 IDL 结构描述（独立收敛，语义同 topic_find）：类型名精确匹配，
+// 命中返回 StringArray 多行（IDL 源语法：struct 头 + 四空格缩进字段行 + 结尾 };）；未发现
+// 类型返回错误（type [...] not found）。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_INTERFACE_SHOW(typeName, stableRounds, intervalMs)     \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/interface_show",                               \
+        YomkMkPtr(DDSDebugInterfaceShow, DDSDebugInterfaceShow{typeName, stableRounds, intervalMs}))
+
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，

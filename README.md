@@ -286,6 +286,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic type <主题名>` | 查询单主题数据类型名（单行裸输出，对齐 ros2 topic type，便于脚本取用） |
 | `yomkrpc topic find <类型名>` | 按数据类型名反查域内主题列表（每行一个主题名，精确匹配，对齐 ros2 topic find） |
 | `yomkrpc topic hz <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz） |
+| `yomkrpc interface show <类型名>` | 按类型名输出该类型的 IDL 结构描述（struct 头 + 字段行 + 结尾） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -521,6 +522,19 @@ average rate: 1.000
 ```
 
 各输出项含义（对齐 ros2 topic hz）：`average rate` 为窗口内相邻消息间隔均值的倒数（Hz）；`min`/`max` 为间隔极值（秒）；`std dev` 为间隔的总体标准差（秒，除以 n）；`window` 为间隔样本数（上限 `--window`，默认 10000，对齐 ros2 默认窗口）。无新消息不重复打印；首条消息前静默等待；Ctrl+C 退出。
+
+#### interface show：按类型名输出 IDL 结构
+
+`yomkrpc interface show <类型名>` 按数据类型名输出该类型的 IDL 结构描述（类型名精确匹配，同 `topic find` 的匹配语义）。FastDDS 仅有机器侧 TypeObject 描述与 DynamicType 遍历 API、无原生类型文本化输出，本指令复用发现链路 TypeInformation → TypeObject → DynamicType 做纯类型内省（不建订阅），输出自设计对齐主流序列化库的 schema 源语法形态（Protobuf DebugString、grpcurl describe、ros2 interface show 同族）——可直接粘回 .idl 文件复用：
+
+```bash
+$ yomkrpc interface show YomkRpc::MString
+struct YomkRpc::MString {
+    string data;
+};
+```
+
+字段类型名为 ROS2/IDL4 风格映射（bool/int32/uint32/float32/string 等；有界 `string<N>`；`sequence<T>`/`sequence<T, N>`；数组 `T[N]`；嵌套 struct/enum/alias 显示成员子类型名不递归展开）。仅支持顶层为 struct 的类型；未发现类型报错退出（可发现类型名拼写错误）；`-w` 同其他查询生效。
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
