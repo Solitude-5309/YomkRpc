@@ -285,6 +285,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行；-v 逐端点 Node name/GUID/QoS 详情段） |
 | `yomkrpc topic type <主题名>` | 查询单主题数据类型名（单行裸输出，对齐 ros2 topic type，便于脚本取用） |
 | `yomkrpc topic find <类型名>` | 按数据类型名反查域内主题列表（每行一个主题名，精确匹配，对齐 ros2 topic find） |
+| `yomkrpc topic hz <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -509,6 +510,17 @@ yomkrpc topic find -w 7 YomkRpc::MString  # 收敛判定放宽（默认 5）
 ```
 
 域内无该类型主题时报错退出（`type [<类型名>] not found`，info 族语义，可发现类型名拼写错误）。等价宏调用：`YOMKRPC_DEBUG_TOPIC_FIND(typeName, stableRounds, intervalMs)`。
+
+#### topic hz：主题接收频率测量
+
+`yomkrpc topic hz <主题名>` 订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印消息），主循环每秒打印一次滚动窗口统计，输出形态对齐 `ros2 topic hz`：
+
+```text
+average rate: 1.000
+        min: 0.998s max: 1.004s std dev: 0.00209s window: 10
+```
+
+各输出项含义（对齐 ros2 topic hz）：`average rate` 为窗口内相邻消息间隔均值的倒数（Hz）；`min`/`max` 为间隔极值（秒）；`std dev` 为间隔的总体标准差（秒，除以 n）；`window` 为间隔样本数（上限 `--window`，默认 10000，对齐 ros2 默认窗口）。无新消息不重复打印；首条消息前静默等待；Ctrl+C 退出。
 
 ### 6.5 列出域内节点（yomkrpc node list）
 

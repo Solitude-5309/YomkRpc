@@ -9,6 +9,7 @@
  *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>
  *   yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>
  *   yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>
+ *   yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>
  *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
  *   yomkrpc -h | --help
@@ -23,6 +24,7 @@
  *   yomkrpc topic info -v hello_world
  *   yomkrpc topic type hello_world
  *   yomkrpc topic find YomkRpc::MString
+ *   yomkrpc topic hz hello_world
  *   yomkrpc node list
  *   yomkrpc node info my_node
  *
@@ -43,6 +45,11 @@
  * （去 "Type: " 前缀，对齐 ros2 topic type，便于脚本 $() 取用）；未发现主题报错退出。
  * topic find：按数据类型名反查域内主题列表（类型名精确匹配，对齐 ros2 topic find），命中
  * 每行输出一个主题名（按主题名排序）；无匹配主题报错退出（可发现类型名拼写错误）。
+ * topic hz：订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印
+ * 消息），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
+ * 相邻消息间隔均值倒数，Hz；min/max 为间隔极值，秒；std dev 为间隔总体标准差，秒；
+ * window 为间隔样本数，上限 --window 默认 10000）；无新消息不重复打印，首条消息前静默；
+ * Ctrl+C 退出。
  * node list：创建节点后独立收敛查询域内已发现的命名参与者（每 ~200ms 轮询一次参与者
  * 发现缓存快照，连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空
  * 才列出，空名参与者跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出。
@@ -50,7 +57,7 @@
  * RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"），输出对齐 ros2 node info
  * 形态：节点名行 + "  Subscribers:" 段 + 每行 "    topic: type" + "  Publishers:" 段同
  * 形态（类型名原样输出；空段仅打段头）；未发现节点名报错退出。
- * 五种子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，规避 FastDDS 静态析构期段错误
+ * 各子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，规避 FastDDS 静态析构期段错误
  * （同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
  *
  * 域 id 两种指定方式（优先级 -d > 环境变量 > 0）：
@@ -62,13 +69,19 @@
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib> // strtoul, getenv, setenv
+#include <deque>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -90,6 +103,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>\n"
           "  yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
           "  yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>\n"
+          "  yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -102,6 +116,7 @@ static void printUsage(std::ostream &os)
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
+          "  --window N          频率统计窗口大小（相邻消息间隔样本数上限，默认 10000，仅 topic hz 生效）\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
@@ -114,6 +129,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic info -v hello_world\n"
           "  yomkrpc topic type hello_world\n"
           "  yomkrpc topic find YomkRpc::MString\n"
+          "  yomkrpc topic hz hello_world\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -206,6 +222,103 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
     }
 
     // 4. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
+// topic hz 子命令：订阅主题测量消息接收频率（复用 topic print 的登记订阅链路，回调只记
+// 时间戳不打印消息），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计——
+// "average rate"（窗口内相邻消息间隔均值的倒数，Hz）、min/max（间隔极值，秒）、
+// std dev（间隔的总体标准差，除以 n）、window（间隔样本数，上限 --window）；无新消息
+// 不重复打印（对齐 ros2 哨兵语义），首条消息前静默等待；Ctrl+C 退出
+static int runHz(uint32_t domainId, const std::string &topicName, size_t windowSize)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 登记调试主题：回调在 DDS 监听线程内逐条投递，仅锁内记录相邻消息间隔（消息内容
+    // 不使用），统计由主循环消费——回调极轻不阻塞交付
+    std::mutex hzMtx;
+    std::deque<double> hzTimes; // 窗口内相邻消息间隔（秒），size 上限 windowSize
+    std::chrono::steady_clock::time_point hzLast{};
+    bool hzHasLast = false;
+    auto onMessage = [&](const std::string &)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(hzMtx);
+        if (hzHasLast)
+        {
+            hzTimes.push_back(std::chrono::duration<double>(now - hzLast).count());
+            while (hzTimes.size() > windowSize)
+            {
+                hzTimes.pop_front(); // 滚动窗口（O(1) 收缩，对齐 ros2 pop(0) 语义）
+            }
+        }
+        hzLast = now;
+        hzHasLast = true;
+    };
+    resp = YOMKRPC_DEBUG_TOPIC_PRINT(topicName, onMessage);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "register debug topic failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT(); // 登记失败路径同样须清理已建调试节点
+        return 1;
+    }
+
+    // 3. 主循环每秒打印一次统计（对齐 ros2 1s 打印线程节奏）：无新消息（末消息时间戳未变）
+    // 跳过；窗口空（尚无完整间隔，仅收到 0/1 条消息）跳过——首条消息前静默
+    std::signal(SIGINT, onSignal);
+    YOMK_INFO_TAG("yomkrpc", "measuring hz of topic \"", topicName, "\" on domain ",
+                  std::to_string(domainId), ", press Ctrl+C to exit");
+    auto lastPrinted = hzLast;
+    std::cout << std::fixed;
+    while (!g_stop.load())
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::deque<double> times;
+        {
+            std::lock_guard<std::mutex> lock(hzMtx);
+            if (!hzHasLast || hzLast == lastPrinted)
+            {
+                continue; // 尚未收到任何消息或无新消息：不重复打印
+            }
+            lastPrinted = hzLast;
+            times = hzTimes;
+        }
+        if (times.empty())
+        {
+            continue; // 仅 1 条消息（无完整间隔）：无统计意义
+        }
+        const double mean = std::accumulate(times.begin(), times.end(), 0.0) / times.size();
+        const double rate = mean > 0.0 ? 1.0 / mean : 0.0;
+        double sumSq = 0.0;
+        for (double t : times)
+        {
+            const double d = t - mean;
+            sumSq += d * d;
+        }
+        const double stdDev = std::sqrt(sumSq / times.size()); // 总体标准差（除以 n）
+        std::cout << "average rate: " << std::setprecision(3) << rate << "\n"
+                  << "        min: " << *std::min_element(times.begin(), times.end())
+                  << "s max: " << *std::max_element(times.begin(), times.end())
+                  << "s std dev: " << std::setprecision(5) << stdDev
+                  << "s window: " << times.size() << std::endl;
+    }
+
+    // 4. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同 print 不变式）
     resp = YOMKRPC_DEBUG_QUIT();
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -558,6 +671,7 @@ int main(int argc, char *argv[])
     uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、topic find、node list 与 node info 生效）
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
+    size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -611,6 +725,24 @@ int main(int argc, char *argv[])
             types = true;
             continue;
         }
+        if (arg == "--window")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少窗口大小参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            char *end = nullptr;
+            unsigned long value = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value == 0)
+            {
+                std::cerr << "yomkrpc: 非法窗口大小 \"" << argv[i] << "\"（须为 >=1 的整数）\n";
+                return 2;
+            }
+            windowSize = static_cast<size_t>(value);
+            continue;
+        }
         pos.push_back(arg);
     }
 
@@ -643,6 +775,10 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "find" && !pos[2].empty())
     {
         return runTopicFind(domainId, pos[2], waitRounds);
+    }
+    if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "hz" && !pos[2].empty())
+    {
+        return runHz(domainId, pos[2], windowSize);
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "info" && !pos[2].empty())
     {
