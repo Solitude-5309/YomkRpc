@@ -113,12 +113,13 @@ YomkResponse YomkRpcDebugService::listTopics(YomkPkgPtr pkg)
     // 等待期间本服务其他端点请求被串行化（单用户 CLI 场景无实际影响）；0 值参数由节点层钳制默认
     std::vector<std::pair<std::string, std::string>> pairs;
     node_->listTopics(pairs, p->msg.stableRounds, p->msg.intervalMs);
-    // 仅取主题名（节点层 pair 中的类型信息保留在发现缓存中，暂不对外暴露）
+    // 非 types 模式仅主题名；types 模式每行 "主题名 [类型名]"（单空格 + 方括号，对齐
+    // ros2 topic list -t 形态；类型名原样输出，pair 已按主题名排序）
     std::vector<std::string> lines;
     lines.reserve(pairs.size());
     for (const auto& entry : pairs)
     {
-        lines.emplace_back(entry.first);
+        lines.emplace_back(p->msg.types ? entry.first + " [" + entry.second + "]" : entry.first);
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }

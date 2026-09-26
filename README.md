@@ -281,7 +281,8 @@ ExampleYomkRpcPub
 |---|---|
 | `yomkrpc topic print <主题名>` | 订阅指定主题，消息 JSON 文本逐条直出控制台 |
 | `yomkrpc topic list` | 一次性列出域内全部已发现主题（每行一个主题名，按主题名排序） |
-| `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行） |
+| `yomkrpc topic list [-t]` | 列出域内全部已发现主题（按名称排序；-t 每行附类型名：主题名 [类型名]） |
+| `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行；-v 逐端点 Node name/GUID/QoS 详情段） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -363,12 +364,13 @@ int main(int argc, char *argv[])
 
 ### 6.3 列出域内主题（yomkrpc topic list）
 
-`yomkrpc topic list` 一次性列出当前域内全部已发现主题，每行一个 topicName 按主题名排序：
+`yomkrpc topic list` 一次性列出当前域内全部已发现主题，每行一个 topicName 按主题名排序；加 `-t`（`--types`）进入类型名模式，每行输出 `主题名 [类型名]`（单空格 + 方括号，对齐 `ros2 topic list -t` 形态，类型名原样输出）：
 
 ```bash
 yomkrpc topic list          # 默认域 0
 yomkrpc topic list -d 5     # 指定 DDS 域号
 yomkrpc topic list -w 7     # 收敛判定放宽为连续 7 次快照不变（默认 5）
+yomkrpc topic list -t       # 类型名模式：每行输出 主题名 [类型名]
 ```
 
 与发布端配合观察（建议先启动发布端——工具创建调试节点入域后内部自适应收敛查询：每 ~200ms 轮询一次发现缓存快照，连续 5 次集合不变即认为发现收敛、立即输出，无需固定等待窗口）：
@@ -386,7 +388,13 @@ yomkrpc topic list
 hello_world
 ```
 
-域内无任何已发布主题时输出 `no topics discovered on domain N`。等价宏调用序列（流程与 print 示例同构，链接库相同，宏定义见上表）：
+`-t` 类型名模式输出示例（实测）：
+
+```
+hello_world [YomkRpc::MString]
+```
+
+域内无任何已发布主题时输出 `no topics discovered on domain N`（types 模式同）。`-t` 模式对应 4 参宏 `YOMKRPC_DEBUG_TOPIC_LIST_T(收敛次数, 间隔ms)`，输出内容与 CLI 一致。等价宏调用序列（流程与 print 示例同构，链接库相同，宏定义见上表）：
 
 ```cpp
 YOMK_INIT();

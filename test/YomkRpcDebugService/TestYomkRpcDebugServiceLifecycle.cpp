@@ -13,7 +13,7 @@
  *       异主题登记 → 删除 → 重复删除拒绝 → 删除后 list_topics/list_nodes/topic_info/node_info
  *       拒绝 → 删除后重建 → node list 命中（命名 peer 经 SPDP 传播）→ topic_info 命中三行断言
  *       → topic_info verbose 逐行断言（Type/空行/端点块 Node name+Endpoint type+GUID+QoS、
- *       count 为 0 无清单段）
+ *       count 为 0 无清单段）→ list_topics types 模式唯一行断言（主题名 [类型名]）
  *       （Type/Publisher count/Subscription count）→ node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
@@ -313,6 +313,14 @@ int main()
                         std::cout << "[OBSERVE] verbose |" << line << "|" << std::endl;
                     }
                 }
+
+                // types 模式：域 200 纯净仅 HIT_TOPIC 一个主题，断言唯一行为 "主题名 [类型名]"
+                auto listT = svc->invoke("/list_topics", YomkMkPtr(DDSDebugList, DDSDebugList{5, 100, true}));
+                CHECK(listT.m_status == YomkResponse::eOk, "list_topics(types) → eOk");
+                YomkUnPackPkg(listT.m_data, StringArray, listArrT);
+                CHECK(listArrT != nullptr && listArrT->d.size() == 1 &&
+                          listArrT->d[0] == std::string(HIT_TOPIC) + " [YomkRpc::MString]",
+                      "list_topics(types) 唯一行为主题名 [类型名]（单空格 + 方括号，类型名原样）");
             }
 
             // 清理：writer → topic → publisher → participant（同 TestFastDDSDebugNode 计数用例顺序）

@@ -58,6 +58,7 @@ struct DDSDebugList
 {
     uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
     uint32_t intervalMs;    // 快照轮询间隔毫秒
+    bool types = false;     // 类型名模式：true 时每行输出 "主题名 [类型名]"
 };
 
 // topic_info 请求负载：单主题详情查询（独立收敛参数，语义同 list_topics，0 值由节点层钳制为默认）

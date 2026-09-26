@@ -5,7 +5,7 @@
  *
  * 用法：
  *   yomkrpc topic print [-d N | --domain N] <topic-name>
- *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N]
+ *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N] [-t | --types]
  *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>
  *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
@@ -16,6 +16,7 @@
  *   yomkrpc topic print -d 5 sensor_data
  *   yomkrpc topic list
  *   yomkrpc topic list -w 3
+ *   yomkrpc topic list -t
  *   yomkrpc topic info hello_world
  *   yomkrpc topic info -v hello_world
  *   yomkrpc node list
@@ -26,7 +27,8 @@
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
  * topic list：创建节点后一次性收敛查询并逐行打印 topicName——自适应收敛：
  * 节点内部每 ~200ms 轮询一次发现缓存快照，连续 waitRounds 次（默认 5，-w 可调）集合不变
- * 即认为发现收敛、立即输出，无需固定等待窗口；
+ * 即认为发现收敛、立即输出，无需固定等待窗口；-t/--types 类型名模式：每行改输出
+ * "主题名 [类型名]"（单空格 + 方括号，对齐 ros2 topic list -t，类型名原样输出）；
  * topic info：创建节点后独立收敛查询单个目标主题的发现详情（节点内部轮询该主题快照，
  * 连续 waitRounds 次不变即返回），输出三行：Type（原始 DDS 类型名，无风格转换）、
  * Publisher count、Subscription count；-v/--verbose 端点详情模式：追加逐端点 Node name
@@ -76,7 +78,7 @@ static void printUsage(std::ostream &os)
 {
     os << "Usage:\n"
           "  yomkrpc topic print [-d N | --domain N] <topic-name>\n"
-          "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N]\n"
+          "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N] [-t | --types]\n"
           "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
@@ -89,6 +91,7 @@ static void printUsage(std::ostream &os)
           "                      （默认 5，topic list、topic info、node list 与 node info 生效）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
+          "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
@@ -96,6 +99,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic print -d 5 sensor_data\n"
           "  yomkrpc topic list\n"
           "  yomkrpc topic list -w 3\n"
+          "  yomkrpc topic list -t\n"
           "  yomkrpc topic info hello_world\n"
           "  yomkrpc topic info -v hello_world\n"
           "  yomkrpc node list\n"
@@ -200,8 +204,9 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
 }
 
 // topic list 子命令：自适应收敛查询域内已发现主题与数据类型名（每 ~200ms 轮询一次发现缓存
-// 快照，连续 waitRounds 次集合不变即收敛立即输出；无 Ctrl+C 循环，查完即退）
-static int runList(uint32_t domainId, uint32_t waitRounds)
+// 快照，连续 waitRounds 次集合不变即收敛立即输出；types 模式（-t）每行输出 "主题名 [类型名]"；
+// 无 Ctrl+C 循环，查完即退）
+static int runList(uint32_t domainId, uint32_t waitRounds, bool types = false)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -215,8 +220,15 @@ static int runList(uint32_t domainId, uint32_t waitRounds)
     }
 
     // 2. 收敛查询：节点内部轮询发现缓存快照（~200ms 间隔），连续 waitRounds 次集合不变即返回，
-    //    发现重放完成即立即输出，无需固定等待窗口
-    resp = YOMKRPC_DEBUG_TOPIC_LIST(waitRounds, 200);
+    //    发现重放完成即立即输出，无需固定等待窗口；types 模式（-t）每行 "主题名 [类型名]"
+    if (types)
+    {
+        resp = YOMKRPC_DEBUG_TOPIC_LIST_T(waitRounds, 200);
+    }
+    else
+    {
+        resp = YOMKRPC_DEBUG_TOPIC_LIST(waitRounds, 200);
+    }
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "list topics failed: ", resp.m_msg);
@@ -433,6 +445,7 @@ int main(int argc, char *argv[])
     bool hasDomainId = false;
     uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、node list 与 node info 生效）
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
+    bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -481,6 +494,11 @@ int main(int argc, char *argv[])
             verbose = true;
             continue;
         }
+        if (arg == "-t" || arg == "--types")
+        {
+            types = true;
+            continue;
+        }
         pos.push_back(arg);
     }
 
@@ -504,7 +522,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 2 && pos[0] == "topic" && pos[1] == "list")
     {
-        return runList(domainId, waitRounds);
+        return runList(domainId, waitRounds, types);
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "info" && !pos[2].empty())
     {

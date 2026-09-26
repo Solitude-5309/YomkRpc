@@ -51,7 +51,8 @@ namespace
     }
 
     // T3：/create_node、/topic_print、/list_topics、/topic_info、/list_nodes、/node_info 的解包双守卫
-    // （nullptr / 异类包 / 改名伪造；DDSDebugInfo 加 verbose 字段后守卫包名不变，无需改断言）
+    // （nullptr / 异类包 / 改名伪造；DDSDebugInfo 加 verbose、DDSDebugList 加 types 字段后
+    // 守卫包名不变，无需改断言）
     void testUnpackGuards(YomkRpcDebugService *svc)
     {
         auto checkGuards = [&](const char *ep, const char *expectName, YomkPkgPtr wrongPkg)

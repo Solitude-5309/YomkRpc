@@ -96,6 +96,14 @@
         "/YomkRpcDebugService/list_topics",                                  \
         YomkMkPtr(DDSDebugList, DDSDebugList{stableRounds, intervalMs}))
 
+// 列出域内主题与数据类型名（types 模式，与 topic list 同端点同收敛语义）：每行输出
+// "主题名 [类型名]"（单空格 + 方括号，对齐 ros2 topic list -t 形态，类型名原样输出）；
+// 收敛参数语义同 topic list。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_LIST_T(stableRounds, intervalMs)                 \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/list_topics",                                  \
+        YomkMkPtr(DDSDebugList, DDSDebugList{stableRounds, intervalMs, true}))
+
 // 查询单个主题的发现详情（独立收敛，与 list_topics 完全分开）：轮询该主题详情快照（存在标志 +
 // 类型名 + 端点计数），连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。命中返回 StringArray
