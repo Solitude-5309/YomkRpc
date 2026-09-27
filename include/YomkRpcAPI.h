@@ -148,6 +148,15 @@
         "/YomkRpcDebugService/interface_list",                               \
         YomkMkPtr(DDSDebugInterfaceList, DDSDebugInterfaceList{stableRounds, intervalMs}))
 
+// 按主题名查询发布示例三段行集（独立收敛，同 interface_show）："Type: <类型名>" + "IDL:"
+// + IDL 行集 + "JSON example:" + 单行紧凑 JSON（默认值模板，可直接作为发布载荷）。命中返回
+// StringArray 多行；未发现主题返回错误（topic [...] not found）。须先创建调试节点。返回
+// YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_EXAMPLE(topicName, stableRounds, intervalMs)    \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/topic_example",                                \
+        YomkMkPtr(DDSDebugTopicExample, DDSDebugTopicExample{topicName, stableRounds, intervalMs}))
+
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，

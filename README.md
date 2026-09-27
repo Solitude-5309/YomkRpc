@@ -288,6 +288,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic hz <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz） |
 | `yomkrpc interface show <类型名>` | 按类型名输出该类型的 IDL 结构描述（struct 头 + 字段行 + 结尾） |
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
+| `yomkrpc topic pub -e` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -547,6 +548,25 @@ YomkRpc::MString
 ```
 
 域内无任何类型报错退出（find 族语义）；`-w` 收敛判定同其他查询生效。
+
+#### topic pub -e：查看主题的发布示例（Type / IDL / JSON 模板）
+
+`yomkrpc topic pub -e <主题名>`（等价 `--example`）按主题名输出发布示例三段行集：类型名、IDL 结构描述（同 `interface show`）、JSON example 发布载荷模板——同类型重建 DynamicType 取默认值样本生成，与发布输入格式对称，填好字段值即可作为发布载荷：
+
+```bash
+$ yomkrpc topic pub -e hello_world
+Type: YomkRpc::MString
+
+IDL:
+struct YomkRpc::MString {
+    string data;
+};
+
+JSON example:
+{"data":""}
+```
+
+未发现主题报错退出（info 族语义）；`-w` 收敛判定同其他查询生效。
 
 ### 6.5 列出域内节点（yomkrpc node list）
 

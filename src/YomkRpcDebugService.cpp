@@ -36,6 +36,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/topic_find", YomkRpcDebugService::topicFind);
     YomkInstallFunc("/interface_show", YomkRpcDebugService::interfaceShow);
     YomkInstallFunc("/interface_list", YomkRpcDebugService::interfaceList);
+    YomkInstallFunc("/topic_example", YomkRpcDebugService::topicExample);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
@@ -209,6 +210,27 @@ YomkResponse YomkRpcDebugService::interfaceList(YomkPkgPtr pkg)
     }
     return YomkResponse(YomkResponse::eOk, "ok",
                         YomkMkPtr(StringArray, std::vector<std::string>(typeNames.begin(), typeNames.end())));
+}
+
+YomkResponse YomkRpcDebugService::topicExample(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugTopicExample, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicExample", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // 持锁取该主题的发布示例三段行集（节点层依次收敛：类型名→IDL 行集→JSON 示例；
+    // 未发现主题按查询失败处理，info 族语义）
+    std::vector<std::string> lines;
+    if (!node_->topicExample(p->msg.topicName, lines, p->msg.stableRounds, p->msg.intervalMs))
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicExample", "topic [", p->msg.topicName, "] not found");
+        return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
 
 YomkResponse YomkRpcDebugService::topicInfo(YomkPkgPtr pkg)

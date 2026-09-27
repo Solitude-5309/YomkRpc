@@ -142,6 +142,17 @@ public:
             std::vector<std::string>& lines,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
+    // 查询指定主题的发布示例三段行集（独立收敛查询，与 listTopics/topicInfo/interfaceShow 互不影响）：
+    // 依次收敛拿类型名（发现缓存按主题名查，未发现 false）→ IDL 行集（同 interfaceShow）→
+    // JSON 发布示例（同类型重建 DynamicType 后取默认值样本经 json_serialize 生成，与
+    // json_deserialize 输入格式对称，可直接作为发布载荷模板）。命中返回 true 并填充 lines：
+    // "Type: <类型名>" + "IDL:" + IDL 行集 + "JSON example:" + 单行紧凑 JSON；未发现主题或
+    // TypeObject/类型重建不可用返回 false（未 setDomainId 亦 false）。0 值钳制默认
+    // 5 次/200ms；最长阻塞约 2*stableRounds*intervalMs。
+    bool topicExample(const std::string& topicName,
+            std::vector<std::string>& lines,
+            uint32_t stableRounds = kDefaultStableRounds,
+            uint32_t intervalMs = kDefaultIntervalMs);
 
 private:
     // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
@@ -184,6 +195,11 @@ private:
     // 类型，否则 false。仅读取入参，不触及节点状态。
     bool buildInterfaceLines(const eprosima::fastdds::dds::xtypes::TypeObject& type_object,
             const std::string& typeName, std::vector<std::string>& lines);
+    // 按类型名生成 JSON 发布示例（topicExample 第三段）：锁内仅查发现缓存与拷贝 TypeObject
+    // （writer 优先、reader 补缺，同 buildFromInfo 路径），锁外重建 DynamicType 后取
+    // DynamicDataFactory 默认值样本经 json_serialize 序列化（不注册类型不建订阅，纯类型内省）。
+    // 类型未发现或 TypeObject/类型重建不可用返回 false。仅读取入参缓存，不触及节点状态。
+    bool jsonExampleOfType(const std::string& typeName, std::string& out);
     // 发现线程回调入口（DebugParticipantListener 转发）：新见 writer 追加进 seen_ 列表后唤醒
     // 工作线程（发现事件对同一端点不重发，缓存供登记晚于发现时回放）；回调内不建订阅。回调运行于
     // Fast DDS 发现锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置死锁防护见成员注释）。

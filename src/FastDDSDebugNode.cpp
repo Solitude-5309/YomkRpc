@@ -18,6 +18,7 @@
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicData.hpp>
+#include <fastdds/dds/xtypes/dynamic_types/DynamicDataFactory.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicPubSubType.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicType.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicTypeBuilderFactory.hpp>
@@ -674,6 +675,57 @@ bool FastDDSDebugNode::interfaceShow(const std::string& typeName,
     return waitForInterfaceStable(typeName, lines, stableRounds, intervalMs);
 }
 
+bool FastDDSDebugNode::topicExample(const std::string& topicName,
+        std::vector<std::string>& lines,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    // 1) 收敛拿类型名（topicInfo 单值路径）；未发现主题 false
+    std::string typeName;
+    size_t publisherCount = 0;
+    size_t subscriptionCount = 0;
+    if (!waitForTopicInfoStable(topicName, typeName, publisherCount, subscriptionCount,
+                stableRounds, intervalMs))
+    {
+        return false;
+    }
+    // 2) 收敛拿 IDL 行集（类型名刚命中，TypeObject 大概率已就绪）
+    std::vector<std::string> idl;
+    if (!waitForInterfaceStable(typeName, idl, stableRounds, intervalMs))
+    {
+        return false;
+    }
+    // 3) 同类型重建 DynamicType 生成 JSON 发布示例（默认值模板，json_deserialize 可直接接受）
+    std::string json;
+    if (!jsonExampleOfType(typeName, json))
+    {
+        return false;
+    }
+    // 三段行集：Type / IDL / JSON example（CLI 逐行原样输出）
+    lines.clear();
+    lines.push_back("Type: " + typeName);
+    lines.push_back("IDL:");
+    lines.insert(lines.end(), std::make_move_iterator(idl.begin()),
+            std::make_move_iterator(idl.end()));
+    lines.push_back("JSON example:");
+    lines.push_back(std::move(json));
+    return true;
+}
+
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
         uint32_t stableRounds, uint32_t intervalMs)
 {
@@ -1151,6 +1203,60 @@ bool FastDDSDebugNode::buildInterfaceLines(const xtypes::TypeObject& type_object
     }
     lines.push_back("};");
     return true;
+}
+
+bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::string& out)
+{
+    // 锁内仅做发现缓存查询与 TypeObject 拷贝（writer 优先、reader 补缺，同 buildFromInfo 路径）
+    xtypes::TypeObject type_object;
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        auto fetch = [&type_object, &typeName](const auto& entries) -> bool
+        {
+            for (const auto& entry : entries)
+            {
+                for (const auto& info : entry.second)
+                {
+                    if (info.type_name.to_string() != typeName)
+                    {
+                        continue;
+                    }
+                    const auto& ti = info.type_information.type_information;
+                    const auto& tid =
+                            (xtypes::TK_NONE != ti.complete().typeid_with_size().type_id()._d())
+                            ? ti.complete().typeid_with_size().type_id()
+                            : ti.minimal().typeid_with_size().type_id();
+                    return RETCODE_OK == DomainParticipantFactory::get_instance()
+                                    ->type_object_registry().get_type_object(tid, type_object);
+                }
+            }
+            return false;
+        };
+        if (!fetch(seen_) && !fetch(seenReaders_))
+        {
+            return false;  // 类型未发现或 TypeObject 未就绪
+        }
+    }
+    // 锁外重建 DynamicType 并取默认值样本序列化为 JSON 示例（不注册类型不建订阅，纯类型内省）
+    auto dyn_type = DynamicTypeBuilderFactory::get_instance()->create_type_w_type_object(
+                type_object)->build();
+    if (dyn_type == nullptr)
+    {
+        return false;
+    }
+    auto data = DynamicDataFactory::get_instance()->create_data(dyn_type);
+    if (data == nullptr)
+    {
+        return false;
+    }
+    std::ostringstream os;
+    const bool ok = RETCODE_OK == json_serialize(data, DynamicDataJsonFormat::EPROSIMA, os);
+    if (ok)
+    {
+        out = os.str();
+    }
+    DynamicDataFactory::get_instance()->delete_data(data);
+    return ok;
 }
 
 // 发现线程回调入口：新见 writer 追加进 seen_ 列表并唤醒工作线程；回调内不建订阅。

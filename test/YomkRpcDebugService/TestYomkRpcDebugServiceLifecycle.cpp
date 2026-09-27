@@ -16,7 +16,8 @@
  *       count 为 0 无清单段）→ list_topics types 模式唯一行断言（主题名 [类型名]）→
  *       topic_find 按类型名反查命中唯一行与未匹配类型 eNo → interface_show 按类型名输出
  *       IDL 结构（三行逐行断言 struct 头/四空格缩进字段行/结尾）与未发现类型 eNo →
- *       interface_list 类型名去重清单命中唯一行与空域未发现 eNo →
+ *       interface_list 类型名去重清单命中唯一行与空域未发现 eNo → topic_example 按主题名
+ *       输出发布示例三段行集（Type/IDL/JSON example 逐段断言）与未发现主题 eNo →
  *       node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
@@ -115,6 +116,13 @@ int main()
     CHECK(ifaceListMiss.m_status == YomkResponse::eNo &&
           ifaceListMiss.m_msg.find("no interface types discovered") != std::string::npos,
           "interface_list 空域 → eNo no interface types discovered（find 族语义）");
+
+    // topic_example：同域无此主题，eNo（收敛参数链路同直通节点层）
+    auto topicExampleMiss = svc->invoke("/topic_example", YomkMkPtr(
+                             DDSDebugTopicExample, DDSDebugTopicExample{"t_example_miss", 1, 50}));
+    CHECK(topicExampleMiss.m_status == YomkResponse::eNo &&
+          topicExampleMiss.m_msg.find("topic [t_example_miss] not found") != std::string::npos,
+          "topic_example 空域未发现主题 → eNo topic [...] not found（info 族语义）");
 
     // list_nodes：ctest 串行执行，此刻域 200 无其他参与者；调试节点自身不在自身发现缓存中，
     // stableRounds=1 单次快照即得空列表（空列表合法：域内暂无命名参与者，语义同 list_topics 空域）
@@ -381,6 +389,26 @@ int main()
                 for (const auto &l : ifaceListArr->d)
                 {
                     std::cout << "[OBSERVE] interface list: " << l << std::endl;
+                }
+
+                // topic_example：三段行集（Type / IDL / JSON example，共 7 行）
+                auto exampleHit = svc->invoke("/topic_example", YomkMkPtr(
+                    DDSDebugTopicExample, DDSDebugTopicExample{HIT_TOPIC, 5, 100}));
+                CHECK(exampleHit.m_status == YomkResponse::eOk && exampleHit.m_data != nullptr,
+                      "topic_example(hello_world,5,100ms) → eOk（发布示例命中）");
+                YomkUnPackPkg(exampleHit.m_data, StringArray, exampleArr);
+                CHECK(exampleArr != nullptr && exampleArr->d.size() == 7 &&
+                          exampleArr->d[0] == "Type: YomkRpc::MString" &&
+                          exampleArr->d[1] == "IDL:" &&
+                          exampleArr->d[2] == "struct YomkRpc::MString {" &&
+                          exampleArr->d[3] == "    string data;" &&
+                          exampleArr->d[4] == "};" &&
+                          exampleArr->d[5] == "JSON example:" &&
+                          exampleArr->d[6].find("\"data\"") != std::string::npos,
+                      "topic_example 三段行集逐行符合（Type/IDL 三行/JSON example 含 data 字段）");
+                for (const auto &l : exampleArr->d)
+                {
+                    std::cout << "[OBSERVE] topic example |" << l << "|" << std::endl;
                 }
             }
 

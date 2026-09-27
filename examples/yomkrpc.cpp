@@ -10,6 +10,9 @@
  *   yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>
  *   yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>
  *   yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>
+ *   yomkrpc interface show [-d N | --domain N] [-w N | --wait N] <type-name>
+ *   yomkrpc interface list [-d N | --domain N] [-w N | --wait N]
+ *   yomkrpc topic pub -e | --example [-d N | --domain N] [-w N | --wait N] <topic-name>
  *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
  *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
  *   yomkrpc -h | --help
@@ -25,6 +28,9 @@
  *   yomkrpc topic type hello_world
  *   yomkrpc topic find YomkRpc::MString
  *   yomkrpc topic hz hello_world
+ *   yomkrpc interface show YomkRpc::MString
+ *   yomkrpc interface list
+ *   yomkrpc topic pub -e hello_world
  *   yomkrpc node list
  *   yomkrpc node info my_node
  *
@@ -50,6 +56,9 @@
  * + 结尾 };）；未发现类型报错退出（可发现类型名拼写错误）。
  * interface list：列出发现缓存中出现的全部数据类型名（去重字典序排序，每行一个，
  * interface show 的配套导航）；域内无任何类型报错退出（find 族语义）。
+ * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / JSON example
+ * 发布载荷模板——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，填好字段值即可
+ * 发布）；未发现主题报错退出。
  * topic hz：订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印
  * 消息），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
  * 相邻消息间隔均值倒数，Hz；min/max 为间隔极值，秒；std dev 为间隔总体标准差，秒；
@@ -111,6 +120,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>\n"
           "  yomkrpc interface show [-d N | --domain N] [-w N | --wait N] <type-name>\n"
           "  yomkrpc interface list [-d N | --domain N] [-w N | --wait N]\n"
+          "  yomkrpc topic pub -e | --example [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -120,7 +130,7 @@ static void printUsage(std::ostream &os)
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
           "                      （默认 5，topic list、topic info、topic find、interface show、interface list、\n"
-          "                      node list 与 node info 生效）\n"
+          "                      topic pub -e、node list 与 node info 生效）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -140,6 +150,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic hz hello_world\n"
           "  yomkrpc interface show YomkRpc::MString\n"
           "  yomkrpc interface list\n"
+          "  yomkrpc topic pub -e hello_world\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -654,6 +665,59 @@ static int runInterfaceList(uint32_t domainId, uint32_t waitRounds)
     return 0;
 }
 
+// topic pub -e 子命令：按主题名输出发布示例三段行集（Type / IDL / JSON example），供
+// 用户按 JSON 模板填好字段值后发布（查完即退，不发布）；调试节点内部依次收敛：类型名 →
+// IDL 行集 → JSON 示例，独立收敛参数同其余查询（无 Ctrl+C 循环）
+static int runTopicPubExample(uint32_t domainId, const std::string &topicName, uint32_t waitRounds)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 独立收敛查询发布示例三段行集
+    resp = YOMKRPC_DEBUG_TOPIC_EXAMPLE(topicName, waitRounds, 200);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "topic example failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    YomkUnPackPkg(resp.m_data, StringArray, arr);
+    if (arr == nullptr)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "topic example failed: unexpected response payload");
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    for (const auto &line : arr->d)
+    {
+        // 段标题（IDL: / JSON example:）前空一行，三段展示不拥挤（空行属展示层修饰，
+        // 不入数据行集）
+        if (line == "IDL:" || line == "JSON example:")
+        {
+            std::cout << "\n";
+        }
+        std::cout << line << "\n";
+    }
+    std::cout.flush();
+
+    // 3. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同 print/list 不变式）
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
 // 连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空才列出，空名参与者
 // 跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出（无 Ctrl+C 循环，查完即退）
@@ -888,6 +952,15 @@ int main(int argc, char *argv[])
     if (pos.size() == 2 && pos[0] == "interface" && pos[1] == "list")
     {
         return runInterfaceList(domainId, waitRounds);
+    }
+    if (pos.size() == 4 && pos[0] == "topic" && pos[1] == "pub" &&
+            (pos[2] == "-e" || pos[2] == "--example") && !pos[3].empty())
+    {
+        return runTopicPubExample(domainId, pos[3], waitRounds);
+    }
+    if (pos.size() >= 2 && pos[0] == "topic" && pos[1] == "pub")
+    {
+        std::cerr << "yomkrpc: topic pub 仅支持 -e | --example 示例模式\n";
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "hz" && !pos[2].empty())
     {

@@ -2,14 +2,14 @@
  * @file TestYomkRpcDebugServiceContract.cpp
  * @brief YomkRpcDebugService 服务层契约测试（DDS-free，白盒经 invoke 直接分发）
  *
- * 范围：仅验证调试服务 11 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
+ * 范围：仅验证调试服务 12 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
  *       输入校验与错误码契约；真实 DDS 生命周期（创建/删除/登记）归
  *       TestYomkRpcDebugServiceLifecycle，节点层守卫与端到端流量归 TestFastDDSDebugNode。
  * 覆盖：
- *   T1 funcInfos 内省 11 端点齐全 + 未知端点 eNo；
+ *   T1 funcInfos 内省 12 端点齐全 + 未知端点 eNo；
  *   T2 /version 正常路径（eOk + 版本串契约 + 忽略 pkg）；
  *   T3 /create_node、/topic_print、/list_topics、/topic_info、/topic_find、/interface_show、
- *      /interface_list、/list_nodes、/node_info 解包双守卫
+ *      /interface_list、/topic_example、/list_nodes、/node_info 解包双守卫
  *      （nullptr / 异类包 / 改名伪造）；
  *   T4 /delete_node 特殊契约：单节点模型无参载荷，handler (void)pkg 不走解包守卫，未建节点时
  *      无论何种载荷均 eNo "debug node not created"（与 YomkRpcService delete_node 的 String
@@ -205,6 +205,17 @@ namespace
                   rValid.m_msg.find("debug node not created") != std::string::npos,
               "/interface_list 合法包+未建节点 → eNo debug node not created（node_ 检查先于触达节点层）");
     }
+
+    // T12：/topic_example 未建节点早退（node_ 空检查先于独立收敛触达）
+    void testTopicExampleNoNode(YomkRpcDebugService *svc)
+    {
+        // stableRounds=1 为单次快照快速路径；未建节点时 node_ 空检查先行返回，不触 DDS
+        auto rValid = svc->invoke(
+            "/topic_example", YomkMkPtr(DDSDebugTopicExample, DDSDebugTopicExample{"t_no_node", 1, 50}));
+        CHECK(rValid.m_status == YomkResponse::eNo &&
+                  rValid.m_msg.find("debug node not created") != std::string::npos,
+              "/topic_example 合法包+未建节点 → eNo debug node not created（node_ 检查先于触达节点层）");
+    }
 } // namespace
 
 int main()
@@ -215,13 +226,14 @@ int main()
     auto *svc = new YomkRpcDebugService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcDebugService 注册成功（所有权移交框架，init() 已内部调用）");
 
-    // T1：内省——11 端点齐全
+    // T1：内省——12 端点齐全
     auto infos = svc->funcInfos();
-    CHECK(infos.size() == 11 && infos.count("/version") && infos.count("/create_node") &&
+    CHECK(infos.size() == 12 && infos.count("/version") && infos.count("/create_node") &&
               infos.count("/topic_print") && infos.count("/list_topics") && infos.count("/topic_info") &&
               infos.count("/topic_find") && infos.count("/interface_show") && infos.count("/interface_list") &&
-              infos.count("/list_nodes") && infos.count("/node_info") && infos.count("/delete_node"),
-          "funcInfos 内省 11 端点齐全");
+              infos.count("/topic_example") && infos.count("/list_nodes") && infos.count("/node_info") &&
+              infos.count("/delete_node"),
+          "funcInfos 内省 12 端点齐全");
 
     testVersion(svc);
     testUnpackGuards(svc);
@@ -234,6 +246,7 @@ int main()
     testTopicFindNoNode(svc);
     testInterfaceShowNoNode(svc);
     testInterfaceListNoNode(svc);
+    testTopicExampleNoNode(svc);
 
     CHECK(svc->invoke("/no_such_endpoint").m_status == YomkResponse::eNo, "未知端点返回 eNo");
 
