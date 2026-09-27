@@ -1,6 +1,9 @@
 #!/bin/bash
 # 一键编译脚本（交互式）
-# 用法: source build_ubuntu.sh
+# 用法: source build_ubuntu.sh（或 bash build_ubuntu.sh 直接执行亦可）
+# 脚本主流程封装在 main() 内：失败经函数内 return 立即中止后续步骤，
+# 尾部按 source/直接执行分别用 return/exit 传递退出码——
+# 直接执行时若沿用顶层 return，bash 不会退出脚本，失败仍会跑完全流程并误报“编译完成”
 # 依次交互询问 YomkServer 安装路径（前置路径）与扩展安装路径，默认均取环境变量 YOMK_PREFIX_PATH，可修改
 # 随后询问是否编译 test 测试树（仅供开发验证，不安装）：直接回车=跳过，输入 y=编译
 # 扩展库与 YomkServer 安装到一起（头文件由 YomkServer::YomkServer 的 INTERFACE include 统一提供）
@@ -31,6 +34,10 @@ if [ -z "${YOMK_PREFIX_PATH}" ]; then
     echo "警告: 未检测到环境变量 YOMK_PREFIX_PATH，可能未通过 build_ubuntu.sh 安装 YomkServer，请手动输入安装路径"
 fi
 
+# 交互询问 YomkServer 安装路径（前置路径），默认取环境变量 YOMK_PREFIX_PATH。
+# 主流程封装在 main() 内：函数内 return 在 source 与 bash 直接执行两种模式下都能
+# 立即中止后续步骤（直接执行时顶层 return 不会退出脚本，是失败仍报“编译完成”的根因）。
+main() {
 # 交互询问 YomkServer 安装路径（前置路径），默认取环境变量 YOMK_PREFIX_PATH
 read -r -p "请输入 YomkServer 安装路径 [默认: ${YOMK_PREFIX_PATH:-无}]: " _INPUT_PREFIX
 YOMK_SERVER_PATH="$(_normalize_path "${_INPUT_PREFIX:-${YOMK_PREFIX_PATH}}")"
@@ -255,3 +262,10 @@ echo " 示例程序 ExampleYomkRpcPub/ExampleYomkRpcSub 可另开两个终端分
 echo " 命令行工具 yomkrpc 观察任意主题：yomkrpc topic print [-d N] <主题名>"
 echo "==========================================="
 echo "编译完成，扩展库已注册到系统动态库缓存，新开任意终端即可使用"
+}
+
+# 执行主流程并按执行方式传递退出码：source 模式用顶层 return（exit 会杀掉调用方交互
+# shell）；bash 直接执行模式用 exit。两种模式下失败均以非零退出码中止，不再误报“编译完成”。
+main
+_RET=$?
+(return 0) 2>/dev/null && return "${_RET}" || exit "${_RET}"

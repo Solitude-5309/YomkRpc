@@ -18,6 +18,7 @@
  *       IDL 结构（三行逐行断言 struct 头/四空格缩进字段行/结尾）与未发现类型 eNo →
  *       interface_list 类型名去重清单命中唯一行与空域未发现 eNo → topic_example 按主题名
  *       输出发布示例三段行集（Type/IDL/JSON example 逐段断言）与未发现主题 eNo →
+ *       topic_pub 发布一次消息（eOk delivered，ack 确认送达）与非法 JSON eNo →
  *       node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
@@ -123,6 +124,13 @@ int main()
     CHECK(topicExampleMiss.m_status == YomkResponse::eNo &&
           topicExampleMiss.m_msg.find("topic [t_example_miss] not found") != std::string::npos,
           "topic_example 空域未发现主题 → eNo topic [...] not found（info 族语义）");
+
+    // topic_pub：同域无此主题，eNo（发布前的发现收敛失败即早退，不建任何发布实体）
+    auto topicPubMiss = svc->invoke("/topic_pub", YomkMkPtr(
+                         DDSDebugTopicPub, DDSDebugTopicPub{"t_pub_miss", "{}", 1, 50}));
+    CHECK(topicPubMiss.m_status == YomkResponse::eNo &&
+          topicPubMiss.m_msg.find("topic [t_pub_miss] not found") != std::string::npos,
+          "topic_pub 空域未发现主题 → eNo topic [...] not found（发布前早退）");
 
     // list_nodes：ctest 串行执行，此刻域 200 无其他参与者；调试节点自身不在自身发现缓存中，
     // stableRounds=1 单次快照即得空列表（空列表合法：域内暂无命名参与者，语义同 list_topics 空域）
@@ -410,6 +418,20 @@ int main()
                 {
                     std::cout << "[OBSERVE] topic example |" << l << "|" << std::endl;
                 }
+
+                // topic_pub：writer 在场（默认 RELIABLE）→ 发现收敛+匹配收敛+write 一次+ack 确认
+                auto pubHit = svc->invoke("/topic_pub", YomkMkPtr(
+                    DDSDebugTopicPub, DDSDebugTopicPub{HIT_TOPIC, R"({"data":"t_pub_once"})", 5, 100}));
+                CHECK(pubHit.m_status == YomkResponse::eOk &&
+                          pubHit.m_msg.find("delivered") != std::string::npos,
+                      "topic_pub(hello_world, 合法 JSON) → eOk delivered（ack 确认送达）");
+
+                // 非法 JSON：解析失败不建 writer，不发布
+                auto pubBad = svc->invoke("/topic_pub", YomkMkPtr(
+                    DDSDebugTopicPub, DDSDebugTopicPub{HIT_TOPIC, "{bad", 1, 50}));
+                CHECK(pubBad.m_status == YomkResponse::eNo &&
+                          pubBad.m_msg.find("invalid json") != std::string::npos,
+                      "topic_pub 非法 JSON → eNo invalid json for type [...]（不触 DDS 发布）");
             }
 
             // 清理：writer → topic → publisher → participant（同 TestFastDDSDebugNode 计数用例顺序）

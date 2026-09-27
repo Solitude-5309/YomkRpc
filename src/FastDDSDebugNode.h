@@ -153,6 +153,24 @@ public:
             std::vector<std::string>& lines,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
+    // 向指定主题发布一次消息（唯一写入型操作，与查询类互不影响）：四阶段链路——
+    // ①发现收敛（同 topicInfo 路径：类型名 + 订阅者数快照连续 stableRounds 轮不变；未发现
+    // 主题 false，error="topic [...] not found"）→ ②类型重建 + JSON 解析（json_deserialize
+    // EPROSIMA 格式，与 topic pub -e 模板对称；失败 false，error="invalid json ..."，不建
+    // writer）→ ③建临时发布链（DynamicPubSubType 注册 + create_topic/publisher/datawriter，
+    // QoS 固定 RELIABLE+TRANSIENT_LOCAL 最大兼容：请求 ≤ 提供规则下覆盖 FastDDSNode 默认与
+    // ros2 常见组合）+ 匹配收敛（publication matched 计数连续 stableRounds 轮不变；无订阅者
+    // 恒 0 也收敛照发）→ ④write 恰一次 + ack 自适应确认：发现缓存该主题存在 RELIABLE 订阅者
+    // 时 wait_for_acknowledgments(2s)，OK 才成功（全部 RELIABLE 订阅者已确认收到）、超时
+    // false（error="not all subscribers acknowledged"）；全 BEST_EFFORT 或无订阅者则退化
+    // 尽力而为：intervalMs 保底窗后即成功（BEST_EFFORT 无 ack 协议）。成败均清理临时发布链
+    // （delete_datawriter/publisher/topic；类型注册幂等不注销）。未入域 false（error=
+    // "debug node not created"）。0 值钳制默认 5 次/200ms；最长阻塞约
+    // 2*stableRounds*intervalMs + 2s（ack 可用时）。
+    bool topicPub(const std::string& topicName, const std::string& json,
+            std::string& error,
+            uint32_t stableRounds = kDefaultStableRounds,
+            uint32_t intervalMs = kDefaultIntervalMs);
 
 private:
     // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
@@ -200,6 +218,10 @@ private:
     // DynamicDataFactory 默认值样本经 json_serialize 序列化（不注册类型不建订阅，纯类型内省）。
     // 类型未发现或 TypeObject/类型重建不可用返回 false。仅读取入参缓存，不触及节点状态。
     bool jsonExampleOfType(const std::string& typeName, std::string& out);
+    // 按类型名从发现缓存查 TypeObject（writer 优先、reader 补缺，同 buildFromInfo 路径）：
+    // 仅拿 seenMtx_ 叶子锁做缓存查询与 TypeObject 拷贝，锁外重建留给调用方。类型未发现或
+    // TypeObject 未就绪返回 false。topicPub（阶段②类型重建）与 jsonExampleOfType 共用。
+    bool fetchTypeObject(const std::string& typeName, eprosima::fastdds::dds::xtypes::TypeObject& type_object);
     // 发现线程回调入口（DebugParticipantListener 转发）：新见 writer 追加进 seen_ 列表后唤醒
     // 工作线程（发现事件对同一端点不重发，缓存供登记晚于发现时回放）；回调内不建订阅。回调运行于
     // Fast DDS 发现锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置死锁防护见成员注释）。
@@ -210,6 +232,12 @@ private:
     // 的主题与 topicInfo 统计订阅者数）。回调运行于 Fast DDS PDP 锁临界区内，仅拿 seenMtx_ 叶子锁。
     bool onReaderDiscovered(const std::string& topicName,
                             const eprosima::fastdds::rtps::SubscriptionBuiltinTopicData& info);
+    // 发现线程回调入口（DebugParticipantListener 转发）：reader 离线（graceful dispose）按
+    // 端点 GUID 从 seenReaders_ 同步移除，使 topicPub 的 matched==0 校验只对"缓存仍有记录
+    // 却无一匹配"（挂起/异常死亡）生效，不对正常退出的订阅者误报。回调运行于 Fast DDS
+    // PDP 锁临界区内，仅拿 seenMtx_ 叶子锁。
+    bool onReaderRemoved(const std::string& topicName,
+                         const eprosima::fastdds::rtps::SubscriptionBuiltinTopicData& info);
     // 发现线程回调入口（DebugParticipantListener 转发）：新见 participant 缓存 GUID 前缀与
     // 名称（幂等去重；不唤醒工作线程——订阅建立链路不依赖参与者发现）。回调运行于 Fast DDS
     // PDP 锁临界区内，仅拿 seenMtx_ 叶子锁（锁序倒置防护同上）。

@@ -157,6 +157,18 @@
         "/YomkRpcDebugService/topic_example",                                \
         YomkMkPtr(DDSDebugTopicExample, DDSDebugTopicExample{topicName, stableRounds, intervalMs}))
 
+// 按主题名发布一条 JSON 载荷消息（仅发一次）：节点层先发现收敛（主题+订阅者数稳定）→
+// 类型重建 + json_deserialize 解析载荷 → 建临时 RELIABLE+TRANSIENT_LOCAL writer 并匹配收敛
+// → write 一次 → 存在 RELIABLE 订阅者时 wait_for_acknowledgments 确认送达（超时报错）
+// not all subscribers acknowledged），全 BEST_EFFORT 或无订阅者退化尽力而为。成功返回
+// eOk；未发现主题（topic [...] not found）/载荷不合法（invalid json for type [...]）/
+// 送达未确认（not all subscribers acknowledged）返回 eNo。须先创建调试节点。返回
+// YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs)  \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/topic_pub",                                    \
+        YomkMkPtr(DDSDebugTopicPub, DDSDebugTopicPub{topicName, json, stableRounds, intervalMs}))
+
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，

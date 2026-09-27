@@ -131,17 +131,36 @@ clean_residue() {
     fi
 }
 
-# 复查 /dev/shm 残留：列出并清理，返回非 0 表示存在残留
-check_residue() {
+# 复查 /dev/shm 残留：列出并清理，返回非 0 表示存在残留。
+# Fast DDS SHM 段的回收存在异步窗口：participant 全部销毁后个别段（尤其默认域 0 的
+# fastdds_port7415 及其信号量）可能延迟数秒才被清理，进程正常退出后立即复查会误报
+# （测试自身 79/102 checks 全绿、participant 均经 API 显式销毁的场景亦会命中）。
+# 因此检出残留后等待 RESIDUE_WAIT_SECS 再复查一次，仍在才判失败——真实崩溃/kill
+# 泄漏不会自清，依然会被抓到，检测能力不变。
+RESIDUE_WAIT_SECS=3
+
+_residue_files() {
     shopt -s nullglob
     local -a residue=(/dev/shm/fastdds_* /dev/shm/sem.fastdds_port*_mutex /dev/shm/fast_datasharing_*)
     shopt -u nullglob
-    if [ ${#residue[@]} -gt 0 ]; then
-        for p in "${residue[@]}"; do echo "   - ${p}"; done
-        rm -f -- "${residue[@]}"
-        return 1
+    echo "${residue[@]}"
+}
+
+check_residue() {
+    local -a residue=()
+    read -r -a residue <<< "$(_residue_files)"
+    if [ ${#residue[@]} -eq 0 ]; then
+        return 0
     fi
-    return 0
+    sleep "${RESIDUE_WAIT_SECS}"
+    read -r -a residue <<< "$(_residue_files)"
+    if [ ${#residue[@]} -eq 0 ]; then
+        return 0    # 延迟窗口内已自清，非泄漏
+    fi
+    echo "   等待 ${RESIDUE_WAIT_SECS}s 后仍存在（崩溃/kill 类泄漏）:"
+    for p in "${residue[@]}"; do echo "   - ${p}"; done
+    rm -f -- "${residue[@]}"
+    return 1
 }
 
 # 单测试超时：用户显式 --timeout 优先；stress 默认放宽到 1800s（与 CTest TIMEOUT 对齐）

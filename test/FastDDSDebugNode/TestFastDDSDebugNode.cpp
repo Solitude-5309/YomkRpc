@@ -47,9 +47,14 @@
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MString 数据类（仅发布端使用）
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅发布端使用）
 
+#include <fastdds/dds/core/policy/QosPolicies.hpp> // ReliabilityQosPolicy kind（topicPub 用例）
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp> // 纯订阅端 participant（仅订阅者用例）
+#include <fastdds/dds/subscriber/DataReaderListener.hpp>  // topicPub 用例接收监听器
+#include <fastdds/dds/subscriber/SampleInfo.hpp>
+#include <fastdds/dds/subscriber/qos/DataReaderQos.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -70,6 +75,17 @@ namespace
     constexpr const char *NODEINFO_PUB_TOPIC = "t_nodeinfo_pub";
     constexpr const char *NODEINFO_SUB_TOPIC = "t_nodeinfo_sub";
     constexpr const char *NODEINFO_ANON_TOPIC = "t_nodeinfo_anon";
+
+    // topicPub 用例接收监听器：仅置位收到标志（送达实证），其余回调默认空实现
+    class PubTestListener : public eprosima::fastdds::dds::DataReaderListener
+    {
+    public:
+        void on_data_available(eprosima::fastdds::dds::DataReader *) override
+        {
+            received_.store(true);
+        }
+        std::atomic<bool> received_{false};
+    };
 } // namespace
 
 int main()
@@ -574,6 +590,252 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(anonParticipant);
         }
     } // dbg/peer 析构；anonTs（TypeSupport）随块退出释放
+
+    // ---- topicPub 发布用例：临时 writer 一次发布 + ack 自适应确认（RELIABLE 路径 + 退化路径）----
+    {
+        namespace dds = eprosima::fastdds::dds;  // 块内别名：直连 FastDDS API 搭建订阅端
+        // RELIABLE 订阅端：显式 RELIABLE（进调试节点发现缓存 → ack 路径可用），
+        // durability 默认 VOLATILE（请求 ≤ 提供 TRANSIENT_LOCAL，匹配成立）
+        auto *pubParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(pubParticipant != nullptr, "topicPub 场景订阅端 participant 创建成功");
+        if (pubParticipant != nullptr)
+        {
+            constexpr const char *PUB_TOPIC = "t_pub_once";
+            auto *sub = pubParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            dds::TypeSupport pubTs(new YomkRpc::MStringPubSubType());
+            pubTs.register_type(pubParticipant);
+            auto *topic = sub != nullptr ? pubParticipant->create_topic(
+                PUB_TOPIC, pubTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            dds::DataReaderQos rqos;
+            rqos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
+            PubTestListener listener;
+            auto *reader = (sub != nullptr && topic != nullptr) ?
+                sub->create_datareader(topic, rqos, &listener) : nullptr;
+            CHECK(reader != nullptr, "RELIABLE 订阅端 DataReader 创建成功（t_pub_once）");
+
+            if (reader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（topicPub 场景）");
+                // 等 reader 发现信息进调试节点缓存（topicPub 内部再做发现/匹配收敛）
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                // 命中：RELIABLE 订阅者在场 → ack 确认路径（wait_for_acknowledgments）
+                std::string pubErr;
+                CHECK(dbg.topicPub(PUB_TOPIC, R"({"data":"t_pub_once_payload"})", pubErr),
+                      "topicPub(t_pub_once, RELIABLE reader 在场) → true（ack 确认送达）");
+                CHECK(pubErr.empty(), "topicPub 命中路径 error 为空");
+                CHECK(listener.received_.load(), "订阅端 listener 收到发布消息（送达实证）");
+
+                // 非法 JSON：解析失败不建 writer，不发布
+                std::string jsonErr;
+                CHECK(!dbg.topicPub(PUB_TOPIC, "{bad", jsonErr), "topicPub 非法 JSON → false");
+                CHECK(jsonErr.find("invalid json") != std::string::npos,
+                      "非法 JSON error 含 invalid json");
+
+                // 未发现主题：发现收敛后仍无此主题
+                std::string missErr;
+                CHECK(!dbg.topicPub("t_pub_no_such", "{}", missErr),
+                      "topicPub 未发现主题 → false");
+                CHECK(missErr.find("not found") != std::string::npos,
+                      "未发现主题 error 含 not found");
+            }
+
+            // 清理：reader → topic → subscriber → participant（与既有块一致）
+            if (sub != nullptr && reader != nullptr)
+            {
+                sub->delete_datareader(reader);
+            }
+            if (topic != nullptr)
+            {
+                pubParticipant->delete_topic(topic);
+            }
+            if (sub != nullptr)
+            {
+                pubParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(pubParticipant);
+        }
+
+        // 退化路径：全 BEST_EFFORT 订阅者（无 RELIABLE → 不走 ack，保底窗后尽力而为成功）
+        auto *beParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(beParticipant != nullptr, "topicPub 退化场景 participant 创建成功");
+        if (beParticipant != nullptr)
+        {
+            constexpr const char *BE_TOPIC = "t_pub_besteff";
+            auto *sub = beParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            dds::TypeSupport beTs(new YomkRpc::MStringPubSubType());
+            beTs.register_type(beParticipant);
+            auto *topic = sub != nullptr ? beParticipant->create_topic(
+                BE_TOPIC, beTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            dds::DataReaderQos rqos;
+            rqos.reliability().kind = dds::BEST_EFFORT_RELIABILITY_QOS;
+            PubTestListener listener;
+            auto *reader = (sub != nullptr && topic != nullptr) ?
+                sub->create_datareader(topic, rqos, &listener) : nullptr;
+            CHECK(reader != nullptr, "BEST_EFFORT 订阅端 DataReader 创建成功（t_pub_besteff）");
+
+            if (reader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（退化场景）");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::string beErr;
+                CHECK(dbg.topicPub(BE_TOPIC, R"({"data":"be_payload"})", beErr),
+                      "topicPub(t_pub_besteff, 全 BEST_EFFORT) → true（退化尽力而为路径）");
+                CHECK(listener.received_.load(), "BEST_EFFORT 订阅端也收到消息（尽力而为送达）");
+            }
+
+            if (sub != nullptr && reader != nullptr)
+            {
+                sub->delete_datareader(reader);
+            }
+            if (topic != nullptr)
+            {
+                beParticipant->delete_topic(topic);
+            }
+            if (sub != nullptr)
+            {
+                beParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(beParticipant);
+        }
+    }
+
+    // ---- topicPub matched 校验用例：缓存有 RELIABLE 订阅者却无一与临时 writer 匹配 ----
+    // 幽灵 reader 请求 RELIABLE+PERSISTENT，对测试 writer（VOLATILE）与 topicPub 临时
+    // writer（TRANSIENT_LOCAL）均"请求 > 提供"被 EDP 拒绝匹配，但 DISCOVERED_READER 仍
+    // 进调试节点缓存 → 集合比对发现缓存 GUID 不在匹配集 → 不发布报错（避免假成功）
+    {
+        namespace dds = eprosima::fastdds::dds;
+        auto *gxParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(gxParticipant != nullptr, "matched 校验场景订阅端 participant 创建成功");
+        if (gxParticipant != nullptr)
+        {
+            constexpr const char *GX_TOPIC = "t_pub_ghost";
+            auto *sub = gxParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            auto *pub = gxParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            dds::TypeSupport gxTs(new YomkRpc::MStringPubSubType());
+            gxTs.register_type(gxParticipant);
+            // writer 用默认 QoS（RELIABLE+VOLATILE）：仅保证主题被发现（进调试节点缓存）
+            auto *topic = (sub != nullptr && pub != nullptr) ? gxParticipant->create_topic(
+                GX_TOPIC, gxTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            auto *writer = (pub != nullptr && topic != nullptr) ?
+                pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+            dds::DataReaderQos rqos;
+            rqos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
+            rqos.durability().kind = dds::PERSISTENT_DURABILITY_QOS;  // 请求 > 提供，EDP 拒配
+            auto *reader = (sub != nullptr && topic != nullptr) ?
+                sub->create_datareader(topic, rqos, nullptr) : nullptr;
+            CHECK(writer != nullptr && reader != nullptr,
+                  "matched 校验场景 writer/reader 创建成功");
+
+            if (writer != nullptr && reader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（matched 校验场景）");
+                // 等幽灵 reader 进调试节点缓存（topicPub 内部再做发现/匹配收敛）
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::string gxErr;
+                CHECK(!dbg.topicPub(GX_TOPIC, R"({"data":"gx"})", gxErr),
+                      "topicPub(t_pub_ghost, RELIABLE 订阅者在场却无一匹配) → false");
+                CHECK(gxErr.find("not all matched") != std::string::npos,
+                      "matched 校验 error 含 not all matched");
+            }
+
+            // 清理：writer → reader → topic → publisher → subscriber → participant
+            if (pub != nullptr && writer != nullptr)
+            {
+                pub->delete_datawriter(writer);
+            }
+            if (sub != nullptr && reader != nullptr)
+            {
+                sub->delete_datareader(reader);
+            }
+            if (topic != nullptr)
+            {
+                gxParticipant->delete_topic(topic);
+            }
+            if (pub != nullptr)
+            {
+                gxParticipant->delete_publisher(pub);
+            }
+            if (sub != nullptr)
+            {
+                gxParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(gxParticipant);
+        }
+    }
+
+    // ---- topicPub 离线清理用例：reader graceful 退出（dispose）后缓存同步清空，再发布
+    // 不误报（若离线清理未生效，缓存残留的已退出 reader 会命中报错分支使本用例失败）----
+    {
+        namespace dds = eprosima::fastdds::dds;
+        auto *offParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(offParticipant != nullptr, "离线清理场景 participant 创建成功");
+        if (offParticipant != nullptr)
+        {
+            constexpr const char *OFF_TOPIC = "t_pub_offline";
+            auto *sub = offParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            auto *pub = offParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            dds::TypeSupport offTs(new YomkRpc::MStringPubSubType());
+            offTs.register_type(offParticipant);
+            auto *topic = (sub != nullptr && pub != nullptr) ? offParticipant->create_topic(
+                OFF_TOPIC, offTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            // writer（默认 RELIABLE+VOLATILE）保证 reader 删除后主题仍被发现
+            auto *writer = (pub != nullptr && topic != nullptr) ?
+                pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+            dds::DataReaderQos rqos;
+            rqos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
+            auto *reader = (sub != nullptr && topic != nullptr) ?
+                sub->create_datareader(topic, rqos, nullptr) : nullptr;
+            CHECK(writer != nullptr && reader != nullptr,
+                  "离线清理场景 writer/reader 创建成功");
+
+            if (writer != nullptr && reader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（离线清理场景）");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::string err1;
+                CHECK(dbg.topicPub(OFF_TOPIC, R"({"data":"off1"})", err1),
+                      "topicPub(t_pub_offline) 第一次 → true（RELIABLE reader 在场 ack 确认）");
+
+                // graceful 退出：dispose 传播 → 调试节点 REMOVED_READER 回调同步清缓存
+                sub->delete_datareader(reader);
+                reader = nullptr;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                std::string err2;
+                CHECK(dbg.topicPub(OFF_TOPIC, R"({"data":"off2"})", err2),
+                      "reader 退出后再发布 → true（离线清理生效不误报）");
+                CHECK(err2.empty(), "清理后再发布 error 为空");
+            }
+
+            // 清理：writer → topic → publisher → subscriber → participant（reader 已删）
+            if (pub != nullptr && writer != nullptr)
+            {
+                pub->delete_datawriter(writer);
+            }
+            if (topic != nullptr)
+            {
+                offParticipant->delete_topic(topic);
+            }
+            if (pub != nullptr)
+            {
+                offParticipant->delete_publisher(pub);
+            }
+            if (sub != nullptr)
+            {
+                offParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(offParticipant);
+        }
+    }
 
     return testReport("TestFastDDSDebugNode");
 }

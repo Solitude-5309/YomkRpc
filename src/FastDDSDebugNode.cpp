@@ -11,12 +11,16 @@
 #include <tuple>
 #include <utility>
 
+#include <fastdds/dds/core/policy/QosPolicies.hpp>
 #include <fastdds/dds/core/status/StatusMask.hpp>
 #include <fastdds/dds/core/status/SubscriptionMatchedStatus.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/DomainParticipantListener.hpp>
+#include <fastdds/dds/publisher/DataWriter.hpp>
+#include <fastdds/dds/publisher/Publisher.hpp>
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
+#include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicData.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicDataFactory.hpp>
 #include <fastdds/dds/xtypes/dynamic_types/DynamicPubSubType.hpp>
@@ -325,8 +329,8 @@ public:
         }
     }
 
-    // 仅处理 DISCOVERED_READER（QoS 变更/移除忽略）；回调内仅缓存发现信息，
-    // 供 listTopics 列出仅有订阅者的主题（不参与订阅建立链路）。
+    // 处理 DISCOVERED_READER 与 REMOVED_READER（QoS 变更忽略）；回调内仅缓存/移除发现
+    // 信息，供 listTopics 列出仅有订阅者的主题（不参与订阅建立链路）。
     void on_data_reader_discovery(
             DomainParticipant* /*participant*/,
             rtps::ReaderDiscoveryStatus reason,
@@ -337,6 +341,10 @@ public:
         if (reason == rtps::ReaderDiscoveryStatus::DISCOVERED_READER)
         {
             node_.onReaderDiscovered(std::string(info.topic_name.to_string()), info);
+        }
+        else if (reason == rtps::ReaderDiscoveryStatus::REMOVED_READER)
+        {
+            node_.onReaderRemoved(std::string(info.topic_name.to_string()), info);
         }
     }
 
@@ -1205,37 +1213,42 @@ bool FastDDSDebugNode::buildInterfaceLines(const xtypes::TypeObject& type_object
     return true;
 }
 
+bool FastDDSDebugNode::fetchTypeObject(const std::string& typeName,
+        xtypes::TypeObject& type_object)
+{
+    // 仅拿 seenMtx_ 叶子锁做缓存查询与 TypeObject 拷贝（writer 优先、reader 补缺，
+    // 同 buildFromInfo 路径），锁外重建留给调用方
+    std::lock_guard<std::mutex> lock(seenMtx_);
+    auto fetch = [&type_object, &typeName](const auto& entries) -> bool
+    {
+        for (const auto& entry : entries)
+        {
+            for (const auto& info : entry.second)
+            {
+                if (info.type_name.to_string() != typeName)
+                {
+                    continue;
+                }
+                const auto& ti = info.type_information.type_information;
+                const auto& tid =
+                        (xtypes::TK_NONE != ti.complete().typeid_with_size().type_id()._d())
+                        ? ti.complete().typeid_with_size().type_id()
+                        : ti.minimal().typeid_with_size().type_id();
+                return RETCODE_OK == DomainParticipantFactory::get_instance()
+                                ->type_object_registry().get_type_object(tid, type_object);
+            }
+        }
+        return false;
+    };
+    return fetch(seen_) || fetch(seenReaders_);
+}
+
 bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::string& out)
 {
-    // 锁内仅做发现缓存查询与 TypeObject 拷贝（writer 优先、reader 补缺，同 buildFromInfo 路径）
     xtypes::TypeObject type_object;
+    if (!fetchTypeObject(typeName, type_object))
     {
-        std::lock_guard<std::mutex> lock(seenMtx_);
-        auto fetch = [&type_object, &typeName](const auto& entries) -> bool
-        {
-            for (const auto& entry : entries)
-            {
-                for (const auto& info : entry.second)
-                {
-                    if (info.type_name.to_string() != typeName)
-                    {
-                        continue;
-                    }
-                    const auto& ti = info.type_information.type_information;
-                    const auto& tid =
-                            (xtypes::TK_NONE != ti.complete().typeid_with_size().type_id()._d())
-                            ? ti.complete().typeid_with_size().type_id()
-                            : ti.minimal().typeid_with_size().type_id();
-                    return RETCODE_OK == DomainParticipantFactory::get_instance()
-                                    ->type_object_registry().get_type_object(tid, type_object);
-                }
-            }
-            return false;
-        };
-        if (!fetch(seen_) && !fetch(seenReaders_))
-        {
-            return false;  // 类型未发现或 TypeObject 未就绪
-        }
+        return false;  // 类型未发现或 TypeObject 未就绪
     }
     // 锁外重建 DynamicType 并取默认值样本序列化为 JSON 示例（不注册类型不建订阅，纯类型内省）
     auto dyn_type = DynamicTypeBuilderFactory::get_instance()->create_type_w_type_object(
@@ -1255,6 +1268,214 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
     {
         out = os.str();
     }
+    DynamicDataFactory::get_instance()->delete_data(data);
+    return ok;
+}
+
+bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string& json,
+        std::string& error, uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    error.clear();
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            error = "debug node not created";
+            return false;  // 未入域
+        }
+    }
+    // ① 发现收敛：类型名 + 订阅者数快照稳定（订阅者不再新增）
+    std::string typeName;
+    size_t publisherCount = 0;
+    size_t subscriptionCount = 0;
+    if (!waitForTopicInfoStable(topicName, typeName, publisherCount, subscriptionCount,
+                stableRounds, intervalMs))
+    {
+        error = "topic [" + topicName + "] not found";
+        return false;
+    }
+    // ② 类型重建 + JSON 解析（解析失败不建任何发布实体）
+    xtypes::TypeObject type_object;
+    if (!fetchTypeObject(typeName, type_object))
+    {
+        error = "type object for [" + typeName + "] not available";
+        return false;
+    }
+    auto dyn_type = DynamicTypeBuilderFactory::get_instance()->create_type_w_type_object(
+                type_object)->build();
+    if (dyn_type == nullptr)
+    {
+        error = "type rebuild failed for [" + typeName + "]";
+        return false;
+    }
+    // json_deserialize 要求传入空引用（内部自行分配填充样本），不能预 create_data
+    DynamicData::_ref_type data;
+    if (RETCODE_OK != json_deserialize(json, dyn_type, DynamicDataJsonFormat::EPROSIMA, data))
+    {
+        error = "invalid json for type [" + typeName + "]";
+        return false;
+    }
+    // ③ 临时发布链：注册类型 + topic/publisher/datawriter（QoS 最大兼容：请求 ≤ 提供）
+    TypeSupport ts(new DynamicPubSubType(dyn_type));
+    if (RETCODE_OK != ts.register_type(participant_))
+    {
+        DynamicDataFactory::get_instance()->delete_data(data);
+        error = "register type [" + typeName + "] failed";
+        return false;
+    }
+    Topic* topic = participant_->create_topic(topicName, ts.get_type_name(), TOPIC_QOS_DEFAULT);
+    Publisher* publisher = topic != nullptr ?
+        participant_->create_publisher(PUBLISHER_QOS_DEFAULT) : nullptr;
+    DataWriterQos wqos;
+    wqos.reliability().kind = RELIABLE_RELIABILITY_QOS;
+    wqos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
+    DataWriter* writer = publisher != nullptr ?
+        publisher->create_datawriter(topic, wqos) : nullptr;
+    if (writer == nullptr)
+    {
+        DynamicDataFactory::get_instance()->delete_data(data);
+        if (publisher != nullptr)
+        {
+            participant_->delete_publisher(publisher);
+        }
+        if (topic != nullptr)
+        {
+            participant_->delete_topic(topic);
+        }
+        error = "create datawriter failed";
+        return false;
+    }
+    // 匹配收敛：matched 计数连续 stableRounds 轮不变（无订阅者恒 0 也收敛照发）
+    uint32_t unchanged = 0;
+    int32_t lastMatched = -1;
+    while (unchanged < stableRounds)
+    {
+        PublicationMatchedStatus status;
+        if (RETCODE_OK != writer->get_publication_matched_status(status))
+        {
+            break;  // 状态查询失败：放弃收敛等待，直接发布（尽力而为）
+        }
+        unchanged = (status.current_count == lastMatched) ? unchanged + 1 : 1;
+        lastMatched = status.current_count;
+        if (unchanged < stableRounds)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        }
+    }
+    // 匹配收敛后校验：枚举临时 writer 实际匹配的订阅端 GUID 集，与发现缓存中该主题的
+    // RELIABLE 订阅者逐个比对——缓存里有订阅者却未出现在匹配集（订阅者在匹配建立前已
+    // 挂起或异常退出，EDP 不可达，wait_for_all_acked 无法发现它们）则不发布、如实报失败，
+    // 避免"订阅者收不到却报成功"。自身订阅链路 reader 的 intra-participant 匹配不影响
+    // 集合比对；BEST_EFFORT 订阅者不参与 ack，不纳入比对；离线清理保证正常退出的订阅
+    // 者已移出缓存不误报；异常死亡在 lease 过期前的窗口内可能误报，重试即可。枚举失败
+    // （get_matched_subscriptions 非 OK）视为匹配情况未知，放弃校验仍尽力而为发布。
+    std::vector<rtps::GUID_t> expectGuids{};
+    {
+        std::lock_guard<std::mutex> lock(seenMtx_);
+        auto cached = seenReaders_.find(topicName);
+        if (cached != seenReaders_.end())
+        {
+            for (const auto& rd : cached->second)
+            {
+                if (RELIABLE_RELIABILITY_QOS == rd.reliability.kind)
+                {
+                    expectGuids.push_back(rd.guid);
+                }
+            }
+        }
+    }
+    bool subscriberMissing = false;
+    if (!expectGuids.empty())
+    {
+        std::vector<InstanceHandle_t> handles;
+        if (RETCODE_OK == writer->get_matched_subscriptions(handles))
+        {
+            for (const auto& guid : expectGuids)
+            {
+                bool found = false;
+                for (const auto& handle : handles)
+                {
+                    SubscriptionBuiltinTopicData matched;
+                    if (RETCODE_OK == writer->get_matched_subscription_data(matched, handle) &&
+                            matched.guid == guid)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    subscriberMissing = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (subscriberMissing)
+    {
+        error = "subscribers exist but not all matched (suspended or offline)";
+        publisher->delete_datawriter(writer);
+        participant_->delete_publisher(publisher);
+        participant_->delete_topic(topic);
+        DynamicDataFactory::get_instance()->delete_data(data);
+        return false;
+    }
+    // ④ write 恰一次 + ack 自适应确认
+    // DynamicPubSubType 约定 void* 指向 DynamicData::_ref_type（智能指针地址，非裸指针，
+    // 见源码 calculate_serialized_size/serialize 的 static_cast），传 &data 而非 data.get()
+    bool ok = RETCODE_OK == writer->write(&data);
+    if (ok)
+    {
+        // 发现缓存该主题存在 RELIABLE 订阅者才启用 ack（仅 RELIABLE reader 参与 ackNack；
+        // 全 BEST_EFFORT 或无订阅者退化尽力而为）
+        bool ackUsable = false;
+        {
+            std::lock_guard<std::mutex> lock(seenMtx_);
+            auto it = seenReaders_.find(topicName);
+            if (it != seenReaders_.end())
+            {
+                for (const auto& info : it->second)
+                {
+                    if (RELIABLE_RELIABILITY_QOS == info.reliability.kind)
+                    {
+                        ackUsable = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (ackUsable)
+        {
+            // RELIABLE 订阅者全部确认收到才算成功；超时有限不卡死，如实报失败
+            static const Duration_t kAckTimeout{2, 0};
+            if (RETCODE_OK != writer->wait_for_acknowledgments(kAckTimeout))
+            {
+                error = "not all subscribers acknowledged";
+                ok = false;
+            }
+        }
+        else
+        {
+            // 退化方案 A：保底窗覆盖异步发送（BEST_EFFORT 送达无协议保证）
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        }
+    }
+    else
+    {
+        error = "write failed";
+    }
+    // 清理临时发布链（逆序：writer → publisher → topic；类型注册幂等不注销）
+    publisher->delete_datawriter(writer);
+    participant_->delete_publisher(publisher);
+    participant_->delete_topic(topic);
     DynamicDataFactory::get_instance()->delete_data(data);
     return ok;
 }
@@ -1282,6 +1503,33 @@ bool FastDDSDebugNode::onReaderDiscovered(const std::string& topicName,
     std::lock_guard<std::mutex> lock(seenMtx_);
     seenReaders_[topicName].push_back(info);
     return true;
+}
+
+// 发现线程回调入口：reader 离线（graceful dispose）按端点 GUID 从 seenReaders_ 同步移除，
+// 使 topicPub 的 matched==0 校验只对"缓存仍有记录却无一匹配"（挂起/异常死亡，EDP 不可达）
+// 生效——正常退出的订阅者已清出缓存，不会误报。仅拿 seenMtx_ 叶子锁（同上锁序防护）。
+bool FastDDSDebugNode::onReaderRemoved(const std::string& topicName,
+        const rtps::SubscriptionBuiltinTopicData& info)
+{
+    std::lock_guard<std::mutex> lock(seenMtx_);
+    auto it = seenReaders_.find(topicName);
+    if (it == seenReaders_.end())
+    {
+        return false;
+    }
+    for (auto eit = it->second.begin(); eit != it->second.end(); ++eit)
+    {
+        if (eit->guid == info.guid)
+        {
+            it->second.erase(eit);
+            if (it->second.empty())
+            {
+                seenReaders_.erase(it);
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 // 发现线程回调入口：新见 participant 缓存 GUID 前缀与名称（前缀仅作幂等去重与 nodeInfo

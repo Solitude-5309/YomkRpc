@@ -37,6 +37,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/interface_show", YomkRpcDebugService::interfaceShow);
     YomkInstallFunc("/interface_list", YomkRpcDebugService::interfaceList);
     YomkInstallFunc("/topic_example", YomkRpcDebugService::topicExample);
+    YomkInstallFunc("/topic_pub", YomkRpcDebugService::topicPub);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
@@ -231,6 +232,27 @@ YomkResponse YomkRpcDebugService::topicExample(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::topicPub(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugTopicPub, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicPub", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // 持锁执行发布（节点层内部：发现收敛→类型重建→匹配收敛→write 一次→ack 自适应确认；
+    // 失败原因透传调用方：not found / invalid json / not all subscribers acknowledged 等）
+    std::string error;
+    if (!node_->topicPub(p->msg.topicName, p->msg.json, error, p->msg.stableRounds, p->msg.intervalMs))
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicPub", "pub failed: ", error);
+        return YomkResponse(YomkResponse::eNo, error);
+    }
+    return YomkResponse(YomkResponse::eOk, "delivered");
 }
 
 YomkResponse YomkRpcDebugService::topicInfo(YomkPkgPtr pkg)

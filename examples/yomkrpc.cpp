@@ -59,6 +59,11 @@
  * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / JSON example
  * 发布载荷模板——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，填好字段值即可
  * 发布）；未发现主题报错退出。
+ * topic pub：按主题名发布一条 JSON 载荷消息（仅发一次）：节点层先发现收敛（类型名 +
+ * 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何发布实体），临时
+ * RELIABLE+TRANSIENT_LOCAL writer 匹配收敛后 write 一次；存在 RELIABLE 订阅者时以 ack
+ * 确认送达（未全部确认报错退出），全 BEST_EFFORT 或无订阅者退化尽力而为；未发现主题
+ * 报错退出。
  * topic hz：订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印
  * 消息），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
  * 相邻消息间隔均值倒数，Hz；min/max 为间隔极值，秒；std dev 为间隔总体标准差，秒；
@@ -121,6 +126,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc interface show [-d N | --domain N] [-w N | --wait N] <type-name>\n"
           "  yomkrpc interface list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc topic pub -e | --example [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
+          "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] <topic-name> <json>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -130,7 +136,7 @@ static void printUsage(std::ostream &os)
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
           "                      （默认 5，topic list、topic info、topic find、interface show、interface list、\n"
-          "                      topic pub -e、node list 与 node info 生效）\n"
+          "                      topic pub -e、topic pub、node list 与 node info 生效）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -151,6 +157,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc interface show YomkRpc::MString\n"
           "  yomkrpc interface list\n"
           "  yomkrpc topic pub -e hello_world\n"
+          "  yomkrpc topic pub hello_world '{\"data\":\"hi\"}'\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -718,6 +725,44 @@ static int runTopicPubExample(uint32_t domainId, const std::string &topicName, u
     return 0;
 }
 
+// topic pub 子命令：按主题名发布一条 JSON 载荷消息（仅发一次，查完即退）；调试节点内部
+// 依次：发现收敛（主题+订阅者数稳定）→ 类型重建 + JSON 解析 → 临时 RELIABLE writer 匹配
+// 收敛 → write 一次 → 存在 RELIABLE 订阅者时 ack 确认送达（超时报错），全 BEST_EFFORT 或
+// 无订阅者退化尽力而为（无 Ctrl+C 循环）
+static int runTopicPub(uint32_t domainId, const std::string &topicName, const std::string &json,
+        uint32_t waitRounds)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 收敛后发布一次（ack 自适应确认）；未发现/载荷不合法/未确认均报错退出
+    resp = YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, waitRounds, 200);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "topic pub failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    std::cout << "delivered to topic " << topicName << std::endl;
+
+    // 3. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同 print/list 不变式）
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
 // 连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空才列出，空名参与者
 // 跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出（无 Ctrl+C 循环，查完即退）
@@ -958,9 +1003,14 @@ int main(int argc, char *argv[])
     {
         return runTopicPubExample(domainId, pos[3], waitRounds);
     }
+    if (pos.size() == 4 && pos[0] == "topic" && pos[1] == "pub" &&
+            !pos[2].empty() && !pos[3].empty())
+    {
+        return runTopicPub(domainId, pos[2], pos[3], waitRounds);
+    }
     if (pos.size() >= 2 && pos[0] == "topic" && pos[1] == "pub")
     {
-        std::cerr << "yomkrpc: topic pub 仅支持 -e | --example 示例模式\n";
+        std::cerr << "yomkrpc: topic pub 支持 -e | --example <主题名>（示例模式）或 <主题名> <json>（发布模式）\n";
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "hz" && !pos[2].empty())
     {

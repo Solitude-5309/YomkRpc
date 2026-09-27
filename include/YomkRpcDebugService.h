@@ -29,6 +29,7 @@ private:
     YomkResponse interfaceShow(YomkPkgPtr pkg);
     YomkResponse interfaceList(YomkPkgPtr pkg);
     YomkResponse topicExample(YomkPkgPtr pkg);
+    YomkResponse topicPub(YomkPkgPtr pkg);
     YomkResponse listNodes(YomkPkgPtr pkg);
     YomkResponse nodeInfo(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
@@ -125,6 +126,17 @@ struct DDSDebugTopicExample
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
+// topic_pub 请求负载：按主题名发布一条 JSON 载荷消息（仅发一次；节点层先发现收敛+
+// 匹配收敛再发布，存在 RELIABLE 订阅者时以 wait_for_acknowledgments 确认送达，全
+// BEST_EFFORT 或无订阅者退化尽力而为；收敛参数 0 值由节点层钳制为默认）
+struct DDSDebugTopicPub
+{
+    std::string topicName;  // 目标主题名（须已在域内被发现）
+    std::string json;       // 发布载荷（JSON 格式，与 topic_example 输出模板同构）
+    uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
+    uint32_t intervalMs;    // 快照轮询间隔毫秒
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
@@ -138,3 +150,4 @@ YomkMsg(DDSDebugFind, DDSDebugFind, msg)
 YomkMsg(DDSDebugInterfaceShow, DDSDebugInterfaceShow, msg)
 YomkMsg(DDSDebugInterfaceList, DDSDebugInterfaceList, msg)
 YomkMsg(DDSDebugTopicExample, DDSDebugTopicExample, msg)
+YomkMsg(DDSDebugTopicPub, DDSDebugTopicPub, msg)
