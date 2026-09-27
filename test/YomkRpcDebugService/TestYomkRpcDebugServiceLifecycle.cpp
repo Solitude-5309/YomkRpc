@@ -16,6 +16,7 @@
  *       count 为 0 无清单段）→ list_topics types 模式唯一行断言（主题名 [类型名]）→
  *       topic_find 按类型名反查命中唯一行与未匹配类型 eNo → interface_show 按类型名输出
  *       IDL 结构（三行逐行断言 struct 头/四空格缩进字段行/结尾）与未发现类型 eNo →
+ *       interface_list 类型名去重清单命中唯一行与空域未发现 eNo →
  *       node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
  *   A-2 domainId 边界：有效域 0 与上界 232（eOk；真实创建 participant 后即删）。
@@ -107,6 +108,13 @@ int main()
           "list_topics（入域无 writer，单次快照）→ eOk（空列表路径）");
     YomkUnPackPkg(listed.m_data, StringArray, arr);
     CHECK(arr != nullptr && arr->d.empty(), "list_topics 返回包可解包为空 StringArray");
+
+    // interface_list：同域无任何类型，空集按 find 族语义 eNo（收敛参数链路同直通节点层）
+    auto ifaceListMiss = svc->invoke("/interface_list", YomkMkPtr(
+                            DDSDebugInterfaceList, DDSDebugInterfaceList{1, 50}));
+    CHECK(ifaceListMiss.m_status == YomkResponse::eNo &&
+          ifaceListMiss.m_msg.find("no interface types discovered") != std::string::npos,
+          "interface_list 空域 → eNo no interface types discovered（find 族语义）");
 
     // list_nodes：ctest 串行执行，此刻域 200 无其他参与者；调试节点自身不在自身发现缓存中，
     // stableRounds=1 单次快照即得空列表（空列表合法：域内暂无命名参与者，语义同 list_topics 空域）
@@ -360,6 +368,20 @@ int main()
                 CHECK(ifaceMiss.m_status == YomkResponse::eNo &&
                           ifaceMiss.m_msg.find("type [Not::Exist] not found") != std::string::npos,
                       "interface_show 未发现类型 → eNo type [Not::Exist] not found（find 族语义）");
+
+                // interface_list：hit 域内唯一类型名（去重后单行，interface show 配套导航）
+                auto ifaceListHit = svc->invoke("/interface_list", YomkMkPtr(
+                    DDSDebugInterfaceList, DDSDebugInterfaceList{1, 50}));
+                CHECK(ifaceListHit.m_status == YomkResponse::eOk && ifaceListHit.m_data != nullptr,
+                      "interface_list 命中 → eOk（发现缓存收集类型名）");
+                YomkUnPackPkg(ifaceListHit.m_data, StringArray, ifaceListArr);
+                CHECK(ifaceListArr != nullptr && ifaceListArr->d.size() == 1 &&
+                          ifaceListArr->d[0] == "YomkRpc::MString",
+                      "interface_list 去重清单唯一行 == YomkRpc::MString");
+                for (const auto &l : ifaceListArr->d)
+                {
+                    std::cout << "[OBSERVE] interface list: " << l << std::endl;
+                }
             }
 
             // 清理：writer → topic → publisher → participant（同 TestFastDDSDebugNode 计数用例顺序）

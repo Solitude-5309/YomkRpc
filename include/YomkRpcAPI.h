@@ -139,6 +139,15 @@
         "/YomkRpcDebugService/interface_show",                               \
         YomkMkPtr(DDSDebugInterfaceShow, DDSDebugInterfaceShow{typeName, stableRounds, intervalMs}))
 
+// 列出发现缓存中出现的全部数据类型名（去重字典序排序，每行一个，interface show 的配套导航；
+// 独立收敛，同 interface_show）：轮询发现缓存快照，连续 stableRounds 次不变即返回（0 值钳制
+// 为默认）。命中返回 StringArray 多行；域内无任何类型返回错误（no interface types discovered）。
+// 须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_INTERFACE_LIST(stableRounds, intervalMs)              \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/interface_list",                               \
+        YomkMkPtr(DDSDebugInterfaceList, DDSDebugInterfaceList{stableRounds, intervalMs}))
+
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
 // stableRounds=1 即单次快照免等待；最长阻塞约 stableRounds*intervalMs）。返回 StringArray，

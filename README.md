@@ -287,6 +287,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic find <类型名>` | 按数据类型名反查域内主题列表（每行一个主题名，精确匹配，对齐 ros2 topic find） |
 | `yomkrpc topic hz <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz） |
 | `yomkrpc interface show <类型名>` | 按类型名输出该类型的 IDL 结构描述（struct 头 + 字段行 + 结尾） |
+| `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -535,6 +536,17 @@ struct YomkRpc::MString {
 ```
 
 字段类型名为 ROS2/IDL4 风格映射（bool/int32/uint32/float32/string 等；有界 `string<N>`；`sequence<T>`/`sequence<T, N>`；数组 `T[N]`；嵌套 struct/enum/alias 显示成员子类型名不递归展开）。仅支持顶层为 struct 的类型；未发现类型报错退出（可发现类型名拼写错误）；`-w` 同其他查询生效。
+
+#### interface list：列出已发现的全部类型名
+
+`yomkrpc interface list` 列出发现缓存中出现的全部数据类型名（去重、字典序排序，每行一个；同类型多主题仅出一行），是 `interface show` 的配套导航——先 list 拿到类型名全集，再 show 查看具体结构：
+
+```bash
+$ yomkrpc interface list
+YomkRpc::MString
+```
+
+域内无任何类型报错退出（find 族语义）；`-w` 收敛判定同其他查询生效。
 
 ### 6.5 列出域内节点（yomkrpc node list）
 

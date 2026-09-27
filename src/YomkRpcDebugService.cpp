@@ -10,6 +10,7 @@
 
 #include "FastDDSDebugNode.h"
 
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/topic_info", YomkRpcDebugService::topicInfo);
     YomkInstallFunc("/topic_find", YomkRpcDebugService::topicFind);
     YomkInstallFunc("/interface_show", YomkRpcDebugService::interfaceShow);
+    YomkInstallFunc("/interface_list", YomkRpcDebugService::interfaceList);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
     YomkInstallFunc("/delete_node", YomkRpcDebugService::deleteNode);
@@ -175,6 +177,38 @@ YomkResponse YomkRpcDebugService::interfaceShow(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "type [" + p->msg.typeName + "] not found");
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::interfaceList(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugInterfaceList, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::interfaceList", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // 持锁取发现缓存全集快照（listTopics 已按主题名排序），收集非空类型名去重排序
+    // （std::set 保证字典序，同类型多主题仅出一行）；域内无任何类型按查询失败处理
+    // （find 族语义），便于调用方发现域号或收敛参数配置错误
+    std::vector<std::pair<std::string, std::string>> pairs;
+    node_->listTopics(pairs, p->msg.stableRounds, p->msg.intervalMs);
+    std::set<std::string> typeNames;
+    for (const auto& entry : pairs)
+    {
+        if (!entry.second.empty())
+        {
+            typeNames.insert(entry.second);
+        }
+    }
+    if (typeNames.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::interfaceList", "no interface types discovered");
+        return YomkResponse(YomkResponse::eNo, "no interface types discovered");
+    }
+    return YomkResponse(YomkResponse::eOk, "ok",
+                        YomkMkPtr(StringArray, std::vector<std::string>(typeNames.begin(), typeNames.end())));
 }
 
 YomkResponse YomkRpcDebugService::topicInfo(YomkPkgPtr pkg)

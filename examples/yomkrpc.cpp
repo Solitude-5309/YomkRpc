@@ -48,6 +48,8 @@
  * interface show：按数据类型名输出该类型的 IDL 结构描述（类型名精确匹配，FastDDS
  * 无原生类型文本化能力，自设计对齐主流 schema 源语法形态：struct 头 + 四空格缩进字段行
  * + 结尾 };）；未发现类型报错退出（可发现类型名拼写错误）。
+ * interface list：列出发现缓存中出现的全部数据类型名（去重字典序排序，每行一个，
+ * interface show 的配套导航）；域内无任何类型报错退出（find 族语义）。
  * topic hz：订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印
  * 消息），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
  * 相邻消息间隔均值倒数，Hz；min/max 为间隔极值，秒；std dev 为间隔总体标准差，秒；
@@ -108,6 +110,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>\n"
           "  yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>\n"
           "  yomkrpc interface show [-d N | --domain N] [-w N | --wait N] <type-name>\n"
+          "  yomkrpc interface list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -116,7 +119,8 @@ static void printUsage(std::ostream &os)
           "  -d N, --domain N    DDS 域号（0-232），临时指定，不写环境变量；未指定时读\n"
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
           "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
-          "                      （默认 5，topic list、topic info、topic find、interface show、node list 与 node info 生效）\n"
+          "                      （默认 5，topic list、topic info、topic find、interface show、interface list、\n"
+          "                      node list 与 node info 生效）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -135,6 +139,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic find YomkRpc::MString\n"
           "  yomkrpc topic hz hello_world\n"
           "  yomkrpc interface show YomkRpc::MString\n"
+          "  yomkrpc interface list\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -602,6 +607,53 @@ static int runInterfaceShow(uint32_t domainId, const std::string &typeName, uint
     return 0;
 }
 
+// interface list 子命令：列出发现缓存中出现的全部数据类型名（去重字典序排序，每行一个，
+// interface show 的配套导航；同类型多主题仅出一行）；域内无任何类型报错退出（find 族语义）。
+// 无 Ctrl+C 循环，查完即退
+static int runInterfaceList(uint32_t domainId, uint32_t waitRounds)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcDebugService);
+
+    // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    auto resp = YOMKRPC_DEBUG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create debug node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 独立收敛收集发现缓存中的全部类型名
+    resp = YOMKRPC_DEBUG_INTERFACE_LIST(waitRounds, 200);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "interface list failed: ", resp.m_msg);
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    YomkUnPackPkg(resp.m_data, StringArray, arr);
+    if (arr == nullptr)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "interface list failed: unexpected response payload");
+        YOMKRPC_DEBUG_QUIT();
+        return 1;
+    }
+    for (const auto &line : arr->d)
+    {
+        std::cout << line << "\n";
+    }
+    std::cout.flush();
+
+    // 3. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同 print/list 不变式）
+    resp = YOMKRPC_DEBUG_QUIT();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
 // 连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空才列出，空名参与者
 // 跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出（无 Ctrl+C 循环，查完即退）
@@ -721,7 +773,7 @@ int main(int argc, char *argv[])
     // ---- 参数解析：-h/--help 即刻退出；-d/--domain 与 -w/--wait 可选；位置参数 ----
     uint32_t domainId = 0;
     bool hasDomainId = false;
-    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、topic find、interface show、node list 与 node info 生效）
+    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、topic find、interface show、interface list、node list 与 node info 生效）
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
@@ -832,6 +884,10 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "interface" && pos[1] == "show" && !pos[2].empty())
     {
         return runInterfaceShow(domainId, pos[2], waitRounds);
+    }
+    if (pos.size() == 2 && pos[0] == "interface" && pos[1] == "list")
+    {
+        return runInterfaceList(domainId, waitRounds);
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "hz" && !pos[2].empty())
     {

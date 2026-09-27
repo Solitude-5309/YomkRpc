@@ -27,6 +27,7 @@ private:
     YomkResponse topicInfo(YomkPkgPtr pkg);
     YomkResponse topicFind(YomkPkgPtr pkg);
     YomkResponse interfaceShow(YomkPkgPtr pkg);
+    YomkResponse interfaceList(YomkPkgPtr pkg);
     YomkResponse listNodes(YomkPkgPtr pkg);
     YomkResponse nodeInfo(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
@@ -106,6 +107,14 @@ struct DDSDebugInterfaceShow
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
+// interface_list 请求负载：列出发现缓存中出现的全部数据类型名（去重排序，interface show
+// 的配套导航；独立收敛参数，0 值由节点层钳制为默认）
+struct DDSDebugInterfaceList
+{
+    uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
+    uint32_t intervalMs;    // 快照轮询间隔毫秒
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
@@ -117,3 +126,4 @@ YomkMsg(DDSNodeList, DDSNodeList, msg)
 YomkMsg(DDSNodeInfo, DDSNodeInfo, msg)
 YomkMsg(DDSDebugFind, DDSDebugFind, msg)
 YomkMsg(DDSDebugInterfaceShow, DDSDebugInterfaceShow, msg)
+YomkMsg(DDSDebugInterfaceList, DDSDebugInterfaceList, msg)
