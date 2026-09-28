@@ -1,5 +1,7 @@
 #include "FastDDSDebugNode.h"
 
+#include "YomkRpcDebugService.h" // yomk::g_debugPubStop（topic pub 持续发布停止标志，API 头内联定义）
+
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -1307,8 +1309,18 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
 }
 
 bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string& json,
-        std::string& error, uint32_t stableRounds, uint32_t intervalMs)
+        std::string& error, uint32_t stableRounds, uint32_t intervalMs,
+        uint32_t repeatIntervalMs, uint32_t* total, uint32_t* failed)
 {
+    if (total != nullptr)
+    {
+        *total = 0;
+    }
+    if (failed != nullptr)
+    {
+        *failed = 0;
+    }
+    yomk::debugPubReset();  // 复位上次会话残留的停止请求（此后 SIGINT handler 的置位才对本轮生效）
     if (stableRounds == 0)
     {
         stableRounds = kDefaultStableRounds;
@@ -1505,6 +1517,52 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
     else
     {
         error = "write failed";
+    }
+    // ⑤ 持续发布模式（repeatIntervalMs>0）：首轮校验（含 ack 确认）成功后保留发布链按周期
+    // 重复 write，尽力而为（write 失败仅计数不返回；RELIABLE 的 NACK 重传由协议自主完成，
+    // 不再同步等 ack），直到 yomk::g_debugPubStop 置位（CLI Ctrl+C 经 debugPubStop，无锁
+    // store）才退出并落到底部清理。total/failed 含首轮 1 条。发布节拍为绝对时刻网格（对齐
+    // ros2 rcl_timer：next 基于首发时刻按周期累加而非 now，平均频率精确贴合 -r 标称值）。
+    if (ok && repeatIntervalMs > 0)
+    {
+        uint32_t sent = 1;
+        uint32_t failCount = 0;
+        const auto interval = std::chrono::milliseconds(repeatIntervalMs);
+        auto next = std::chrono::steady_clock::now() + interval;  // 首个网格点 = 首发时刻 + 周期
+        while (!yomk::g_debugPubStop.load())
+        {
+            std::this_thread::sleep_until(next);
+            if (yomk::g_debugPubStop.load())
+            {
+                break;  // 睡眠中收到停止信号：本轮不再发送
+            }
+            if (RETCODE_OK == writer->write(&data))
+            {
+                ++sent;
+                std::cout << "publishing #" << sent << " to topic " << topicName << std::endl;
+            }
+            else
+            {
+                ++failCount;
+            }
+            // 绝对网格推进（对齐 rcl_timer）：next 按首发时刻 + k*周期 累加，write 耗时与
+            // 过睡不累积进周期；单轮延迟超过周期（下一网格点已过期）时跳到未来最近网格
+            // 点，不连续追发、防止唤醒风暴
+            next += interval;
+            const auto now = std::chrono::steady_clock::now();
+            if (next <= now)
+            {
+                next += interval * (1 + (now - next) / interval);
+            }
+        }
+        if (total != nullptr)
+        {
+            *total = sent;
+        }
+        if (failed != nullptr)
+        {
+            *failed = failCount;
+        }
     }
     // 清理临时发布链（逆序：writer → publisher → topic；类型注册幂等不注销）
     publisher->delete_datawriter(writer);

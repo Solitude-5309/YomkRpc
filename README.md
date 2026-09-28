@@ -290,8 +290,8 @@ ExampleYomkRpcPub
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
 | `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc topic pub -ef <主题名> [-o 目录]` | 按主题名导出消息描述 JSON 文件（内容即默认值模板 JSON 本身，多行缩进可直接 `$(cat)` 填进发布命令；仅发描述不发布） |
-| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布一条 JSON 载荷消息（仅发一次，收敛 + ack 确认送达） |
-| `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；仅发一次，收敛 + ack 确认送达） |
+| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省仅发一次，收敛 + ack 确认送达；`-r N` 按 N Hz 持续发布，Ctrl+C 停止并输出统计） |
+| `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省仅发一次，`-r N` 持续发布） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -571,9 +571,9 @@ yomkrpc topic pub hello_world '{"data":""}'
 
 未发现主题报错退出（info 族语义）；`-w` 收敛判定同其他查询生效。
 
-#### topic pub：向主题发布一条消息（JSON 载荷，仅发一次）
+#### topic pub：向主题发布消息（JSON 载荷，缺省仅发一次）
 
-`yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存），载荷可直接给 JSON 参数，或经 `-f/--file` 从文件整体读取（`yomkrpc topic pub <主题名> -f <文件>`）。发布链路：
+`yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存），载荷可直接给 JSON 参数，或经 `-f/--file` 从文件整体读取（`yomkrpc topic pub <主题名> -f <文件>`）；追加 `-r/--rate N`（单位 Hz）则首轮发布成功后按该频率持续重发（见下文持续发布模式）。发布链路：
 
 1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，`-w` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出；
 2. **类型重建 + 载荷解析**：由发现的类型重建 DynamicType，`json_deserialize` 解析载荷（与 `topic pub -e` 输出的 example 命令中的 JSON 格式对称）；解析失败报错退出，不建任何发布实体；
@@ -600,9 +600,16 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 # 编辑文件改字段值后按文件发布（同一发布链路，多行缩进 JSON 直接可发）
 $ yomkrpc topic pub hello_world -f hello_world_msg_2026-09-28-12-14-42-626.json
 delivered to topic hello_world
+
+# 持续发布：首轮校验发布后按 10 Hz 周期重发，Ctrl+C 停止并输出统计
+$ yomkrpc topic pub -r 10 hello_world '{"data":"hello yomkrpc"}'
+publishing to topic "hello_world" at 10.000000 Hz, press Ctrl+C to stop
+publishing #2 to topic hello_world
+publishing #3 to topic hello_world
+^Cpublished total=17 failed=0 to topic hello_world
 ```
 
-非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-w` 收敛判定同其他查询生效。
+非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-r/--rate` 频率非法（非数值或 ≤0）报错退出（`非法频率 "..."`），`-r` 后缺参数同用法错误退出；`-w` 收敛判定同其他查询生效。
 
 ack 确认的覆盖语义（端到端实测校准）：
 
@@ -612,6 +619,16 @@ ack 确认的覆盖语义（端到端实测校准）：
 - 订阅者在发布端启动前已离线/挂起（发布端从未发现过该订阅者）→ 发布端无从期待，照常返回成功——这是 DDS 发现机制的客观边界，任何发布端机制均不可达。
 
 BEST_EFFORT 订阅者不参与 ack 与 matched 校验，始终尽力而为。
+
+#### topic pub 持续发布模式（-r/--rate N）
+
+两种发布形态（JSON 直发 / `-f` 文件）均支持 `-r N | --rate N`（单位 Hz，支持小数如 `-r 0.5`）：
+
+- **首轮完整强校验**：与单次发布完全相同（发现收敛 → 类型重建 → 匹配收敛 → matched 校验 → write → ack 确认），失败即报错退出——发布开始前确认订阅者在场且可达；
+- **周期重发尽力而为**：首轮成功后保留发布链，按 N Hz 周期重复 write（RELIABLE 的 NACK 重传由协议自主完成，不再同步等 ack）；每轮输出 `publishing #N to topic <主题名>` 进度；write 失败仅计入 failed 不中断（订阅者中途离场不停止发布，重新上线后可继续收到后续数据）；
+- **绝对节拍网格**：每轮唤醒时刻按 `首发时刻 + k×间隔` 的绝对网格调度（sleep_until），单轮过睡/唤醒延迟由下一轮自动变短补偿，平均频率精确贴合 N Hz；单轮调度毛刺超过周期时网格重锚到未来最近节拍点（不追发，与 rcl_timer overrun 处理一致）；
+- **Ctrl+C 优雅停止**：SIGINT 置停止标志（async-signal-safe 无锁原子），发布循环退出并清理发布链，输出统计 `published total=N failed=M to topic <主题名>`（total 含首轮），退出码 0；
+- 频率换算：发送间隔 = round(1000/rate) ms（下限 1ms）；省略 `-r` 行为与旧版完全一致（仅发一次）。
 
 #### topic pub -ef：导出消息描述文件（与发布输入对称）
 

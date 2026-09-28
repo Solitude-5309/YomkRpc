@@ -71,6 +71,12 @@ echo "-- 日志目录: ${LOG_ROOT}"
 # thirdparty/ 与 msg/ 全部路径级忽略——cppcheck 会沿 include 链把告警归到被包含的头文件，
 # 抑制后告警只可能来自 src/include/examples 自有源码。
 if [ ${RUN_CPPCHECK} -eq 1 ]; then
+    # 仓库 API 头以 <YomkRpc/...> 引用但源码树无 YomkRpc/ 目录层级，直接解析会落到安装
+    # 前缀的安装头（未同步时宏/结构签名不一致即误报 preprocessorErrorDirective）。扫描前
+    # 把仓库头镜像为 <镜像目录>/YomkRpc/ 层级并置于 -I 首位，保证解析到仓库最新头。
+    CPPCHECK_INC_MIRROR="${REPO_DIR}/.cache/cppcheck_inc"
+    mkdir -p "${CPPCHECK_INC_MIRROR}/YomkRpc"
+    cp "${REPO_DIR}/include/"*.h "${CPPCHECK_INC_MIRROR}/YomkRpc/"
     # 检测文件清单：先明示扫什么、共多少个，再进入扫描
     echo "-- cppcheck 检测文件清单（src include examples，排除 build/ 生成物）:"
     mapfile -t CPPCHECK_FILES < <(find "${REPO_DIR}/src" "${REPO_DIR}/include" "${REPO_DIR}/examples" \
@@ -96,6 +102,7 @@ if [ ${RUN_CPPCHECK} -eq 1 ]; then
     cppcheck --enable=warning,performance,portability --std=c++17 --language=c++ \
         --verbose -j"$(nproc)" \
         --inline-suppr --suppress=missingIncludeSystem --suppress=toomanyconfigs \
+        -I "${CPPCHECK_INC_MIRROR}" \
         -I "${REPO_DIR}/include" \
         -I "${REPO_DIR}/thirdparty/Fast-DDS-3.6.1/install/include" \
         -I "${YOMK_PREFIX_PATH:-/opt/yomk}/include" \

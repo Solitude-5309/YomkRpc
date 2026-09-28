@@ -271,12 +271,23 @@ YomkResponse YomkRpcDebugService::topicPub(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "debug node not created");
     }
     // 持锁执行发布（节点层内部：发现收敛→类型重建→匹配收敛→write 一次→ack 自适应确认；
-    // 失败原因透传调用方：not found / invalid json / not all subscribers acknowledged 等）
+    // 失败原因透传调用方：not found / invalid json / not all subscribers acknowledged 等）；
+    // repeatIntervalMs>0 为持续发布模式：首轮校验后节点层周期重复发送直到 g_debugPubStop
+    // 置位（CLI Ctrl+C），统计 total/failed（含首轮）经 StringArray 随响应带回
     std::string error;
-    if (!node_->topicPub(p->msg.topicName, p->msg.json, error, p->msg.stableRounds, p->msg.intervalMs))
+    uint32_t total = 0;
+    uint32_t failed = 0;
+    if (!node_->topicPub(p->msg.topicName, p->msg.json, error, p->msg.stableRounds,
+                p->msg.intervalMs, p->msg.repeatIntervalMs, &total, &failed))
     {
         YOMK_ERROR_TAG("YomkRpcDebugService::topicPub", "pub failed: ", error);
         return YomkResponse(YomkResponse::eNo, error);
+    }
+    if (p->msg.repeatIntervalMs > 0)
+    {
+        return YomkResponse(YomkResponse::eOk, "delivered",
+                YomkMkPtr(StringArray, std::vector<std::string>{
+                        "total=" + std::to_string(total), "failed=" + std::to_string(failed)}));
     }
     return YomkResponse(YomkResponse::eOk, "delivered");
 }

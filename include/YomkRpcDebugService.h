@@ -5,6 +5,7 @@
 // 机制取回远端 TypeObject 动态建订阅，消息以 JSON 文本投递给用户回调，零消息类型依赖）。
 #include <YomkServer/YomkAPI.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -41,6 +42,23 @@ private:
     std::unique_ptr<FastDDSDebugNode> node_;
     std::mutex mtx_;  // 串行化 node_ 的增删查改与节点入口调用
 };
+
+// topic pub 持续发布停止标志：发布循环（FastDDSDebugNode::topicPub 内部，repeatIntervalMs>0
+// 时）只读，SIGINT 处理函数（CLI onSignal）经 debugPubStop 写——atomic 无锁 store 保证
+// async-signal-safe（不可经 YOMK_REQUEST 停止：请求链路含锁与内存分配，handler 内禁用）。
+// 调用方在发起持续发布前应先 debugPubReset 复位，避免上次会话残留置位导致循环秒退。
+namespace yomk
+{
+inline std::atomic<bool> g_debugPubStop{false};
+inline void debugPubStop()
+{
+    g_debugPubStop.store(true);
+}
+inline void debugPubReset()
+{
+    g_debugPubStop.store(false);
+}
+}  // namespace yomk
 
 // 调试输出回调：每条消息投递一次格式化 JSON 文本，由 /topic_print 调用方自定义（服务层不打印）。
 // 回调在 DDS 数据接收线程被调用，须线程安全且快速返回。
@@ -136,15 +154,19 @@ struct DDSDebugTopicMsg
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
-// topic_pub 请求负载：按主题名发布一条 JSON 载荷消息（仅发一次；节点层先发现收敛+
+// topic_pub 请求负载：按主题名发布 JSON 载荷消息（首轮完整强校验：节点层先发现收敛+
 // 匹配收敛再发布，存在 RELIABLE 订阅者时以 wait_for_acknowledgments 确认送达，全
-// BEST_EFFORT 或无订阅者退化尽力而为；收敛参数 0 值由节点层钳制为默认）
+// BEST_EFFORT 或无订阅者退化尽力而为；收敛参数 0 值由节点层钳制为默认）。repeatIntervalMs
+// >0 为持续发布模式：首轮校验成功后保留发布链按该周期重复 write（尽力而为：write 失败仅
+// 计数不返回，不再等 ack），直到停止标志 g_debugPubStop 置位（CLI Ctrl+C 经 debugPubStop）
+// 才退出并清理，发布条数统计经出参 total/failed 带回响应
 struct DDSDebugTopicPub
 {
     std::string topicName;  // 目标主题名（须已在域内被发现）
     std::string json;       // 发布载荷（JSON 格式，与 topic_example 输出模板同构）
     uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
     uint32_t intervalMs;    // 快照轮询间隔毫秒
+    uint32_t repeatIntervalMs = 0;  // 持续发布间隔毫秒；0=仅发一次（缺省兼容旧 4 字段聚合初始化）
 };
 
 // clang-format off

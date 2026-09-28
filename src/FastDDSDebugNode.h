@@ -163,7 +163,7 @@ public:
             std::string& json,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
-    // 向指定主题发布一次消息（唯一写入型操作，与查询类互不影响）：四阶段链路——
+    // 向指定主题发布消息（唯一写入型操作，与查询类互不影响）：四阶段链路——
     // ①发现收敛（同 topicInfo 路径：类型名 + 订阅者数快照连续 stableRounds 轮不变；未发现
     // 主题 false，error="topic [...] not found"）→ ②类型重建 + JSON 解析（json_deserialize
     // EPROSIMA 格式，与 topic pub -e 模板对称；失败 false，error="invalid json ..."，不建
@@ -173,14 +173,21 @@ public:
     // 恒 0 也收敛照发）→ ④write 恰一次 + ack 自适应确认：发现缓存该主题存在 RELIABLE 订阅者
     // 时 wait_for_acknowledgments(2s)，OK 才成功（全部 RELIABLE 订阅者已确认收到）、超时
     // false（error="not all subscribers acknowledged"）；全 BEST_EFFORT 或无订阅者则退化
-    // 尽力而为：intervalMs 保底窗后即成功（BEST_EFFORT 无 ack 协议）。成败均清理临时发布链
+    // 尽力而为：intervalMs 保底窗后即成功（BEST_EFFORT 无 ack 协议）。⑤repeatIntervalMs>0
+    // 持续发布：首轮校验成功后保留发布链按该周期重复 write（尽力而为：write 失败仅计入
+    // failed 不返回，不再等 ack），循环只读 yomk::g_debugPubStop（入口先 debugPubReset
+    // 复位残留），置位后落到底部清理。成败均清理临时发布链
     // （delete_datawriter/publisher/topic；类型注册幂等不注销）。未入域 false（error=
     // "debug node not created"）。0 值钳制默认 5 次/200ms；最长阻塞约
-    // 2*stableRounds*intervalMs + 2s（ack 可用时）。
+    // 2*stableRounds*intervalMs + 2s（ack 可用时）；持续模式再叠加用户 Ctrl+C 前的全部
+    // 间隔时长。total/failed 统计出参可空（仅持续模式回填；单次发布成功隐含 total=1）。
     bool topicPub(const std::string& topicName, const std::string& json,
             std::string& error,
             uint32_t stableRounds = kDefaultStableRounds,
-            uint32_t intervalMs = kDefaultIntervalMs);
+            uint32_t intervalMs = kDefaultIntervalMs,
+            uint32_t repeatIntervalMs = 0,
+            uint32_t* total = nullptr,
+            uint32_t* failed = nullptr);
 
 private:
     // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
