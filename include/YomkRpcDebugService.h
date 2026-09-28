@@ -29,6 +29,7 @@ private:
     YomkResponse interfaceShow(YomkPkgPtr pkg);
     YomkResponse interfaceList(YomkPkgPtr pkg);
     YomkResponse topicExample(YomkPkgPtr pkg);
+    YomkResponse topicMsg(YomkPkgPtr pkg);
     YomkResponse topicPub(YomkPkgPtr pkg);
     YomkResponse listNodes(YomkPkgPtr pkg);
     YomkResponse nodeInfo(YomkPkgPtr pkg);
@@ -126,6 +127,15 @@ struct DDSDebugTopicExample
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
+// topic_msg 请求负载：按主题名查询消息描述两要素（供导出消息描述文件；StringArray 恰
+// 2 行：d[0]=类型名、d[1]=紧凑 msg JSON；独立收敛参数，0 值由节点层钳制为默认）
+struct DDSDebugTopicMsg
+{
+    std::string topicName;  // 待查询主题名（精确匹配）
+    uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
+    uint32_t intervalMs;    // 快照轮询间隔毫秒
+};
+
 // topic_pub 请求负载：按主题名发布一条 JSON 载荷消息（仅发一次；节点层先发现收敛+
 // 匹配收敛再发布，存在 RELIABLE 订阅者时以 wait_for_acknowledgments 确认送达，全
 // BEST_EFFORT 或无订阅者退化尽力而为；收敛参数 0 值由节点层钳制为默认）
@@ -150,4 +160,5 @@ YomkMsg(DDSDebugFind, DDSDebugFind, msg)
 YomkMsg(DDSDebugInterfaceShow, DDSDebugInterfaceShow, msg)
 YomkMsg(DDSDebugInterfaceList, DDSDebugInterfaceList, msg)
 YomkMsg(DDSDebugTopicExample, DDSDebugTopicExample, msg)
+YomkMsg(DDSDebugTopicMsg, DDSDebugTopicMsg, msg)
 YomkMsg(DDSDebugTopicPub, DDSDebugTopicPub, msg)

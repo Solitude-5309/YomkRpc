@@ -153,6 +153,16 @@ public:
             std::vector<std::string>& lines,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
+    // 查询指定主题的消息描述两要素（独立收敛查询，供导出消息描述文件用）：收敛拿类型名
+    // （发现缓存按主题名查，未发现 false）→ 同类型重建 DynamicType 取默认值样本经
+    // json_serialize 生成紧凑 JSON 发布模板（与 json_deserialize 输入格式对称）。命中返回
+    // true 并填充 typeName 与 json；未发现主题或 TypeObject/类型重建不可用返回 false（未
+    // setDomainId 亦 false）。0 值钳制默认 5 次/200ms；最长阻塞约 stableRounds*intervalMs。
+    bool topicMsgJson(const std::string& topicName,
+            std::string& typeName,
+            std::string& json,
+            uint32_t stableRounds = kDefaultStableRounds,
+            uint32_t intervalMs = kDefaultIntervalMs);
     // 向指定主题发布一次消息（唯一写入型操作，与查询类互不影响）：四阶段链路——
     // ①发现收敛（同 topicInfo 路径：类型名 + 订阅者数快照连续 stableRounds 轮不变；未发现
     // 主题 false，error="topic [...] not found"）→ ②类型重建 + JSON 解析（json_deserialize

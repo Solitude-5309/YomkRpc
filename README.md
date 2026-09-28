@@ -289,6 +289,7 @@ ExampleYomkRpcPub
 | `yomkrpc interface show <类型名>` | 按类型名输出该类型的 IDL 结构描述（struct 头 + 字段行 + 结尾） |
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
 | `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
+| `yomkrpc topic pub -ef <主题名> [-o 目录]` | 按主题名导出消息描述 JSON 文件（内容即默认值模板 JSON 本身，多行缩进可直接 `$(cat)` 填进发布命令；仅发描述不发布） |
 | `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布一条 JSON 载荷消息（仅发一次，收敛 + ack 确认送达） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
@@ -604,6 +605,27 @@ ack 确认的覆盖语义（端到端实测校准）：
 - 订阅者在发布端启动前已离线/挂起（发布端从未发现过该订阅者）→ 发布端无从期待，照常返回成功——这是 DDS 发现机制的客观边界，任何发布端机制均不可达。
 
 BEST_EFFORT 订阅者不参与 ack 与 matched 校验，始终尽力而为。
+
+#### topic pub -ef：导出消息描述文件（与发布输入对称）
+
+`yomkrpc topic pub -ef <主题名>`（等价 `--example-file`）按主题名导出消息描述 JSON 文件（查完即退，不发布）：文件内容即默认值模板的 JSON 本身（展开多行缩进），**整体就是一份合法发布载荷，可直接填进 `topic pub` 发布命令**：
+
+```bash
+$ yomkrpc topic pub -ef hello_world
+message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic: hello_world, type: YomkRpc::MString)
+```
+
+文件名 `<主题名>_msg_<时间戳>.json`，时间戳格式为 年-月-日-时-分-秒-毫秒（同上例 `2026-09-28-12-14-42-626`）。文件内容：
+
+```json
+{
+  "data": ""
+}
+```
+
+- **`-o <目录>` / `--output <目录>`**：指定生成目录（相对/绝对路径均可），缺省当前目录；目录不存在报错退出，不自动创建
+- 文件整体可直接填进发布命令（与 `topic pub -e` 输出的 example 命令同构对称）：`yomkrpc topic pub hello_world "$(cat hello_world_msg_2026-09-28-12-14-42-626.json)"`——`"$(cat)"` 命令替换结果不再经历引号删除，内层双引号与换行原样保留，多行缩进 JSON 解析无碍；主题名/类型名不在文件内，从文件名与 stdout 提示行追溯
+- 未发现主题报错退出（info 族语义）；`-w` 收敛判定同其他查询生效
 
 ### 6.5 列出域内节点（yomkrpc node list）
 

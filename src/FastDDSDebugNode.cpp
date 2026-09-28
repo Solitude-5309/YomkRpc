@@ -736,6 +736,38 @@ bool FastDDSDebugNode::topicExample(const std::string& topicName,
     return true;
 }
 
+bool FastDDSDebugNode::topicMsgJson(const std::string& topicName,
+        std::string& typeName,
+        std::string& json,
+        uint32_t stableRounds, uint32_t intervalMs)
+{
+    if (stableRounds == 0)
+    {
+        stableRounds = kDefaultStableRounds;
+    }
+    if (intervalMs == 0)
+    {
+        intervalMs = kDefaultIntervalMs;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (participant_ == nullptr)
+        {
+            return false;  // 未入域
+        }
+    }
+    // 1) 收敛拿类型名（topicInfo 单值路径）；未发现主题 false
+    size_t publisherCount = 0;
+    size_t subscriptionCount = 0;
+    if (!waitForTopicInfoStable(topicName, typeName, publisherCount, subscriptionCount,
+                stableRounds, intervalMs))
+    {
+        return false;
+    }
+    // 2) 同类型重建 DynamicType 生成紧凑 JSON 发布模板（json_deserialize 可直接接受）
+    return jsonExampleOfType(typeName, json);
+}
+
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
         uint32_t stableRounds, uint32_t intervalMs)
 {

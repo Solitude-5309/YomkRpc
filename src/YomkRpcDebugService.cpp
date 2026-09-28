@@ -37,6 +37,7 @@ int YomkRpcDebugService::init()
     YomkInstallFunc("/interface_show", YomkRpcDebugService::interfaceShow);
     YomkInstallFunc("/interface_list", YomkRpcDebugService::interfaceList);
     YomkInstallFunc("/topic_example", YomkRpcDebugService::topicExample);
+    YomkInstallFunc("/topic_msg", YomkRpcDebugService::topicMsg);
     YomkInstallFunc("/topic_pub", YomkRpcDebugService::topicPub);
     YomkInstallFunc("/list_nodes", YomkRpcDebugService::listNodes);
     YomkInstallFunc("/node_info", YomkRpcDebugService::nodeInfo);
@@ -232,6 +233,31 @@ YomkResponse YomkRpcDebugService::topicExample(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcDebugService::topicMsg(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSDebugTopicMsg, p);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (node_ == nullptr)
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicMsg", "debug node not created");
+        return YomkResponse(YomkResponse::eNo, "debug node not created");
+    }
+    // 持锁取该主题的消息描述两要素（节点层依次收敛：类型名→JSON 模板；未发现主题按
+    // 查询失败处理，info 族语义）；StringArray 恰 2 行：d[0]=类型名、d[1]=紧凑 msg JSON
+    // （机器可读契约，非展示行集）
+    std::string typeName;
+    std::string json;
+    if (!node_->topicMsgJson(p->msg.topicName, typeName, json,
+                p->msg.stableRounds, p->msg.intervalMs))
+    {
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicMsg", "topic [", p->msg.topicName, "] not found");
+        return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
+    }
+    return YomkResponse(YomkResponse::eOk, "ok",
+            YomkMkPtr(StringArray, std::vector<std::string>{typeName, json}));
 }
 
 YomkResponse YomkRpcDebugService::topicPub(YomkPkgPtr pkg)

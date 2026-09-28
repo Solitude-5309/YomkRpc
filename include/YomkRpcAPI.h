@@ -158,6 +158,14 @@
         "/YomkRpcDebugService/topic_example",                                \
         YomkMkPtr(DDSDebugTopicExample, DDSDebugTopicExample{topicName, stableRounds, intervalMs}))
 
+// 按主题名查询消息描述两要素（供导出消息描述文件，独立收敛同 interface_show）：命中返回
+// StringArray 恰 2 行：d[0]=类型名、d[1]=紧凑 msg JSON（单行，可直接作为发布载荷模板）。
+// 未发现主题返回错误（topic [...] not found）。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_MSG(topicName, stableRounds, intervalMs)        \
+    YOMK_REQUEST(                                                            \
+        "/YomkRpcDebugService/topic_msg",                                    \
+        YomkMkPtr(DDSDebugTopicMsg, DDSDebugTopicMsg{topicName, stableRounds, intervalMs}))
+
 // 按主题名发布一条 JSON 载荷消息（仅发一次）：节点层先发现收敛（主题+订阅者数稳定）→
 // 类型重建 + json_deserialize 解析载荷 → 建临时 RELIABLE+TRANSIENT_LOCAL writer 并匹配收敛
 // → write 一次 → 存在 RELIABLE 订阅者时 wait_for_acknowledgments 确认送达（超时报错）
