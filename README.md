@@ -291,6 +291,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc topic pub -ef <主题名> [-o 目录]` | 按主题名导出消息描述 JSON 文件（内容即默认值模板 JSON 本身，多行缩进可直接 `$(cat)` 填进发布命令；仅发描述不发布） |
 | `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布一条 JSON 载荷消息（仅发一次，收敛 + ack 确认送达） |
+| `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；仅发一次，收敛 + ack 确认送达） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -572,7 +573,7 @@ yomkrpc topic pub hello_world '{"data":""}'
 
 #### topic pub：向主题发布一条消息（JSON 载荷，仅发一次）
 
-`yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存）。发布链路：
+`yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存），载荷可直接给 JSON 参数，或经 `-f/--file` 从文件整体读取（`yomkrpc topic pub <主题名> -f <文件>`）。发布链路：
 
 1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，`-w` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出；
 2. **类型重建 + 载荷解析**：由发现的类型重建 DynamicType，`json_deserialize` 解析载荷（与 `topic pub -e` 输出的 example 命令中的 JSON 格式对称）；解析失败报错退出，不建任何发布实体；
@@ -593,9 +594,15 @@ yomkrpc topic pub hello_world '{"data":""}'
 
 $ yomkrpc topic pub hello_world '{"data":"hello yomkrpc"}'
 delivered to topic hello_world              # 所有 RELIABLE 订阅者已确认收到
+
+$ yomkrpc topic pub -ef hello_world          # 也可导出消息描述文件（内容即载荷模板）
+message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic: hello_world, type: YomkRpc::MString)
+# 编辑文件改字段值后按文件发布（同一发布链路，多行缩进 JSON 直接可发）
+$ yomkrpc topic pub hello_world -f hello_world_msg_2026-09-28-12-14-42-626.json
+delivered to topic hello_world
 ```
 
-非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-w` 收敛判定同其他查询生效。
+非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-w` 收敛判定同其他查询生效。
 
 ack 确认的覆盖语义（端到端实测校准）：
 

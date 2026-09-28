@@ -66,7 +66,8 @@
  * 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何发布实体），临时
  * RELIABLE+TRANSIENT_LOCAL writer 匹配收敛后 write 一次；存在 RELIABLE 订阅者时以 ack
  * 确认送达（未全部确认报错退出），全 BEST_EFFORT 或无订阅者退化尽力而为；未发现主题
- * 报错退出。
+ * 报错退出。载荷直接给 JSON 参数，或经 -f/--file 从文件整体读取（文件不存在/为空报错
+ * 退出，与 topic pub -ef 导出文件对接形成导出→改值→发布闭环）。
  * topic pub -ef：按主题名导出消息描述 JSON 文件（查完即退，不发布）：文件内容即默认值
  * 模板 JSON 本身（展开多行缩进，整体就是一份合法发布载荷，可直接 "$(cat 文件)" 填进
  * topic pub 发布命令），文件名 <主题名>_msg_<年-月-日-时-分-秒-毫秒>.json；无 -o 在
@@ -140,6 +141,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub -ef | --example-file [-d N | --domain N] [-w N | --wait N]\n"
           "          [-o <dir> | --output <dir>] <topic-name>\n"
           "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] <topic-name> <json>\n"
+          "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] <topic-name> -f <file> | --file <file>\n"
           "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
           "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -155,6 +157,9 @@ static void printUsage(std::ostream &os)
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
           "  -o, --output <dir>  输出目录（仅 topic pub -ef 生效）：消息描述文件生成位置，相对/\n"
           "                      绝对路径均可，缺省当前目录；目录不存在报错退出，不自动创建\n"
+          "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
+          "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
+          "                      不存在或为空报错退出，相对/绝对路径均可）\n"
           "  --window N          频率统计窗口大小（相邻消息间隔样本数上限，默认 10000，仅 topic hz 生效）\n"
           "  -h, --help          显示帮助\n"
           "\n"
@@ -175,6 +180,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub -ef hello_world\n"
           "  yomkrpc topic pub -ef -o /tmp hello_world\n"
           "  yomkrpc topic pub hello_world '{\"data\":\"hi\"}'\n"
+          "  yomkrpc topic pub hello_world -f msg.json\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
@@ -937,6 +943,39 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
     return 0;
 }
 
+// topic pub -f 子命令：按主题名发布一条 JSON 载荷文件（仅发一次，查完即退）：文件内容
+// 整体作为发布载荷（与 topic pub -ef 导出的消息描述文件对接，形成导出→改值→按文件发布
+// 闭环；json_deserialize 对载荷前后空白不敏感，多行缩进 JSON 直接可发）：文件不存在/
+// 打不开报错退出，内容裁剪首尾空白后为空也报错退出；发布链路复用 runTopicPub（发现
+// 收敛→类型重建→载荷解析→匹配收敛→write 一次→ack 自适应确认）
+static int runTopicPubJsonFile(uint32_t domainId, const std::string &topicName,
+        const std::string &jsonFile, uint32_t waitRounds)
+{
+    YOMK_INIT();
+
+    // 1. 读文件：文件不存在/打不开报错退出（此时尚未创建调试节点，无需 DEBUG_QUIT）
+    std::ifstream in(jsonFile);
+    if (!in)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "cannot open json file: ", jsonFile);
+        return 1;
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    const std::string raw = buf.str();
+    const auto first = raw.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "json file is empty: ", jsonFile);
+        return 1;
+    }
+    const auto last = raw.find_last_not_of(" \t\r\n");
+    const std::string json = raw.substr(first, last - first + 1);
+
+    // 2. 复用发布链路
+    return runTopicPub(domainId, topicName, json, waitRounds);
+}
+
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
 // 连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空才列出，空名参与者
 // 跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出（无 Ctrl+C 循环，查完即退）
@@ -1061,6 +1100,7 @@ int main(int argc, char *argv[])
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
     std::string msgOutDir;   // 输出目录（-o/--output；仅 topic pub -ef 生效，缺省当前目录）
+    std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -1113,6 +1153,17 @@ int main(int argc, char *argv[])
                 return 2;
             }
             msgOutDir = argv[++i];
+            continue;
+        }
+        if (arg == "-f" || arg == "--file")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少载荷文件参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            pubJsonFile = argv[++i];
             continue;
         }
         if (arg == "-v" || arg == "--verbose")
@@ -1194,6 +1245,11 @@ int main(int argc, char *argv[])
     {
         return runTopicPubMsgFile(domainId, pos[3], msgOutDir, waitRounds);
     }
+    if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "pub" &&
+            !pos[2].empty() && !pubJsonFile.empty())
+    {
+        return runTopicPubJsonFile(domainId, pos[2], pubJsonFile, waitRounds);
+    }
     if (pos.size() == 4 && pos[0] == "topic" && pos[1] == "pub" &&
             !pos[2].empty() && !pos[3].empty())
     {
@@ -1201,7 +1257,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() >= 2 && pos[0] == "topic" && pos[1] == "pub")
     {
-        std::cerr << "yomkrpc: topic pub 支持 -e | --example <主题名>（示例模式）、-ef | --example-file <主题名>（导出消息描述文件）或 <主题名> <json>（发布模式）\n";
+        std::cerr << "yomkrpc: topic pub 支持 -e | --example <主题名>（示例模式）、-ef | --example-file <主题名>（导出消息描述文件）、<主题名> <json>（发布模式）或 <主题名> -f <文件>（按文件发布）\n";
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "hz" && !pos[2].empty())
     {
