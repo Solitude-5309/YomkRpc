@@ -288,7 +288,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic hz <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz） |
 | `yomkrpc interface show <类型名>` | 按类型名输出该类型的 IDL 结构描述（struct 头 + 字段行 + 结尾） |
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
-| `yomkrpc topic pub -e` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
+| `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布一条 JSON 载荷消息（仅发一次，收敛 + ack 确认送达） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
@@ -550,9 +550,9 @@ YomkRpc::MString
 
 域内无任何类型报错退出（find 族语义）；`-w` 收敛判定同其他查询生效。
 
-#### topic pub -e：查看主题的发布示例（Type / IDL / JSON 模板）
+#### topic pub -e：查看主题的发布示例（Type / IDL / 可复制命令）
 
-`yomkrpc topic pub -e <主题名>`（等价 `--example`）按主题名输出发布示例三段行集：类型名、IDL 结构描述（同 `interface show`）、JSON example 发布载荷模板——同类型重建 DynamicType 取默认值样本生成，与发布输入格式对称，填好字段值即可作为发布载荷：
+`yomkrpc topic pub -e <主题名>`（等价 `--example`）按主题名输出发布示例三段行集：类型名、IDL 结构描述（同 `interface show`）、example 可复制发布命令——同类型重建 DynamicType 取默认值样本生成，与发布输入格式对称；命令里 JSON 已整体包好单引号（裸传会被 shell 剥掉内层双引号导致解析失败），改字段值即可直接发布：
 
 ```bash
 $ yomkrpc topic pub -e hello_world
@@ -563,8 +563,8 @@ struct YomkRpc::MString {
     string data;
 };
 
-JSON example:
-{"data":""}
+example:
+yomkrpc topic pub hello_world '{"data":""}'
 ```
 
 未发现主题报错退出（info 族语义）；`-w` 收敛判定同其他查询生效。
@@ -574,7 +574,7 @@ JSON example:
 `yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存）。发布链路：
 
 1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，`-w` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出；
-2. **类型重建 + 载荷解析**：由发现的类型重建 DynamicType，`json_deserialize` 解析载荷（与 `topic pub -e` 输出的 JSON example 格式对称）；解析失败报错退出，不建任何发布实体；
+2. **类型重建 + 载荷解析**：由发现的类型重建 DynamicType，`json_deserialize` 解析载荷（与 `topic pub -e` 输出的 example 命令中的 JSON 格式对称）；解析失败报错退出，不建任何发布实体；
 3. **匹配收敛 + 发布一次**：临时 RELIABLE + TRANSIENT_LOCAL writer（请求 ≤ 提供，最大兼容既有订阅者 QoS）匹配收敛后 **write 恰一次**；匹配收敛后执行 **matched 校验**：以 writer 实际匹配的订阅端 GUID 集与发现缓存中该主题 RELIABLE 订阅者逐一比对，缓存里有订阅者却不在匹配集（订阅者在匹配建立前已挂起/异常退出，EDP 不可达）则不发布、报错退出；
 4. **ack 自适应确认送达**：存在 RELIABLE 订阅者时以 `wait_for_acknowledgments` 协议级确认——每个 RELIABLE 订阅者确认样本已入 reader history 才返回成功（未全部确认报错退出，如订阅者已挂起）；全 BEST_EFFORT 或无订阅者退化尽力而为（保底窗后返回成功，BEST_EFFORT 无协议保证）。
 
@@ -587,8 +587,8 @@ struct YomkRpc::MString {
     string data;
 };
 
-JSON example:
-{"data":""}
+example:
+yomkrpc topic pub hello_world '{"data":""}'
 
 $ yomkrpc topic pub hello_world '{"data":"hello yomkrpc"}'
 delivered to topic hello_world              # 所有 RELIABLE 订阅者已确认收到

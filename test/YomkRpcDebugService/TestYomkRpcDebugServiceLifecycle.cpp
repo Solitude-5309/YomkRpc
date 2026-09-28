@@ -17,7 +17,7 @@
  *       topic_find 按类型名反查命中唯一行与未匹配类型 eNo → interface_show 按类型名输出
  *       IDL 结构（三行逐行断言 struct 头/四空格缩进字段行/结尾）与未发现类型 eNo →
  *       interface_list 类型名去重清单命中唯一行与空域未发现 eNo → topic_example 按主题名
- *       输出发布示例三段行集（Type/IDL/JSON example 逐段断言）与未发现主题 eNo →
+ *       输出发布示例三段行集（Type/IDL/example 可复制命令逐段断言）与未发现主题 eNo →
  *       topic_pub 发布一次消息（eOk delivered，ack 确认送达）与非法 JSON eNo →
  *       node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
@@ -399,7 +399,7 @@ int main()
                     std::cout << "[OBSERVE] interface list: " << l << std::endl;
                 }
 
-                // topic_example：三段行集（Type / IDL / JSON example，共 7 行）
+                // topic_example：三段行集（Type / IDL / example 可复制命令，共 7 行）
                 auto exampleHit = svc->invoke("/topic_example", YomkMkPtr(
                     DDSDebugTopicExample, DDSDebugTopicExample{HIT_TOPIC, 5, 100}));
                 CHECK(exampleHit.m_status == YomkResponse::eOk && exampleHit.m_data != nullptr,
@@ -411,9 +411,11 @@ int main()
                           exampleArr->d[2] == "struct YomkRpc::MString {" &&
                           exampleArr->d[3] == "    string data;" &&
                           exampleArr->d[4] == "};" &&
-                          exampleArr->d[5] == "JSON example:" &&
-                          exampleArr->d[6].find("\"data\"") != std::string::npos,
-                      "topic_example 三段行集逐行符合（Type/IDL 三行/JSON example 含 data 字段）");
+                          exampleArr->d[5] == "example:" &&
+                          exampleArr->d[6].find("yomkrpc topic pub " + std::string(HIT_TOPIC) +
+                                  " '{\"data\":") == 0 &&
+                          exampleArr->d[6].back() == '\'',
+                      "topic_example 三段行集逐行符合（Type/IDL 三行/example 段为可复制发布命令）");
                 for (const auto &l : exampleArr->d)
                 {
                     std::cout << "[OBSERVE] topic example |" << l << "|" << std::endl;

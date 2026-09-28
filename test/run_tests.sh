@@ -137,7 +137,7 @@ clean_residue() {
 # （测试自身 79/102 checks 全绿、participant 均经 API 显式销毁的场景亦会命中）。
 # 因此检出残留后等待 RESIDUE_WAIT_SECS 再复查一次，仍在才判失败——真实崩溃/kill
 # 泄漏不会自清，依然会被抓到，检测能力不变。
-RESIDUE_WAIT_SECS=3
+RESIDUE_WAIT_SECS=6
 
 _residue_files() {
     shopt -s nullglob
@@ -234,19 +234,18 @@ main() {
         elapsed=$((SECONDS - start))
         cleanup_workdir
         if [ ${rc} -eq 0 ]; then
-            # 正常退出但遗留 /dev/shm → 测试未自清理，按失败处理
-            local -a res
-            shopt -s nullglob
-            res=(/dev/shm/fastdds_* /dev/shm/sem.fastdds_port*_mutex /dev/shm/fast_datasharing_*)
-            shopt -u nullglob
-            if [ ${#res[@]} -gt 0 ]; then
+            # 正常退出但遗留 /dev/shm → 测试未自清理，按失败处理。SHM 回收存在异步窗口，
+            # 且相邻测试的段清理活动会进一步延迟自清，统一走 check_residue 的等待-复查
+            # 窗口：窗口内自清视为 PASS，复查仍在才判 FAIL（真实泄漏仍会被抓到）
+            local res_out res_rc
+            res_out="$(check_residue 2>&1)"
+            res_rc=$?
+            if [ ${res_rc} -ne 0 ]; then
                 echo "FAIL (残留未清理, ${elapsed}s)"
-                printf "[FAIL] %-32s 残留未清理: %s\n" "${t}" "${res[*]}" >> "${summary}"
+                printf "[FAIL] %-32s 残留未清理:\n%s\n" "${t}" "${res_out}" >> "${summary}"
                 echo "-------------------------------------------"
                 echo "测试 ${t} 正常退出但 /dev/shm 残留共享内存未自清理:"
-                for p in "${res[@]}"; do echo "   - ${p}"; done
-                rm -f -- "${res[@]}"
-                echo "       已清理，请排查对应测试的 teardown"
+                echo "${res_out}"
                 echo "完整日志: ${log}"
                 echo "-------------------------------------------"
                 exit 1

@@ -56,9 +56,9 @@
  * + 结尾 };）；未发现类型报错退出（可发现类型名拼写错误）。
  * interface list：列出发现缓存中出现的全部数据类型名（去重字典序排序，每行一个，
  * interface show 的配套导航）；域内无任何类型报错退出（find 族语义）。
- * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / JSON example
- * 发布载荷模板——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，填好字段值即可
- * 发布）；未发现主题报错退出。
+ * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / example
+ * 可复制发布命令——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，改命令里
+ * JSON 字段值即可发布）；未发现主题报错退出。
  * topic pub：按主题名发布一条 JSON 载荷消息（仅发一次）：节点层先发现收敛（类型名 +
  * 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何发布实体），临时
  * RELIABLE+TRANSIENT_LOCAL writer 匹配收敛后 write 一次；存在 RELIABLE 订阅者时以 ack
@@ -672,7 +672,7 @@ static int runInterfaceList(uint32_t domainId, uint32_t waitRounds)
     return 0;
 }
 
-// topic pub -e 子命令：按主题名输出发布示例三段行集（Type / IDL / JSON example），供
+// topic pub -e 子命令：按主题名输出发布示例三段行集（Type / IDL / example 可复制发布命令），供
 // 用户按 JSON 模板填好字段值后发布（查完即退，不发布）；调试节点内部依次收敛：类型名 →
 // IDL 行集 → JSON 示例，独立收敛参数同其余查询（无 Ctrl+C 循环）
 static int runTopicPubExample(uint32_t domainId, const std::string &topicName, uint32_t waitRounds)
@@ -705,9 +705,9 @@ static int runTopicPubExample(uint32_t domainId, const std::string &topicName, u
     }
     for (const auto &line : arr->d)
     {
-        // 段标题（IDL: / JSON example:）前空一行，三段展示不拥挤（空行属展示层修饰，
+        // 段标题（IDL: / example:）前空一行，三段展示不拥挤（空行属展示层修饰，
         // 不入数据行集）
-        if (line == "IDL:" || line == "JSON example:")
+        if (line == "IDL:" || line == "example:")
         {
             std::cout << "\n";
         }

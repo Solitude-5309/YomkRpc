@@ -78,8 +78,21 @@ if [ ${RUN_CPPCHECK} -eq 1 ]; then
     for f in "${CPPCHECK_FILES[@]}"; do
         echo "--   ${f#"${REPO_DIR}/"}"
     done
-    echo "-- cppcheck 开始扫描（共 ${#CPPCHECK_FILES[@]} 个文件，Checking 行即逐文件进度，完整 verbose 日志落盘）..."
+    # 进度分母用编译单元（.cpp）数：cppcheck 只对编译单元打 Checking 行，头文件随单元
+    # 分析无独立进度，用 14 做分母会停在 [9/14] 造成误导
+    CPPCHECK_TU=0
+    for cf in "${CPPCHECK_FILES[@]}"; do
+        case "${cf}" in *.cpp) CPPCHECK_TU=$((CPPCHECK_TU + 1)) ;; esac
+    done
+    echo "-- cppcheck 扫描（共 ${#CPPCHECK_FILES[@]} 个文件，其中 ${CPPCHECK_TU} 个编译单元有独立进度，头文件随单元分析）..."
+    # 批量跑保留 -j 并行（逐文件串行实测 600s 仅完成 8/14，不可行）；进度由脚本读
+    # cppcheck 的 Checking 流实时转成 [N/M] 行（对齐 clang-tidy 风格），-j 并行下顺序
+    # 不保证与清单一致，计数到 M 即扫描完成；verbose 明细分流 cppcheck_full.log，
+    # 终端与摘要日志只留进度与告警行
     CPPCHECK_OUT="${LOG_ROOT}/cppcheck.log"
+    CPPCHECK_FULL="${LOG_ROOT}/cppcheck_full.log"
+    : > "${CPPCHECK_FULL}"
+    cppcheck_idx=0
     cppcheck --enable=warning,performance,portability --std=c++17 --language=c++ \
         --verbose -j"$(nproc)" \
         --inline-suppr --suppress=missingIncludeSystem --suppress=toomanyconfigs \
@@ -91,8 +104,23 @@ if [ ${RUN_CPPCHECK} -eq 1 ]; then
         -i"${REPO_DIR}/examples/build" \
         --error-exitcode=1 \
         "${REPO_DIR}/src" "${REPO_DIR}/include" "${REPO_DIR}/examples" 2>&1 \
-        | tee "${CPPCHECK_OUT}" \
-        | grep --line-buffered -E '^Checking [^:]*\.\.\.|warning:|performance:|portability:|error:'
+    | {
+        declare -A seen_file=()   # 同一文件按多平台配置组合会打多行 Checking，首次出现才计数
+        while IFS= read -r line; do
+            case "${line}" in
+                "Checking "*)
+                    key="$(sed -E 's/ \.\.\.$//; s/:.*$//; s|^.*/||' <<< "${line#Checking }")"
+                    if [ -z "${seen_file[${key}]+set}" ]; then
+                        seen_file["${key}"]=1
+                        cppcheck_idx=$((cppcheck_idx + 1))
+                        printf -- "-- [%d/%d] %s\n" "${cppcheck_idx}" "${CPPCHECK_TU}" "${key}"
+                    fi
+                    ;;
+                *warning:*|*performance:*|*portability:*|*error:*) echo "${line}" ;;
+                *) echo "${line}" >> "${CPPCHECK_FULL}" ;;
+            esac
+        done
+    } | tee "${CPPCHECK_OUT}"
     rc=${PIPESTATUS[0]}
     if [ ${rc} -ne 0 ]; then
         echo "[FAIL] cppcheck 检出告警（退出码 ${rc}）:"

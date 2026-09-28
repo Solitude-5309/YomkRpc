@@ -723,14 +723,16 @@ bool FastDDSDebugNode::topicExample(const std::string& topicName,
     {
         return false;
     }
-    // 三段行集：Type / IDL / JSON example（CLI 逐行原样输出）
+    // 三段行集：Type / IDL / example（CLI 逐行原样输出）。example 段直接给可复制执行的
+    // 完整命令：JSON 整体包单引号防 shell 剥内层双引号（裸传会被剥成 {data:123} 解析失败），
+    // 用户改字段值即可发布
     lines.clear();
     lines.push_back("Type: " + typeName);
     lines.push_back("IDL:");
     lines.insert(lines.end(), std::make_move_iterator(idl.begin()),
             std::make_move_iterator(idl.end()));
-    lines.push_back("JSON example:");
-    lines.push_back(std::move(json));
+    lines.push_back("example:");
+    lines.push_back("yomkrpc topic pub " + topicName + " '" + json + "'");
     return true;
 }
 

@@ -117,7 +117,7 @@ struct DDSDebugInterfaceList
     uint32_t intervalMs;    // 快照轮询间隔毫秒
 };
 
-// topic_example 请求负载：按主题名查询发布示例三段行集（Type/IDL/JSON example；独立收敛
+// topic_example 请求负载：按主题名查询发布示例三段行集（Type/IDL/example 命令；独立收敛
 // 参数，0 值由节点层钳制为默认）
 struct DDSDebugTopicExample
 {

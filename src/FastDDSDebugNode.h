@@ -146,7 +146,7 @@ public:
     // 依次收敛拿类型名（发现缓存按主题名查，未发现 false）→ IDL 行集（同 interfaceShow）→
     // JSON 发布示例（同类型重建 DynamicType 后取默认值样本经 json_serialize 生成，与
     // json_deserialize 输入格式对称，可直接作为发布载荷模板）。命中返回 true 并填充 lines：
-    // "Type: <类型名>" + "IDL:" + IDL 行集 + "JSON example:" + 单行紧凑 JSON；未发现主题或
+    // "Type: <类型名>" + "IDL:" + IDL 行集 + "example:" + 可复制发布命令；未发现主题或
     // TypeObject/类型重建不可用返回 false（未 setDomainId 亦 false）。0 值钳制默认
     // 5 次/200ms；最长阻塞约 2*stableRounds*intervalMs。
     bool topicExample(const std::string& topicName,

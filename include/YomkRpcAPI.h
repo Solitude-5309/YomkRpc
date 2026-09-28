@@ -149,7 +149,8 @@
         YomkMkPtr(DDSDebugInterfaceList, DDSDebugInterfaceList{stableRounds, intervalMs}))
 
 // 按主题名查询发布示例三段行集（独立收敛，同 interface_show）："Type: <类型名>" + "IDL:"
-// + IDL 行集 + "JSON example:" + 单行紧凑 JSON（默认值模板，可直接作为发布载荷）。命中返回
+// + IDL 行集 + "example:" + 可复制发布命令（JSON 默认值模板整体包单引号，改字段值即可
+// 发布）。命中返回
 // StringArray 多行；未发现主题返回错误（topic [...] not found）。须先创建调试节点。返回
 // YomkResponse。
 #define YOMKRPC_DEBUG_TOPIC_EXAMPLE(topicName, stableRounds, intervalMs)    \
