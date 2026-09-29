@@ -12,12 +12,15 @@
 #   ./run_tests.sh -h/--help     显示本帮助
 #
 # 行为:
-#   1. 运行前清理 /dev/shm 中 FastDDS 上次遗留的共享内存残留（崩溃/超时时 SHM 段不会自清）
+#   1. 运行前清理 /dev/shm 中 FastDDS 上次遗留的共享内存残留（崩溃/超时时 SHM 段不会自清；
+#      被活跃进程持有的条目跳过并警告——误删活体会使其锁孤儿化，触发 FastDDS is_zombie
+#      误判导致 SHM 永久幽灵，须重启业务进程才能恢复）
 #   2. 逐个串行运行测试（快→慢，stress 压尾），每个测试在独立临时工作目录运行
 #   3. 任一测试失败（非 0 退出 / 超时 / 正常退出但 /dev/shm 残留未自清理）→ 立即停止，
 #      输出 [FAIL] 行摘要与日志路径
 #   4. 日志落盘: test/test_logs/<时间戳>/<测试名>.log + summary.log
-#   5. 全部结束后复查一次 /dev/shm 残留，发现则清理并计为失败
+#   5. 全部结束后复查一次 /dev/shm 残留：无进程持有的残留清理并计为失败，
+#      被活跃进程持有的条目仅提示跳过（非本次测试泄漏），不计失败
 #
 # 写磁盘操作审计（2026-09 逐文件核对）:
 #   - 12 个测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress 两例
@@ -120,14 +123,115 @@ precheck_bin() {
     fi
 }
 
-# 清理 /dev/shm 中 FastDDS 遗留的共享内存（段/端口/锁/互斥量/数据共享）
+# ---------------------------------------------------------------------------
+# 持有者感知检测（防止误删活跃进程的 SHM 文件）:
+#   背景: 活体文件的锁（_el）被删后 flock 孤儿化，持有者零感知；此后任意进程
+#   open_port 会触发 FastDDS is_zombie 误判 → 删健康段同名重建 → 该进程沦为
+#   SHM 永久幽灵（SHM 零收而 UDP 正常，重启业务进程才恢复）。
+#   判据一（fd + maps 扫描）: 活跃进程持有的 /dev/shm 文件出现在两类位置：
+#           锁文件 _el/_sl 持 open fd（/proc/<pid>/fd 链接目标，需保持 open+flock）；
+#           段文件是 mmap 持有——映射建立后 fd 即被关闭（实测 boost
+#           managed_shared_memory 如此），只在 /proc/<pid>/maps 的映射路径中可见。
+#           fd 扫描对段文件全盲（实测误删引发幽灵），maps 扫描补上：映射在
+#           进程存活期间必然保留。
+#   判据二（inode 匹配）: POSIX named mutex（sem.fastdds_port<N>_mutex）在
+#           glibc 2.35 下按名双盲——sem_open 映射的是混淆临时名 sem.<随机>（fd
+#           即刻关闭，且临时名随即被 unlink），语义名只是同一 inode 的别名（实测）。
+#           /proc/<pid>/maps 行自带 inode 列，收集活体映射的 inode 集合，候选文件
+#           stat 其 inode 比对命中即活体——本体证据，与显示路径名无关。
+#   判据三（试锁）: 对 _el/_sl 用 flock -n 试锁。flock 绑 inode：持有者活着
+#           试锁必失败；持有者已死锁自动释放、试锁成功可删。不依赖 /proc 读
+#           权限（兜住 root 进程持有场景）。
+#   性能: fd 链接经 xargs 分批批量 readlink（每批 1000 个），fork 次数与 fd 总数
+#         解耦；桌面环境数千 fd 下扫描耗时毫秒级，避免逐 fd fork 的秒级卡顿。
+# ---------------------------------------------------------------------------
+declare -A SHM_HELD=()      # key: /dev/shm 文件名（fd 链接目标 / maps 路径名）
+declare -A SHM_INO_HELD=()  # key: 活体映射的 inode（maps 行自带，路径名混淆时唯一证据）
+
+# 一次扫描建立持有集合：SHM_HELD 按名（fd 链接目标 + maps 路径名），
+# SHM_INO_HELD 按映射 inode（覆盖 glibc named semaphore 混淆临时名）
+scan_shm_holders() {
+    SHM_HELD=()
+    SHM_INO_HELD=()
+    local link
+    local -a fds=(/proc/[0-9]*/fd/*)
+    if [ -e "${fds[0]}" ]; then
+        while IFS= read -r link; do
+            case "${link}" in
+                /dev/shm/*) SHM_HELD["${link#/dev/shm/}"]=1 ;;
+            esac
+        done < <(printf '%s\0' "${fds[@]}" | xargs -0 -r -n 1000 readlink 2>/dev/null)
+    fi
+    # maps 行: <addr> <perms> <offset> <dev> <inode> <path> [(deleted)]。
+    # 路径按名收集（段文件等）；inode 收集覆盖路径名被混淆/已 unlink 的映射。
+    # (deleted) 旧映射只贡献 inode——若同名文件已被重建（新 inode），按名收集会
+    # 把幽灵受害者的旧映射误判为活体持有，导致新文件永不清理。
+    local -a w
+    while IFS= read -r link; do
+        case "${link}" in
+            */dev/shm/*)
+                read -r -a w <<< "${link}"
+                SHM_INO_HELD["${w[4]}"]=1
+                case "${link}" in
+                    *"(deleted)") ;;
+                    *)
+                        link="${link##*/dev/shm/}"
+                        SHM_HELD["${link%% *}"]=1 ;;
+                esac ;;
+        esac
+    done < <(grep -h -- "/dev/shm/" /proc/[0-9]*/maps 2>/dev/null)
+    return 0
+}
+
+# _el/_sl 专属：试锁失败即判定被活进程持有；文件不存在/试锁成功=不在用。
+# 入参为裸文件名（/dev/shm 下的 basename），函数内补全绝对路径——否则会相对
+# 脚本 cwd 找文件（不存在即误判“不在用”，试锁判据将永远失明）
+_el_locked_by_live() {
+    local f="/dev/shm/${1}"
+    case "${f}" in *_el|*_sl) ;; *) return 1 ;; esac
+    [ -e "${f}" ] || return 1
+    if ( exec 3<>"${f}" && flock -n 3 ) 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+file_in_use() {
+    [ -n "${SHM_HELD[${1}]+set}" ] && return 0
+    # inode 本体判据：glibc named semaphore 映射混淆临时名，按名双盲时唯一证据
+    local ino
+    ino=$(stat -c %i "/dev/shm/${1}" 2>/dev/null) || return 1
+    [ -n "${SHM_INO_HELD[${ino}]+set}" ] && return 0
+    _el_locked_by_live "$1"
+}
+
+# 清理 /dev/shm 中 FastDDS 遗留的共享内存（段/端口/锁/互斥量/数据共享）；
+# 被活跃进程持有的条目跳过并警告（见上方持有者感知检测说明）
 clean_residue() {
     shopt -s nullglob
-    local -a residue=(/dev/shm/fastdds_* /dev/shm/sem.fastdds_port*_mutex /dev/shm/fast_datasharing_*)
+    local -a candidates=(/dev/shm/fastdds_* /dev/shm/sem.fastdds_port*_mutex /dev/shm/fast_datasharing_*)
     shopt -u nullglob
-    if [ ${#residue[@]} -gt 0 ]; then
-        echo "-- 清理 FastDDS 残留: ${#residue[@]} 个 /dev/shm 共享内存条目"
-        rm -f -- "${residue[@]}"
+    if [ ${#candidates[@]} -eq 0 ]; then
+        return 0    # /dev/shm 干净，无需扫描持有者
+    fi
+    echo "-- 清理前扫描 /dev/shm 持有者（活跃进程检测，防误删）..."
+    scan_shm_holders
+    local -a doomed=() held=() f
+    for f in "${candidates[@]}"; do
+        if file_in_use "$(basename "${f}")"; then
+            held+=("${f}")
+        else
+            doomed+=("${f}")
+        fi
+    done
+    local h
+    if [ ${#held[@]} -gt 0 ]; then
+        echo "警告: 检测到活跃 FastDDS 进程持有 ${#held[@]} 个 /dev/shm 条目，已跳过清理（防止误删导致 SHM 永久幽灵）:"
+        for h in "${held[@]}"; do echo "   - ${h}"; done
+    fi
+    if [ ${#doomed[@]} -gt 0 ]; then
+        echo "-- 清理 FastDDS 残留: ${#doomed[@]} 个 /dev/shm 共享内存条目"
+        rm -f -- "${doomed[@]}"
     fi
 }
 
@@ -137,6 +241,8 @@ clean_residue() {
 # （测试自身 79/102 checks 全绿、participant 均经 API 显式销毁的场景亦会命中）。
 # 因此检出残留后等待 RESIDUE_WAIT_SECS 再复查一次，仍在才判失败——真实崩溃/kill
 # 泄漏不会自清，依然会被抓到，检测能力不变。
+# 首轮与复查均先经持有者感知过滤：被活跃进程持有的条目仅提示跳过（非本次测试
+# 泄漏），不清理、不计失败；仅对“无持有者且等待后仍在”的文件清理并判失败。
 RESIDUE_WAIT_SECS=6
 
 _residue_files() {
@@ -147,19 +253,49 @@ _residue_files() {
 }
 
 check_residue() {
-    local -a residue=()
+    local -a residue=() held=() leaked=() f
     read -r -a residue <<< "$(_residue_files)"
     if [ ${#residue[@]} -eq 0 ]; then
         return 0
     fi
+    # 先分离“活体持有”与“疑似泄漏”：活体（常驻业务进程在用）不算残留，
+    # 提示跳过即可，绝不能 rm（会触发 SHM 永久幽灵）也不能判 FAIL
+    echo "-- 残留复查: 发现 ${#residue[@]} 项，扫描持有者..."
+    scan_shm_holders
+    for f in "${residue[@]}"; do
+        if file_in_use "$(basename "${f}")"; then
+            held+=("${f}")
+        else
+            leaked+=("${f}")
+        fi
+    done
+    local h
+    for h in "${held[@]}"; do
+        echo "   跳过被活跃进程持有的条目（非本次测试泄漏）: ${h}"
+    done
+    if [ ${#leaked[@]} -eq 0 ]; then
+        return 0
+    fi
+    echo "-- 无持有者残留 ${#leaked[@]} 项，等待 ${RESIDUE_WAIT_SECS}s 复查（SHM 自清异步窗口）..."
     sleep "${RESIDUE_WAIT_SECS}"
     read -r -a residue <<< "$(_residue_files)"
     if [ ${#residue[@]} -eq 0 ]; then
         return 0    # 延迟窗口内已自清，非泄漏
     fi
-    echo "   等待 ${RESIDUE_WAIT_SECS}s 后仍存在（崩溃/kill 类泄漏）:"
-    for p in "${residue[@]}"; do echo "   - ${p}"; done
-    rm -f -- "${residue[@]}"
+    # 复查窗口内活体可能退出/新泄漏可能出现，重新过滤一轮持有者
+    echo "-- 复查: 重新扫描持有者..."
+    scan_shm_holders
+    local -a still=()
+    for f in "${residue[@]}"; do
+        file_in_use "$(basename "${f}")" || still+=("${f}")
+    done
+    if [ ${#still[@]} -eq 0 ]; then
+        return 0    # 复查时仅剩活体持有文件，无真泄漏
+    fi
+    echo "   等待 ${RESIDUE_WAIT_SECS}s 后仍存在且无持有者（崩溃/kill 类泄漏）:"
+    local p
+    for p in "${still[@]}"; do echo "   - ${p}"; done
+    rm -f -- "${still[@]}"
     return 1
 }
 
@@ -251,6 +387,11 @@ main() {
                 exit 1
             fi
             echo "PASS (${elapsed}s)"
+            if [ -n "${res_out}" ]; then
+                # 复查中有持有者跳过等提示时回显（check_residue 的输出被捕获，
+                # PASS 路径默认静默丢弃，不回显则用户看不到活体文件被正确跳过）
+                echo "${res_out}"
+            fi
             printf "[PASS] %-32s %ds\n" "${t}" "${elapsed}" >> "${summary}"
             passed=$((passed + 1))
         else
