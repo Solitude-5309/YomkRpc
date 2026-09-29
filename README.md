@@ -298,7 +298,7 @@ ExampleYomkRpcPub
 公共参数（各命令通用）：
 
 - **`-d N`**：指定 DDS 域号（合法范围 [0,232]）。优先级 `-d` > 环境变量 > 0：`-d N` 为临时指定，直接使用该值（不读、也不写环境变量）；环境变量 `YOMKRPC_DDS_DOMAIN_ID` 为默认路径，yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行
-- **`-w N`**：收敛判定次数——查询类命令内部每 ~200ms 轮询一次发现缓存快照，连续 N 次集合不变即认为发现收敛、立即输出（默认 5；`topic list`、`topic info`、`node list` 与 `node info` 生效，`topic print` 为持续订阅不用）
+- **环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS`**：收敛判定次数——查询类命令内部每 ~200ms 轮询一次发现缓存快照，连续 N 次集合不变即认为发现收敛、立即输出（默认 5；`topic list`、`topic info`、`topic type`、`topic find`、`interface show`、`interface list`、`topic pub -e`、`topic pub -ef`、`topic pub`、`node list` 与 `node info` 生效，`topic print`/`topic hz` 为持续订阅/测量型不用）。该环境变量为收敛次数唯一配置入口：yomkrpc 启动时无该变量则自动创建并默认 5，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释）——新开任意终端可直接 `echo $YOMKRPC_DDS_DISCOVER_ROUNDS` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改收敛次数可直接编辑 .bashrc 中该行，或临时 `export YOMKRPC_DDS_DISCOVER_ROUNDS=7`（值须为 >=1 的整数，非法报错退出）
 
 ### 6.2 调试主题观察（yomkrpc topic print）
 
@@ -378,7 +378,6 @@ int main(int argc, char *argv[])
 ```bash
 yomkrpc topic list          # 默认域 0
 yomkrpc topic list -d 5     # 指定 DDS 域号
-yomkrpc topic list -w 7     # 收敛判定放宽为连续 7 次快照不变（默认 5）
 yomkrpc topic list -t       # 类型名模式：每行输出 主题名 [类型名]
 ```
 
@@ -425,7 +424,6 @@ resp = YOMKRPC_DEBUG_QUIT();                // 3. 退出前显式清理
 ```bash
 yomkrpc topic info hello_world        # 默认域 0
 yomkrpc topic info -d 5 sensor_data   # 指定 DDS 域号
-yomkrpc topic info -w 7 hello_world   # 收敛判定放宽为连续 7 次快照不变（默认 5）
 yomkrpc topic info -v hello_world     # 端点详情模式：逐端点列出 Node name/GUID/QoS profile
 ```
 
@@ -500,7 +498,6 @@ resp = YOMKRPC_DEBUG_QUIT();                       // 3. 退出前显式清理
 ```bash
 yomkrpc topic type hello_world        # 输出：YomkRpc::MString
 yomkrpc topic type -d 5 sensor_data   # 指定域号
-yomkrpc topic type -w 7 hello_world   # 收敛判定放宽（默认 5）
 ```
 
 未发现主题时报错退出（`topic [<主题名>] not found`，与 topic info 同语义）。等价宏调用同上（`YOMKRPC_DEBUG_TOPIC_INFO` 取首行去前缀）。
@@ -512,7 +509,6 @@ yomkrpc topic type -w 7 hello_world   # 收敛判定放宽（默认 5）
 ```bash
 yomkrpc topic find YomkRpc::MString       # 输出：hello_world
 yomkrpc topic find -d 5 YomkRpc::MString  # 指定域号
-yomkrpc topic find -w 7 YomkRpc::MString  # 收敛判定放宽（默认 5）
 ```
 
 域内无该类型主题时报错退出（`type [<类型名>] not found`，info 族语义，可发现类型名拼写错误）。等价宏调用：`YOMKRPC_DEBUG_TOPIC_FIND(typeName, stableRounds, intervalMs)`。
@@ -539,7 +535,7 @@ struct YomkRpc::MString {
 };
 ```
 
-字段类型名为 ROS2/IDL4 风格映射（bool/int32/uint32/float32/string 等；有界 `string<N>`；`sequence<T>`/`sequence<T, N>`；数组 `T[N]`；嵌套 struct/enum/alias 显示成员子类型名不递归展开）。仅支持顶层为 struct 的类型；未发现类型报错退出（可发现类型名拼写错误）；`-w` 同其他查询生效。
+字段类型名为 ROS2/IDL4 风格映射（bool/int32/uint32/float32/string 等；有界 `string<N>`；`sequence<T>`/`sequence<T, N>`；数组 `T[N]`；嵌套 struct/enum/alias 显示成员子类型名不递归展开）。仅支持顶层为 struct 的类型；未发现类型报错退出（可发现类型名拼写错误）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
 
 #### interface list：列出已发现的全部类型名
 
@@ -550,7 +546,7 @@ $ yomkrpc interface list
 YomkRpc::MString
 ```
 
-域内无任何类型报错退出（find 族语义）；`-w` 收敛判定同其他查询生效。
+域内无任何类型报错退出（find 族语义）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
 
 #### topic pub -e：查看主题的发布示例（Type / IDL / 可复制命令）
 
@@ -569,13 +565,13 @@ example:
 yomkrpc topic pub hello_world '{"data":""}'
 ```
 
-未发现主题报错退出（info 族语义）；`-w` 收敛判定同其他查询生效。
+未发现主题报错退出（info 族语义）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
 
 #### topic pub：向主题发布消息（JSON 载荷，缺省仅发一次）
 
 `yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存），载荷可直接给 JSON 参数，或经 `-f/--file` 从文件整体读取（`yomkrpc topic pub <主题名> -f <文件>`）；追加 `-r/--rate N`（单位 Hz）则首轮发布成功后按该频率持续重发（见下文持续发布模式）。发布链路：
 
-1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，`-w` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出；
+1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出；
 2. **类型重建 + 载荷解析**：由发现的类型重建 DynamicType，`json_deserialize` 解析载荷（与 `topic pub -e` 输出的 example 命令中的 JSON 格式对称）；解析失败报错退出，不建任何发布实体；
 3. **匹配收敛 + 发布一次**：临时 RELIABLE + TRANSIENT_LOCAL writer（请求 ≤ 提供，最大兼容既有订阅者 QoS）匹配收敛后 **write 恰一次**；匹配收敛后执行 **matched 校验**：以 writer 实际匹配的订阅端 GUID 集与发现缓存中该主题 RELIABLE 订阅者逐一比对，缓存里有订阅者却不在匹配集（订阅者在匹配建立前已挂起/异常退出，EDP 不可达）则不发布、报错退出；
 4. **ack 自适应确认送达**：存在 RELIABLE 订阅者时以 `wait_for_acknowledgments` 协议级确认——每个 RELIABLE 订阅者确认样本已入 reader history 才返回成功（未全部确认报错退出，如订阅者已挂起）；全 BEST_EFFORT 或无订阅者退化尽力而为（保底窗后返回成功，BEST_EFFORT 无协议保证）。
@@ -609,7 +605,7 @@ publishing #3 to topic hello_world
 ^Cpublished total=17 failed=0 to topic hello_world
 ```
 
-非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-r/--rate` 频率非法（非数值或 ≤0）报错退出（`非法频率 "..."`），`-r` 后缺参数同用法错误退出；`-w` 收敛判定同其他查询生效。
+非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-r/--rate` 频率非法（非数值或 ≤0）报错退出（`非法频率 "..."`），`-r` 后缺参数同用法错误退出；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
 
 ack 确认的覆盖语义（端到端实测校准）：
 
@@ -649,7 +645,7 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 
 - **`-o <目录>` / `--output <目录>`**：指定生成目录（相对/绝对路径均可），缺省当前目录；目录不存在报错退出，不自动创建
 - 文件整体可直接填进发布命令（与 `topic pub -e` 输出的 example 命令同构对称）：`yomkrpc topic pub hello_world "$(cat hello_world_msg_2026-09-28-12-14-42-626.json)"`——`"$(cat)"` 命令替换结果不再经历引号删除，内层双引号与换行原样保留，多行缩进 JSON 解析无碍；主题名/类型名不在文件内，从文件名与 stdout 提示行追溯
-- 未发现主题报错退出（info 族语义）；`-w` 收敛判定同其他查询生效
+- 未发现主题报错退出（info 族语义）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
@@ -658,7 +654,6 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 ```bash
 yomkrpc node list          # 默认域 0
 yomkrpc node list -d 5     # 指定 DDS 域号
-yomkrpc node list -w 7     # 收敛判定放宽为连续 7 次快照不变（默认 5）
 ```
 
 与发布端配合观察（先启动发布端——`ExampleYomkRpcPub` 创建节点 `pub_node`，工具创建调试节点入域后对参与者发现缓存独立收敛查询）：
@@ -698,7 +693,6 @@ resp = YOMKRPC_DEBUG_QUIT();                  // 3. 退出前显式清理
 ```bash
 yomkrpc node info pub_node          # 默认域 0
 yomkrpc node info -d 5 my_node      # 指定 DDS 域号
-yomkrpc node info -w 7 pub_node     # 收敛判定放宽为连续 7 次快照不变（默认 5）
 ```
 
 与发布端配合观察（先启动发布端并等待其稳定入域——工具每次运行创建全新调试节点，发现经 PDP/EDP 传播约需 1-3 秒，随后对该节点名独立收敛查询）：

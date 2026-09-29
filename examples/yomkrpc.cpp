@@ -5,25 +5,24 @@
  *
  * 用法：
  *   yomkrpc topic print [-d N | --domain N] <topic-name>
- *   yomkrpc topic list [-d N | --domain N] [-w N | --wait N] [-t | --types]
- *   yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>
- *   yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>
- *   yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>
+ *   yomkrpc topic list [-d N | --domain N] [-t | --types]
+ *   yomkrpc topic info [-d N | --domain N] [-v | --verbose] <topic-name>
+ *   yomkrpc topic type [-d N | --domain N] <topic-name>
+ *   yomkrpc topic find [-d N | --domain N] <type-name>
  *   yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>
- *   yomkrpc interface show [-d N | --domain N] [-w N | --wait N] <type-name>
- *   yomkrpc interface list [-d N | --domain N] [-w N | --wait N]
- *   yomkrpc topic pub -e | --example [-d N | --domain N] [-w N | --wait N] <topic-name>
- *   yomkrpc topic pub -ef | --example-file [-d N | --domain N] [-w N | --wait N]
+ *   yomkrpc interface show [-d N | --domain N] <type-name>
+ *   yomkrpc interface list [-d N | --domain N]
+ *   yomkrpc topic pub -e | --example [-d N | --domain N] <topic-name>
+ *   yomkrpc topic pub -ef | --example-file [-d N | --domain N]
  *           [-o <dir> | --output <dir>] <topic-name>
- *   yomkrpc node list [-d N | --domain N] [-w N | --wait N]
- *   yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>
+ *   yomkrpc node list [-d N | --domain N]
+ *   yomkrpc node info [-d N | --domain N] <node-name>
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
  *   yomkrpc topic print hello_world
  *   yomkrpc topic print -d 5 sensor_data
  *   yomkrpc topic list
- *   yomkrpc topic list -w 3
  *   yomkrpc topic list -t
  *   yomkrpc topic info hello_world
  *   yomkrpc topic info -v hello_world
@@ -41,7 +40,7 @@
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
  * topic list：创建节点后一次性收敛查询并逐行打印 topicName——自适应收敛：
- * 节点内部每 ~200ms 轮询一次发现缓存快照，连续 waitRounds 次（默认 5，-w 可调）集合不变
+ * 节点内部每 ~200ms 轮询一次发现缓存快照，连续 waitRounds 次（默认 5，环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS 可调）集合不变
  * 即认为发现收敛、立即输出，无需固定等待窗口；-t/--types 类型名模式：每行改输出
  * "主题名 [类型名]"（单空格 + 方括号，对齐 ros2 topic list -t，类型名原样输出）；
  * topic info：创建节点后独立收敛查询单个目标主题的发现详情（节点内部轮询该主题快照，
@@ -93,6 +92,13 @@
  *   1. 环境变量 YOMKRPC_DDS_DOMAIN_ID：默认从此读取；启动时无则创建并设默认值 0，
  *      同时幂等写入 ~/.bashrc（仅当其中无该变量时），使新开任意终端可查看并继承；
  *   2. -d N：临时指定，直接使用该值（不读、也绝不写环境变量与 .bashrc）。
+ *
+ * 收敛判定次数（环境变量为唯一配置入口）：
+ *   环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS：查询类命令收敛判定次数（连续 N 次 200ms
+ *   快照不变即输出，默认 5）；启动时无则创建并设默认值 5，同时幂等写入 ~/.bashrc
+ *   （仅当其中无该变量时）；值须为 >=1 的整数，非法报错退出。生效命令：topic list、
+ *   topic info、topic type、topic find、interface show、interface list、topic pub -e、
+ *   topic pub -ef、topic pub、node list、node info（topic print/topic hz 不用）。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>
@@ -132,28 +138,30 @@ static void printUsage(std::ostream &os)
 {
     os << "Usage:\n"
           "  yomkrpc topic print [-d N | --domain N] <topic-name>\n"
-          "  yomkrpc topic list [-d N | --domain N] [-w N | --wait N] [-t | --types]\n"
-          "  yomkrpc topic info [-d N | --domain N] [-w N | --wait N] [-v | --verbose] <topic-name>\n"
-          "  yomkrpc topic type [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
-          "  yomkrpc topic find [-d N | --domain N] [-w N | --wait N] <type-name>\n"
+          "  yomkrpc topic list [-d N | --domain N] [-t | --types]\n"
+          "  yomkrpc topic info [-d N | --domain N] [-v | --verbose] <topic-name>\n"
+          "  yomkrpc topic type [-d N | --domain N] <topic-name>\n"
+          "  yomkrpc topic find [-d N | --domain N] <type-name>\n"
           "  yomkrpc topic hz [-d N | --domain N] [--window N] <topic-name>\n"
-          "  yomkrpc interface show [-d N | --domain N] [-w N | --wait N] <type-name>\n"
-          "  yomkrpc interface list [-d N | --domain N] [-w N | --wait N]\n"
-          "  yomkrpc topic pub -e | --example [-d N | --domain N] [-w N | --wait N] <topic-name>\n"
-          "  yomkrpc topic pub -ef | --example-file [-d N | --domain N] [-w N | --wait N]\n"
+          "  yomkrpc interface show [-d N | --domain N] <type-name>\n"
+          "  yomkrpc interface list [-d N | --domain N]\n"
+          "  yomkrpc topic pub -e | --example [-d N | --domain N] <topic-name>\n"
+          "  yomkrpc topic pub -ef | --example-file [-d N | --domain N]\n"
           "          [-o <dir> | --output <dir>] <topic-name>\n"
-          "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] [-r N | --rate N] <topic-name> <json>\n"
-          "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] [-r N | --rate N] <topic-name> -f <file> | --file <file>\n"
-          "  yomkrpc node list [-d N | --domain N] [-w N | --wait N]\n"
-          "  yomkrpc node info [-d N | --domain N] [-w N | --wait N] <node-name>\n"
+          "  yomkrpc topic pub [-d N | --domain N] [-r N | --rate N] <topic-name> <json>\n"
+          "  yomkrpc topic pub [-d N | --domain N] [-r N | --rate N] <topic-name> -f <file> | --file <file>\n"
+          "  yomkrpc node list [-d N | --domain N]\n"
+          "  yomkrpc node info [-d N | --domain N] <node-name>\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
           "  -d N, --domain N    DDS 域号（0-232），临时指定，不写环境变量；未指定时读\n"
           "                      环境变量 YOMKRPC_DDS_DOMAIN_ID（无则默认 0）\n"
-          "  -w N, --wait N      收敛判定次数：连续 N 次 200ms 快照不变即输出\n"
-          "                      （默认 5，topic list、topic info、topic find、interface show、interface list、\n"
-          "                      topic pub -e、topic pub -ef、topic pub、node list 与 node info 生效）\n"
+          "  环境变量             收敛判定次数经 YOMKRPC_DDS_DISCOVER_ROUNDS 配置（连续 N 次\n"
+          "                      200ms 快照不变即输出，默认 5，topic list、topic info、topic type、\n"
+          "                      topic find、interface show、interface list、topic pub -e、\n"
+          "                      topic pub -ef、topic pub、node list 与 node info 生效；启动时无则\n"
+          "                      创建默认并写入 .bashrc，值非法报错退出）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -171,7 +179,6 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic print hello_world\n"
           "  yomkrpc topic print -d 5 sensor_data\n"
           "  yomkrpc topic list\n"
-          "  yomkrpc topic list -w 3\n"
           "  yomkrpc topic list -t\n"
           "  yomkrpc topic info hello_world\n"
           "  yomkrpc topic info -v hello_world\n"
@@ -189,17 +196,22 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub -r 1 hello_world -f msg.json\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
-          "  export YOMKRPC_DDS_DOMAIN_ID=5    # 环境变量方式（写入 .bashrc 可持久化）\n"
-          "  yomkrpc topic list                # 此后免 -d，等价于 -d 5\n";
+          "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
+          "  yomkrpc topic list                # 此后免 -d，等价于 -d 5\n"
+          "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
 }
 
 // 域 id 环境变量：默认路径（启动时无则创建并设默认值 0）；-d 显式指定时不读写它
 static constexpr char kDomainEnv[] = "YOMKRPC_DDS_DOMAIN_ID";
 
-// 将默认域 id 持久化到 ~/.bashrc（幂等）：仅当 .bashrc 中不存在该变量时追加一次 export 行，
-// 使新开任意终端可直接 echo 查看并自动继承；-d 指定不触发写入（临时语义）。
+// 发现收敛次数环境变量：查询类命令收敛判定次数（连续 N 次 200ms 快照不变即输出，
+// 默认 5）；启动时无则创建并设默认值 5；该变量为收敛次数唯一配置入口
+static constexpr char kDiscoverRoundsEnv[] = "YOMKRPC_DDS_DISCOVER_ROUNDS";
+
+// 将默认环境变量持久化到 ~/.bashrc（幂等）：仅当 .bashrc 中不存在该变量（任一行含
+// name 即视为已存在）时追加一次 export 行，使新开任意终端可直接 echo 查看并自动继承。
 // 失败（无 HOME/无写权限）仅告警不致命——进程内 setenv 兜底已保证本进程行为正确。
-static void persistDefaultDomainEnv()
+static void persistDefaultEnv(const char *name, const char *value, const char *note)
 {
     const char *home = std::getenv("HOME");
     if (home == nullptr)
@@ -213,7 +225,7 @@ static void persistDefaultDomainEnv()
         std::string line;
         while (std::getline(in, line))
         {
-            if (line.find(kDomainEnv) != std::string::npos)
+            if (line.find(name) != std::string::npos)
             {
                 return; // .bashrc 已含该变量（用户 export 或此前写入），不重复追加
             }
@@ -222,11 +234,11 @@ static void persistDefaultDomainEnv()
     std::ofstream out(bashrc, std::ios::app);
     if (!out)
     {
-        YOMK_ERROR_TAG("yomkrpc", "persist default domain id failed: cannot append ", bashrc);
+        YOMK_ERROR_TAG("yomkrpc", "persist default env failed: cannot append ", bashrc);
         return;
     }
-    out << "\n# added by yomkrpc: default DDS domain id (priority: -d > env > 0)\n"
-        << "export " << kDomainEnv << "=0\n";
+    out << "\n# added by yomkrpc: " << note << "\n"
+        << "export " << name << "=" << value << "\n";
 }
 
 // 解析域号：十进制、无尾随非数字字符、合法范围 [0,232]
@@ -239,6 +251,24 @@ static bool parseDomain(const char *text, uint32_t &domainId)
         return false;
     }
     domainId = static_cast<uint32_t>(value);
+    return true;
+}
+
+// 解析收敛次数：十进制、无尾随非数字字符、须 >=1（上限 uint32_t）；
+// text 为 nullptr（环境变量不存在）防御性返回 false
+static bool parseDiscoverRounds(const char *text, uint32_t &rounds)
+{
+    if (text == nullptr)
+    {
+        return false;
+    }
+    char *end = nullptr;
+    unsigned long value = std::strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || value == 0 || value > UINT32_MAX)
+    {
+        return false;
+    }
+    rounds = static_cast<uint32_t>(value);
     return true;
 }
 
@@ -1141,13 +1171,23 @@ int main(int argc, char *argv[])
     if (std::getenv(kDomainEnv) == nullptr)
     {
         ::setenv(kDomainEnv, "0", 1);
-        persistDefaultDomainEnv();
+        persistDefaultEnv(kDomainEnv, "0", "default DDS domain id (priority: -d > env > 0)");
     }
 
-    // ---- 参数解析：-h/--help 即刻退出；-d/--domain 与 -w/--wait 可选；位置参数 ----
+    // ---- 收敛次数环境变量：无 YOMKRPC_DDS_DISCOVER_ROUNDS 则创建并设默认值 5（进程内
+    // 生效），并幂等持久化到 ~/.bashrc 使新开终端可见可继承；该变量为查询类命令
+    // 收敛次数的唯一配置入口 ----
+    if (std::getenv(kDiscoverRoundsEnv) == nullptr)
+    {
+        ::setenv(kDiscoverRoundsEnv, "5", 1);
+        persistDefaultEnv(kDiscoverRoundsEnv, "5",
+                          "discovery stable rounds for query commands (default 5)");
+    }
+
+    // ---- 参数解析：-h/--help 即刻退出；-d/--domain 可选；位置参数（收敛次数无 CLI 选项，恒读环境变量） ----
     uint32_t domainId = 0;
     bool hasDomainId = false;
-    uint32_t waitRounds = 5; // 收敛判定次数（-w 覆盖；topic list、topic info、topic find、interface show、interface list、node list 与 node info 生效）
+    uint32_t waitRounds = 5; // 收敛判定次数（从环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS 读取；查询类命令生效）
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
@@ -1177,24 +1217,6 @@ int main(int argc, char *argv[])
                 return 2;
             }
             hasDomainId = true;
-            continue;
-        }
-        if (arg == "-w" || arg == "--wait")
-        {
-            if (i + 1 >= argc)
-            {
-                std::cerr << "yomkrpc: " << arg << " 缺少收敛次数参数\n";
-                printUsage(std::cerr);
-                return 2;
-            }
-            char *end = nullptr;
-            unsigned long value = std::strtoul(argv[++i], &end, 10);
-            if (end == argv[i] || *end != '\0' || value == 0 || value > UINT32_MAX)
-            {
-                std::cerr << "yomkrpc: 非法收敛次数 \"" << argv[i] << "\"（须为 >=1 的整数）\n";
-                return 2;
-            }
-            waitRounds = static_cast<uint32_t>(value);
             continue;
         }
         if (arg == "-o" || arg == "--output")
@@ -1278,6 +1300,16 @@ int main(int argc, char *argv[])
                       << "\"（合法范围 [0,232]）\n";
             return 2;
         }
+    }
+
+    // ---- 收敛次数解析：恒从环境变量读取（默认 5，无 CLI 覆盖途径） ----
+    const char *roundsEnv = std::getenv(kDiscoverRoundsEnv);
+    if (!parseDiscoverRounds(roundsEnv, waitRounds))
+    {
+        std::cerr << "yomkrpc: 环境变量 " << kDiscoverRoundsEnv << " 非法 \""
+                  << (roundsEnv == nullptr ? "(null)" : roundsEnv)
+                  << "\"（须为 >=1 的整数）\n";
+        return 2;
     }
 
     // ---- 子命令分派：topic print <topic-name> / topic list / topic info <topic-name> /
