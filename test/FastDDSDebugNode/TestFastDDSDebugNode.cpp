@@ -7,9 +7,12 @@
  *       FastDDSDebugNode 仅凭主题名经 DDS 发现机制取回远端 TypeInformation/TypeObject，
  *       生成 DynamicType 自动建订阅，收到消息后经内置 json_serialize 结构化输出。
  * 覆盖：
- *   守卫  未 setDomainId 时 subscribeTopic/listTopics → false；
+ *   守卫  未 setDomainId 时 subscribeTopic/listTopics/nodeList/interfaceShow/topicInfo/
+ *         nodeInfo/topicExample/topicMsgJson → false，且 error 出参含 "debug node not created"
+ *         （节点层 7 处未入域分支全覆盖）；
  *         setDomainId 重复调用 → 第二次 false；
- *         subscribeTopic 重复登记同一主题 → 第二次 false；
+ *         subscribeTopic 主题名空 → false 且 error 含 "empty topic name"；
+ *         subscribeTopic 重复登记同一主题 → 第二次 false 且 error 含 "already registered"；
  *         入域后 listTopics(listed,1,50) → true 且空（stableRounds=1 单次快照，无 writer 空列表正常）；
  *         入域无 writer listTopics(listed,2,100) → true 且空（快照立即稳定收敛）；
  *   端到端 发布端持续 publish（MString "hello_debug"）→ 被测端捕获输出包含
@@ -34,6 +37,17 @@
  *   主题详情 verbose 同命名 peer 端点 → topicInfo verbose 模式（指针非空）填充端点详情：
  *         归属节点名（GUID 前缀归属）、FastDDS 原生 prefix|entity GUID、QoS 行集（核心组
  *         Reliability/Durability 等键行）；未发现主题 verbose 指针传入 → false 且列表为空。
+ *   未命中  interfaceShow(Not::Exist) / topicExample / topicMsgJson 对不存在目标 → false，
+ *         error 出参分别为 "type [...] not found" / "topic [...] not found"（第一层文本逐字不变）。
+ *   裸类型端点 自建不携带 XTypes TypeObject 的 TopicDataType（模拟 ROS2 rmw_fastrtps）发布：
+ *         topicInfo → true 且类型名原样可见（发现层通）；interfaceShow / topicExample /
+ *         topicMsgJson / topicPub → false 且 error 归类为 "... not available"（不含 not found，
+ *         第二层与第一层已区分）；subscribeTopic 后失败告警首次立即打印、窗口内不刷屏、
+ *         距首次 ≥5s 后才重复（告警节流：1.2s 窗口恰 1 次、5.3s 窗口恰再 1 次）；
+ *         重复登记 → error 含 "already registered"。
+ *   等待提示 无发布者主题 subscribeTopic → true（登记不因未发现而失败）；宽限窗内
+ *         （2s < kPendingHintDelayMs=3000）不打提示（刚入域发现未完成时对"发布者早已在线"
+ *         的常规场景不误报）；满窗后恰打 1 次 "not discovered yet" 且后续轮询不重复。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -50,14 +64,22 @@
 
 #include <fastdds/dds/core/policy/QosPolicies.hpp> // ReliabilityQosPolicy kind（topicPub 用例）
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp> // 纯订阅端 participant（仅订阅者用例）
+#include <fastdds/dds/publisher/DataWriter.hpp>  // 裸类型端点用例 writer
+#include <fastdds/dds/publisher/Publisher.hpp>
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>  // topicPub 用例接收监听器
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
 #include <fastdds/dds/subscriber/qos/DataReaderQos.hpp>
+#include <fastdds/dds/topic/TopicDataType.hpp>   // 裸类型端点用例（不携带 TypeObject）
+
+#include <fcntl.h>    // stdout 捕获：管道非阻塞读
+#include <unistd.h>   // stdout 捕获：dup/dup2/read/close
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -87,25 +109,272 @@ namespace
         }
         std::atomic<bool> received_{false};
     };
+
+    // ---- 裸类型端点（模拟 ROS2 rmw_fastrtps）----
+    // 定长 POD 样本：不经 CDR 层，序列化即 encapsulation header(4B) + 原样字节拷贝
+    struct PlainSample
+    {
+        uint32_t value{0};
+    };
+
+    // 不携带 TypeObject 的 TopicDataType：构造仅 set_name + max_serialized_type_size，不覆写
+    // register_type_object_representation（保持基类空实现），type_identifiers_ 留默认（TK_NONE）。
+    // 效果与 ROS2 rmw_fastrtps 端点一致：发现层可见主题名与类型名，但远端 TypeObject 永不可得，
+    // 类型重建链路（interface show / pub -e / topic print）全部卡在第二层
+    class PlainNoTypeObjectPubSubType : public eprosima::fastdds::dds::TopicDataType
+    {
+    public:
+        PlainNoTypeObjectPubSubType()
+        {
+            set_name("Plain::NoTypeObject");
+            max_serialized_type_size = 4 + static_cast<uint32_t>(sizeof(PlainSample)); /*encapsulation*/
+            is_compute_key_provided = false;
+        }
+        ~PlainNoTypeObjectPubSubType() override = default;
+
+        bool serialize(const void *const data, eprosima::fastdds::rtps::SerializedPayload_t &payload,
+                       eprosima::fastdds::dds::DataRepresentationId_t data_representation) override
+        {
+            static_cast<void>(data_representation);
+            if (payload.max_size < max_serialized_type_size)
+            {
+                return false;
+            }
+            std::memset(payload.data, 0, max_serialized_type_size);
+            std::memcpy(payload.data + 4, data, sizeof(PlainSample));
+            payload.length = max_serialized_type_size;
+            return true;
+        }
+        bool deserialize(eprosima::fastdds::rtps::SerializedPayload_t &payload, void *data) override
+        {
+            if (payload.length < 4 + sizeof(PlainSample))
+            {
+                return false;
+            }
+            std::memcpy(data, payload.data + 4, sizeof(PlainSample));
+            return true;
+        }
+        uint32_t calculate_serialized_size(const void *const data,
+                                           eprosima::fastdds::dds::DataRepresentationId_t data_representation) override
+        {
+            static_cast<void>(data);
+            static_cast<void>(data_representation);
+            return max_serialized_type_size;
+        }
+        bool compute_key(eprosima::fastdds::rtps::SerializedPayload_t &payload,
+                         eprosima::fastdds::rtps::InstanceHandle_t &ihandle, bool force_md5) override
+        {
+            static_cast<void>(payload);
+            static_cast<void>(ihandle);
+            static_cast<void>(force_md5);
+            return true; // 无键类型：不做实例归属
+        }
+        bool compute_key(const void *const data, eprosima::fastdds::rtps::InstanceHandle_t &ihandle,
+                         bool force_md5) override
+        {
+            static_cast<void>(data);
+            static_cast<void>(ihandle);
+            static_cast<void>(force_md5);
+            return true;
+        }
+        void *create_data() override
+        {
+            return new PlainSample();
+        }
+        void delete_data(void *data) override
+        {
+            delete static_cast<PlainSample *>(data);
+        }
+    };
+
+    // ---- stdout 捕获（fd 级 dup2）----
+    // 不采用 std::cout::rdbuf() 替换：被测节点的工作线程同时向 std::cout 写告警，rdbuf 指针
+    // 替换与之构成数据竞争（tsan 模式下必报）。fd 级重定向无共享 C++ 可变状态，且告警均以
+    // std::endl 结尾（stdio_sync_filebuf 立即 fflush 到 fd 1），捕获窗口边界清晰
+    class StdoutCapture
+    {
+    public:
+        StdoutCapture() = default;
+        ~StdoutCapture()
+        {
+            (void)stop();
+        }
+        StdoutCapture(const StdoutCapture &) = delete;
+        StdoutCapture &operator=(const StdoutCapture &) = delete;
+
+        bool start()
+        {
+            std::cout.flush();
+            std::fflush(stdout);
+            if (0 != ::pipe(fds_))
+            {
+                fds_[0] = -1;
+                fds_[1] = -1;
+                return false;
+            }
+            saved_ = ::dup(STDOUT_FILENO);
+            if (saved_ < 0)
+            {
+                closePipes();
+                return false;
+            }
+            if (-1 == ::dup2(fds_[1], STDOUT_FILENO))
+            {
+                ::close(saved_);
+                saved_ = -1;
+                closePipes();
+                return false;
+            }
+            capturing_ = true;
+            return true;
+        }
+        // 结束捕获并返回窗口内全部 stdout 文本；未开始捕获时返回空串
+        std::string stop()
+        {
+            std::string out;
+            if (!capturing_)
+            {
+                closePipes();
+                return out;
+            }
+            std::cout.flush();
+            std::fflush(stdout);
+            ::dup2(saved_, STDOUT_FILENO);
+            ::close(saved_);
+            saved_ = -1;
+            capturing_ = false;
+            ::close(fds_[1]);
+            fds_[1] = -1;
+            const int flags = ::fcntl(fds_[0], F_GETFL, 0);
+            ::fcntl(fds_[0], F_SETFL, (-1 == flags) ? O_NONBLOCK : (flags | O_NONBLOCK));
+            char buf[4096];
+            ssize_t n = 0;
+            while ((n = ::read(fds_[0], buf, sizeof(buf))) > 0)
+            {
+                out.append(buf, static_cast<size_t>(n));
+            }
+            ::close(fds_[0]);
+            fds_[0] = -1;
+            return out;
+        }
+
+    private:
+        void closePipes()
+        {
+            if (fds_[0] >= 0)
+            {
+                ::close(fds_[0]);
+            }
+            if (fds_[1] >= 0)
+            {
+                ::close(fds_[1]);
+            }
+            fds_[0] = -1;
+            fds_[1] = -1;
+        }
+        int fds_[2]{-1, -1};
+        int saved_{-1};
+        bool capturing_{false};
+    };
+
+    // 统计子串出现次数（告警节流断言用）
+    size_t countOccurrences(const std::string &haystack, const std::string &needle)
+    {
+        if (needle.empty())
+        {
+            return 0;
+        }
+        size_t count = 0;
+        size_t pos = haystack.find(needle);
+        while (std::string::npos != pos)
+        {
+            ++count;
+            pos = haystack.find(needle, pos + needle.size());
+        }
+        return count;
+    }
 } // namespace
 
 int main()
 {
-    // ---- 守卫用例：未入域登记 / 重复入域 / 重复登记 ----
+    // ---- 守卫用例：未入域登记 / 重复入域 / 重复登记（并校验 error 出参文本）----
     {
         FastDDSDebugNode dbg;
         std::vector<std::pair<std::string, std::string>> listed;
         std::vector<std::string> nodes;
-        CHECK(!dbg.listTopics(listed), "未 setDomainId 时 listTopics → false（participant 未创建）");
-        CHECK(!dbg.nodeList(nodes), "未 setDomainId 时 nodeList → false（participant 未创建）");
+        std::string guardErr;
+        // 未入域（participant_ 为空）时 7 个查询/登记入口全部 false，且 error 统一归类为
+        // "debug node not created"（原为静默 return false，服务层只能报笼统文本）
+        guardErr.clear();
+        CHECK(!dbg.listTopics(listed, 5, 200, &guardErr),
+              "未 setDomainId 时 listTopics → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 listTopics 的 error 含 debug node not created");
+        guardErr.clear();
+        CHECK(!dbg.nodeList(nodes, 5, 200, &guardErr),
+              "未 setDomainId 时 nodeList → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 nodeList 的 error 含 debug node not created");
         std::vector<std::string> ifaceGuard;
-        CHECK(!dbg.interfaceShow("Any::Type", ifaceGuard),
+        guardErr.clear();
+        CHECK(!dbg.interfaceShow("Any::Type", ifaceGuard, 5, 200, &guardErr),
               "未 setDomainId 时 interfaceShow → false（participant 未创建）");
-        CHECK(!dbg.subscribeTopic(TEST_TOPIC), "未 setDomainId 时 subscribeTopic → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 interfaceShow 的 error 含 debug node not created");
+        guardErr.clear();
+        CHECK(!dbg.subscribeTopic(TEST_TOPIC, &guardErr),
+              "未 setDomainId 时 subscribeTopic → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 subscribeTopic 的 error 含 debug node not created");
+        // 补齐剩余 4 个入口的未入域守卫（topicInfo / nodeInfo / topicExample / topicMsgJson），
+        // 使节点层 7 处 participant_ == nullptr 分支全覆盖
+        std::string guardTypeName;
+        size_t guardPub = 0;
+        size_t guardSub = 0;
+        guardErr.clear();
+        CHECK(!dbg.topicInfo(TEST_TOPIC, guardTypeName, guardPub, guardSub, 5, 200,
+                  nullptr, nullptr, &guardErr),
+              "未 setDomainId 时 topicInfo → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 topicInfo 的 error 含 debug node not created");
+        std::vector<std::pair<std::string, std::string>> guardNodePubs;
+        std::vector<std::pair<std::string, std::string>> guardNodeSubs;
+        guardErr.clear();
+        CHECK(!dbg.nodeInfo("any-node", guardNodePubs, guardNodeSubs, 5, 200, &guardErr),
+              "未 setDomainId 时 nodeInfo → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 nodeInfo 的 error 含 debug node not created");
+        std::vector<std::string> exampleGuard;
+        guardErr.clear();
+        CHECK(!dbg.topicExample(TEST_TOPIC, exampleGuard, 5, 200, &guardErr),
+              "未 setDomainId 时 topicExample → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 topicExample 的 error 含 debug node not created");
+        std::string guardMsgType;
+        std::string guardMsgJson;
+        guardErr.clear();
+        CHECK(!dbg.topicMsgJson(TEST_TOPIC, guardMsgType, guardMsgJson, 5, 200, &guardErr),
+              "未 setDomainId 时 topicMsgJson → false（participant 未创建）");
+        CHECK(guardErr.find("debug node not created") != std::string::npos,
+              "未入域 topicMsgJson 的 error 含 debug node not created");
+        // subscribeTopic 其余三类拒绝原因之主题名空（subscriber 未建在本测试树不可达：
+        // 入域即建 subscriber，未入域时先命中 participant 分支）
+        guardErr.clear();
+        CHECK(!dbg.subscribeTopic("", &guardErr), "空主题名 subscribeTopic → false（未入域守卫优先）");
         CHECK(dbg.setDomainId(TEST_DOMAIN), "setDomainId(200) → true");
         CHECK(!dbg.setDomainId(TEST_DOMAIN), "重复 setDomainId(200) → false（仅可成功一次）");
+        // 入域后主题名空 → 归类为 empty topic name（participant/subscriber 均已就位）
+        guardErr.clear();
+        CHECK(!dbg.subscribeTopic("", &guardErr), "入域后空主题名 subscribeTopic → false");
+        CHECK(guardErr.find("empty topic name") != std::string::npos,
+              "入域后空主题名的 error 含 empty topic name");
         CHECK(dbg.subscribeTopic(TEST_TOPIC), "首次 subscribeTopic(t_debug) → true（登记待发现）");
-        CHECK(!dbg.subscribeTopic(TEST_TOPIC), "重复 subscribeTopic(t_debug) → false（pending_ 去重）");
+        guardErr.clear();
+        CHECK(!dbg.subscribeTopic(TEST_TOPIC, &guardErr),
+              "重复 subscribeTopic(t_debug) → false（pending_ 去重）");
+        CHECK(guardErr.find("already registered") != std::string::npos,
+              "重复登记的 error 含 already registered");
+        std::cout << "[OBSERVE] guard errors |" << guardErr << "|" << std::endl;
         // 本时刻域内无其他 participant（ctest 串行，e2e 的 pub 尚未创建），发现缓存必空；
         // 断言 stableRounds=1 单次快照路径正常（免等待的快速查询语义）
         listed.clear();
@@ -563,11 +832,37 @@ int main()
         {
             std::cout << "[OBSERVE] iface |" << line << "|" << std::endl;
         }
-        // 未发现类型：单次快照快速路径 → false 且输出保持为空
+        // 未发现类型：单次快照快速路径 → false 且输出保持为空，error 回填"类型名未出现"
+        // 归类文本（不是 TypeObject 不可得，后者需裸类型端点才能触发）
         std::vector<std::string> ifaceMiss;
-        CHECK(!dbg.interfaceShow("Not::Exist", ifaceMiss, 1, 50),
+        std::string ifaceMissErr;
+        CHECK(!dbg.interfaceShow("Not::Exist", ifaceMiss, 1, 50, &ifaceMissErr),
               "interfaceShow(Not::Exist,1,50ms) → false（未发现类型）");
         CHECK(ifaceMiss.empty(), "未发现类型时输出保持为空");
+        CHECK(ifaceMissErr.find("type [Not::Exist] not found") != std::string::npos,
+              "未发现类型的 error 为 type [...] not found（第一层语义不变）");
+        std::cout << "[OBSERVE] iface miss error |" << ifaceMissErr << "|" << std::endl;
+
+        // topicExample / topicMsgJson 未发现主题：error 回填步骤 1 的 topic [...] not found
+        // （第一层文本逐字不变，与 topicPub 既有措辞一致）
+        std::vector<std::string> exampleMiss;
+        std::string exampleMissErr;
+        CHECK(!dbg.topicExample("t_not_exist_example", exampleMiss, 1, 50, &exampleMissErr),
+              "topicExample(t_not_exist_example,1,50ms) → false（未发现主题）");
+        CHECK(exampleMiss.empty(), "未发现主题时 topicExample 输出保持为空");
+        CHECK(exampleMissErr.find("topic [t_not_exist_example] not found") != std::string::npos,
+              "topicExample 未发现主题的 error 为 topic [...] not found");
+        std::string msgMissType;
+        std::string msgMissJson;
+        std::string msgMissErr;
+        CHECK(!dbg.topicMsgJson("t_not_exist_msg", msgMissType, msgMissJson, 1, 50, &msgMissErr),
+              "topicMsgJson(t_not_exist_msg,1,50ms) → false（未发现主题）");
+        CHECK(msgMissType.empty() && msgMissJson.empty(),
+              "未发现主题时 topicMsgJson 两要素保持为空");
+        CHECK(msgMissErr.find("topic [t_not_exist_msg] not found") != std::string::npos,
+              "topicMsgJson 未发现主题的 error 为 topic [...] not found");
+        std::cout << "[OBSERVE] example miss |" << exampleMissErr
+                  << "| msg miss |" << msgMissErr << "|" << std::endl;
 
         // 清理：writer → topic → publisher → participant（顺序与既有块一致）
         if (anonWriter != nullptr && anonPub != nullptr)
@@ -1073,6 +1368,171 @@ int main()
             }
             dds::DomainParticipantFactory::get_instance()->delete_participant(mtParticipant);
         }
+    }
+
+    // ---- 裸类型端点用例：模拟 ROS2 rmw_fastrtps——发现层可见但不提供 XTypes TypeObject ----
+    // 验证两点：① 类型重建类查询归类为 "type object for [...] not available"（而非笼统
+    // not found，后者会误导为类型名拼写错误）；② subscribeTopic 后的失败告警首次立即打印、
+    // 之后按 5s 节流（原 typeNotReadyWarn 开关下 L1772 告警为死代码，此场景 CLI 零输出）
+    {
+        namespace dds = eprosima::fastdds::dds;
+        constexpr const char *PLAIN_TOPIC = "t_plain_notypeobject";
+        auto *plainParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(plainParticipant != nullptr, "裸类型场景 participant 创建成功");
+        if (plainParticipant != nullptr)
+        {
+            dds::TypeSupport plainTs(new PlainNoTypeObjectPubSubType());
+            plainTs.register_type(plainParticipant);
+            auto *plainPub = plainParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            auto *plainTopic = (plainPub != nullptr)
+                                   ? plainParticipant->create_topic(PLAIN_TOPIC, plainTs.get_type_name(),
+                                         dds::TOPIC_QOS_DEFAULT)
+                                   : nullptr;
+            auto *plainWriter = (plainTopic != nullptr)
+                                    ? plainPub->create_datawriter(plainTopic, dds::DATAWRITER_QOS_DEFAULT)
+                                    : nullptr;
+            CHECK(plainWriter != nullptr, "裸类型 DataWriter 创建成功（不注册 TypeObject 表示）");
+
+            if (plainWriter != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（裸类型场景）");
+
+                // ① 发现层：writer 端点信息进缓存，类型名原样可见（与真类型端点无差别）
+                std::string plainType;
+                size_t plainPubCount = 0;
+                size_t plainSubCount = 0;
+                bool plainSeen = false;
+                for (int i = 0; i < 50 && !plainSeen; ++i)
+                {
+                    plainSeen = dbg.topicInfo(PLAIN_TOPIC, plainType, plainPubCount, plainSubCount, 1, 50);
+                    if (!plainSeen)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                }
+                CHECK(plainSeen, "裸类型主题发现层可见（topicInfo → true）");
+                CHECK(plainType == "Plain::NoTypeObject", "裸类型主题类型名原样回传");
+                CHECK(plainPubCount == 1, "裸类型主题 publisherCount==1");
+
+                // ② 类型重建层：TypeObject 不可得 → interfaceShow / topicExample / topicMsgJson
+                // 均归类为 not available，且不得包含 not found（区分第一层"未发现"）
+                std::vector<std::string> plainIface;
+                std::string plainErr;
+                CHECK(!dbg.interfaceShow("Plain::NoTypeObject", plainIface, 5, 100, &plainErr),
+                      "interfaceShow(裸类型) → false（TypeObject 不可得）");
+                CHECK(plainErr.find("not available") != std::string::npos,
+                      "interfaceShow error 含 not available");
+                CHECK(plainErr.find("not found") == std::string::npos,
+                      "interfaceShow error 不含笼统 not found（第二层与第一层已区分）");
+                std::cout << "[OBSERVE] plain interfaceShow error |" << plainErr << "|" << std::endl;
+
+                std::vector<std::string> plainExample;
+                plainErr.clear();
+                CHECK(!dbg.topicExample(PLAIN_TOPIC, plainExample, 5, 100, &plainErr),
+                      "topicExample(裸类型) → false（步骤 2 TypeObject 不可得）");
+                CHECK(plainErr.find("not available") != std::string::npos &&
+                          plainErr.find("not found") == std::string::npos,
+                      "topicExample error 为 not available（不再报 topic not found）");
+                std::string plainMsgType;
+                std::string plainMsgJson;
+                std::string plainMsgErr;
+                CHECK(!dbg.topicMsgJson(PLAIN_TOPIC, plainMsgType, plainMsgJson, 5, 100, &plainMsgErr),
+                      "topicMsgJson(裸类型) → false（步骤 2 TypeObject 不可得）");
+                CHECK(plainMsgErr.find("not available") != std::string::npos &&
+                          plainMsgErr.find("not found") == std::string::npos,
+                      "topicMsgJson error 为 not available");
+                std::string plainPubErr;
+                CHECK(!dbg.topicPub(PLAIN_TOPIC, "{}", plainPubErr, 5, 100),
+                      "topicPub(裸类型) → false（类型重建失败）");
+                CHECK(plainPubErr.find("not available") != std::string::npos,
+                      "topicPub error 含 not available（措辞基准一致）");
+
+                // ③ 告警节流：登记后工作线程每 100ms 重试，TypeObject 永不可得 →
+                // 窗口 1（1.2s 约 12 次重试）恰 1 次告警（不再静默也不刷屏）
+                constexpr const char *kWarnMark = "TypeObject not ready";
+                StdoutCapture cap;
+                CHECK(cap.start(), "stdout 捕获启动成功");
+                std::string subErr;
+                CHECK(dbg.subscribeTopic(PLAIN_TOPIC, &subErr),
+                      "裸类型主题 subscribeTopic → true（登记待发现，主题已入缓存无等待提示）");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+                const std::string firstWindow = cap.stop();
+                const size_t firstCount = countOccurrences(firstWindow, kWarnMark);
+                std::cout << "[OBSERVE] warn window1 count=" << firstCount << std::endl;
+                CHECK(1 == firstCount, "节流窗口 1（1.2s / 约 12 次重试）内告警恰出现 1 次");
+                CHECK(firstWindow.find("rmw_fastrtps") != std::string::npos,
+                      "告警文本含原因提示（rmw_fastrtps 端点不提供 TypeObject）");
+
+                // 窗口 2：再等 5.3s（> kSubWarnIntervalMs=5000，头文件公开常量）→ 恰第 2 次
+                StdoutCapture cap2;
+                CHECK(cap2.start(), "stdout 捕获（节流窗口 2）启动成功");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5300));
+                const std::string secondWindow = cap2.stop();
+                const size_t secondCount = countOccurrences(secondWindow, kWarnMark);
+                std::cout << "[OBSERVE] warn window2 count=" << secondCount << std::endl;
+                CHECK(1 == secondCount, "节流窗口 2（5.3s）内告警恰再出现 1 次（5s 节流生效）");
+
+                // 订阅仍未建立（告警仅提升可见性，不改变行为）：重复登记仍报 already registered
+                subErr.clear();
+                CHECK(!dbg.subscribeTopic(PLAIN_TOPIC, &subErr),
+                      "裸类型主题重复登记 → false（仍留 pending）");
+                CHECK(subErr.find("already registered") != std::string::npos,
+                      "裸类型重复登记 error 含 already registered");
+            }
+
+            // 清理：writer → topic → publisher → participant
+            if (plainWriter != nullptr && plainPub != nullptr)
+            {
+                plainPub->delete_datawriter(plainWriter);
+            }
+            if (plainTopic != nullptr)
+            {
+                plainParticipant->delete_topic(plainTopic);
+            }
+            if (plainPub != nullptr)
+            {
+                plainParticipant->delete_publisher(plainPub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(plainParticipant);
+        }
+    }
+
+    // ---- 一次性等待提示用例：登记满宽限窗仍无 writer 才提示，且只提示一次 ----
+    // 验证两点：① 宽限窗内（登记后 2s）不打提示——刚入域发现未完成时不对"发布者
+    // 早已在线"的常规场景误报；② 满窗后打一次且仅一次（不随 100ms 轮询重复），消除
+    // 主题名拼错 / 发布者未上线时 topic print 与 topic hz 的永久静默
+    {
+        FastDDSDebugNode dbg;
+        CHECK(dbg.setDomainId(TEST_DOMAIN), "等待提示用例 setDomainId → true");
+        constexpr const char *kHintMark = "not discovered yet";
+        StdoutCapture hintCap;
+        CHECK(hintCap.start(), "stdout 捕获（等待提示宽限窗）启动成功");
+        std::string hintErr;
+        CHECK(dbg.subscribeTopic("t_hint_no_publisher", &hintErr),
+              "无发布者主题 subscribeTopic → true（登记为延迟行为，不因未发现而失败）");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        const std::string graceWindow = hintCap.stop();
+        CHECK(graceWindow.find(kHintMark) == std::string::npos,
+              "宽限窗内（2s < kPendingHintDelayMs=3000）不打等待提示");
+
+        StdoutCapture hintCap2;
+        CHECK(hintCap2.start(), "stdout 捕获（等待提示满窗）启动成功");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        const std::string hintWindow = hintCap2.stop();
+        const size_t hintCount = countOccurrences(hintWindow, kHintMark);
+        std::cout << "[OBSERVE] hint count=" << hintCount << std::endl;
+        CHECK(1 == hintCount, "宽限窗满后等待提示恰出现 1 次");
+        CHECK(hintWindow.find("t_hint_no_publisher") != std::string::npos,
+              "等待提示含登记的主题名");
+
+        StdoutCapture hintCap3;
+        CHECK(hintCap3.start(), "stdout 捕获（等待提示一次性）启动成功");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        const std::string tailWindow = hintCap3.stop();
+        CHECK(tailWindow.find(kHintMark) == std::string::npos,
+              "提示已打过 → 后续轮询不再重复（一次性）");
     }
 
     return testReport("TestFastDDSDebugNode");

@@ -399,7 +399,7 @@ public:
     {
         if (info.current_count_change != 0)
         {
-            std::cout << "[FastDDSDebugNode] topic=" << topic_
+            std::cout << "topic=" << topic_
                       << " matched writers=" << info.current_count << std::endl;
         }
     }
@@ -553,15 +553,39 @@ bool FastDDSDebugNode::setDomainId(uint32_t domainId)
     return true;
 }
 
-bool FastDDSDebugNode::subscribeTopic(const std::string& topicName)
+bool FastDDSDebugNode::subscribeTopic(const std::string& topicName, std::string* error)
 {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (participant_ == nullptr || subscriber_ == nullptr || topicName.empty() ||
-            pending_.count(topicName) > 0 || subs_.count(topicName) > 0)
+    // 四类拒绝原因各自归类（原单一 return false 使服务层只能报笼统 failed）
+    if (participant_ == nullptr || subscriber_ == nullptr)
     {
+        if (error != nullptr)
+        {
+            *error = (participant_ == nullptr) ? "debug node not created" : "subscriber not created";
+        }
+        return false;
+    }
+    if (topicName.empty())
+    {
+        if (error != nullptr)
+        {
+            *error = "empty topic name";
+        }
+        return false;
+    }
+    if (pending_.count(topicName) > 0 || subs_.count(topicName) > 0)
+    {
+        if (error != nullptr)
+        {
+            *error = "topic [" + topicName + "] already registered";
+        }
         return false;
     }
     pending_.insert(topicName);
+    // 记录登记时刻作为一次性等待提示的宽限起点（提示由工作线程在满
+    // kPendingHintDelayMs 仍无 writer 时打）。不在此处直接查发现缓存判定：调用方
+    // 通常在 setDomainId 之后立即登记，本端发现尚未完成会对"发布者早已在线"误报
+    pendingSince_[topicName] = std::chrono::steady_clock::now();
     // 订阅建立由工作线程完成（含 writer 先于登记、TypeObject 稍后就绪等时序），此处仅登记并唤醒
     cv_.notify_all();
     return true;
@@ -574,7 +598,7 @@ void FastDDSDebugNode::setOutputSink(OutputSink sink)
 }
 
 bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string>>& topics,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -588,6 +612,10 @@ bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
@@ -597,7 +625,8 @@ bool FastDDSDebugNode::listTopics(std::vector<std::pair<std::string, std::string
 bool FastDDSDebugNode::topicInfo(const std::string& topicName, std::string& typeName,
         size_t& publisherCount, size_t& subscriptionCount,
         uint32_t stableRounds, uint32_t intervalMs,
-        std::vector<EndpointDetail>* publishers, std::vector<EndpointDetail>* subscribers)
+        std::vector<EndpointDetail>* publishers, std::vector<EndpointDetail>* subscribers,
+        std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -611,16 +640,28 @@ bool FastDDSDebugNode::topicInfo(const std::string& topicName, std::string& type
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
-    return waitForTopicInfoStable(
-        topicName, typeName, publisherCount, subscriptionCount, stableRounds, intervalMs,
-        publishers, subscribers);
+    if (!waitForTopicInfoStable(
+            topicName, typeName, publisherCount, subscriptionCount, stableRounds, intervalMs,
+            publishers, subscribers))
+    {
+        if (error != nullptr)
+        {
+            *error = "topic [" + topicName + "] not found";
+        }
+        return false;
+    }
+    return true;
 }
 
 bool FastDDSDebugNode::nodeList(std::vector<std::string>& names,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -634,6 +675,10 @@ bool FastDDSDebugNode::nodeList(std::vector<std::string>& names,
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
@@ -643,7 +688,7 @@ bool FastDDSDebugNode::nodeList(std::vector<std::string>& names,
 bool FastDDSDebugNode::nodeInfo(const std::string& nodeName,
         std::vector<std::pair<std::string, std::string>>& publishers,
         std::vector<std::pair<std::string, std::string>>& subscribers,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -657,15 +702,27 @@ bool FastDDSDebugNode::nodeInfo(const std::string& nodeName,
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
-    return waitForNodeInfoStable(nodeName, publishers, subscribers, stableRounds, intervalMs);
+    if (!waitForNodeInfoStable(nodeName, publishers, subscribers, stableRounds, intervalMs))
+    {
+        if (error != nullptr)
+        {
+            *error = "node [" + nodeName + "] not found";
+        }
+        return false;
+    }
+    return true;
 }
 
 bool FastDDSDebugNode::interfaceShow(const std::string& typeName,
         std::vector<std::string>& lines,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -679,15 +736,19 @@ bool FastDDSDebugNode::interfaceShow(const std::string& typeName,
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
-    return waitForInterfaceStable(typeName, lines, stableRounds, intervalMs);
+    return waitForInterfaceStable(typeName, lines, stableRounds, intervalMs, error);
 }
 
 bool FastDDSDebugNode::topicExample(const std::string& topicName,
         std::vector<std::string>& lines,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -701,6 +762,10 @@ bool FastDDSDebugNode::topicExample(const std::string& topicName,
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
@@ -711,17 +776,23 @@ bool FastDDSDebugNode::topicExample(const std::string& topicName,
     if (!waitForTopicInfoStable(topicName, typeName, publisherCount, subscriptionCount,
                 stableRounds, intervalMs))
     {
+        if (error != nullptr)
+        {
+            *error = "topic [" + topicName + "] not found";
+        }
         return false;
     }
-    // 2) 收敛拿 IDL 行集（类型名刚命中，TypeObject 大概率已就绪）
+    // 2) 收敛拿 IDL 行集（类型名刚命中，TypeObject 大概率已就绪）；失败原因由
+    // waitForInterfaceStable 归类回填（类型名未出现 / TypeObject 不可得 / 非 struct），
+    // 不再与步骤 1 笼统合并为 topic not found
     std::vector<std::string> idl;
-    if (!waitForInterfaceStable(typeName, idl, stableRounds, intervalMs))
+    if (!waitForInterfaceStable(typeName, idl, stableRounds, intervalMs, error))
     {
         return false;
     }
     // 3) 同类型重建 DynamicType 生成 JSON 发布示例（默认值模板，json_deserialize 可直接接受）
     std::string json;
-    if (!jsonExampleOfType(typeName, json))
+    if (!jsonExampleOfType(typeName, json, error))
     {
         return false;
     }
@@ -741,7 +812,7 @@ bool FastDDSDebugNode::topicExample(const std::string& topicName,
 bool FastDDSDebugNode::topicMsgJson(const std::string& topicName,
         std::string& typeName,
         std::string& json,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
     if (stableRounds == 0)
     {
@@ -755,6 +826,10 @@ bool FastDDSDebugNode::topicMsgJson(const std::string& topicName,
         std::lock_guard<std::mutex> lock(mtx_);
         if (participant_ == nullptr)
         {
+            if (error != nullptr)
+            {
+                *error = "debug node not created";
+            }
             return false;  // 未入域
         }
     }
@@ -764,10 +839,15 @@ bool FastDDSDebugNode::topicMsgJson(const std::string& topicName,
     if (!waitForTopicInfoStable(topicName, typeName, publisherCount, subscriptionCount,
                 stableRounds, intervalMs))
     {
+        if (error != nullptr)
+        {
+            *error = "topic [" + topicName + "] not found";
+        }
         return false;
     }
-    // 2) 同类型重建 DynamicType 生成紧凑 JSON 发布模板（json_deserialize 可直接接受）
-    return jsonExampleOfType(typeName, json);
+    // 2) 同类型重建 DynamicType 生成紧凑 JSON 发布模板（json_deserialize 可直接接受）；
+    // 失败原因由 jsonExampleOfType 归类回填，不再与步骤 1 笼统合并为 topic not found
+    return jsonExampleOfType(typeName, json, error);
 }
 
 bool FastDDSDebugNode::waitForTopicsStable(std::vector<std::pair<std::string, std::string>>& topics,
@@ -1123,20 +1203,28 @@ bool idlTypeNameOf(const traits<DynamicType>::ref_type& type, std::string& out)
 
 bool FastDDSDebugNode::waitForInterfaceStable(const std::string& typeName,
         std::vector<std::string>& lines,
-        uint32_t stableRounds, uint32_t intervalMs)
+        uint32_t stableRounds, uint32_t intervalMs, std::string* error)
 {
+    // 收敛末轮的失败原因归类（仅供收敛结束后回填 error，不参与快照相等性比较，因此不
+    // 影响收敛判定）：0=类型名未在发现缓存出现，1=TypeObject 不可得（ROS2
+    // rmw_fastrtps 等不参与 XTypes 类型发现的端点即此情形），2=IDL 拼装失败（具体文本存
+    // lastDetail）。每轮快照开头重置为 0，端点离线使类型名消失时能正确回退到"未发现"
+    int lastReason = 0;
+    std::string lastDetail;
     // 快照：锁内（seenMtx_ 叶子锁，不持锁构造 DynamicType——registry 查询与类型拼装都在锁外
     // 尾段）按类型名精确匹配发现缓存（两缓存 key 均为主题名，须遍历值列表比对 type_name；
     // writer 优先、reader 补缺），命中即取其 TypeInformation（complete 优先、未设 TK_NONE 时
     // 回退 minimal，对齐 tryStartSubscription）查 TypeObject registry 并拼装 IDL 行集；
     // TypeObject 未就绪（TypeLookup 尚未取回）视为本轮未命中继续等待。快照为（found 标志 +
     // 行集）对，连续 stableRounds 次不变即收敛
-    auto snapshot = [this, &typeName]() -> std::pair<bool, std::vector<std::string>>
+    auto snapshot = [this, &typeName, &lastReason, &lastDetail]()
+            -> std::pair<bool, std::vector<std::string>>
     {
+        lastReason = 0;
         std::lock_guard<std::mutex> lock(seenMtx_);
         // TypeInformation → TypeObject → IDL 行集（writer/reader 发现数据结构同构，泛型
         // lambda 复用同一段取用逻辑）
-        auto buildFromInfo = [this, &typeName](const auto& info,
+        auto buildFromInfo = [this, &typeName, &lastReason, &lastDetail](const auto& info,
                 std::vector<std::string>& out) -> bool
         {
             const auto& ti = info.type_information.type_information;
@@ -1148,9 +1236,15 @@ bool FastDDSDebugNode::waitForInterfaceStable(const std::string& typeName,
             if (RETCODE_OK != DomainParticipantFactory::get_instance()->type_object_registry()
                         .get_type_object(tid, type_object))
             {
+                lastReason = 1;
                 return false;  // TypeObject 未就绪，视为本轮未命中
             }
-            return buildInterfaceLines(type_object, typeName, out);
+            if (!buildInterfaceLines(type_object, typeName, out, &lastDetail))
+            {
+                lastReason = 2;
+                return false;  // TypeObject 已取回但 IDL 拼装失败（顶层非 struct 等）
+            }
+            return true;
         };
         for (const auto& entry : seen_)
         {
@@ -1203,6 +1297,24 @@ bool FastDDSDebugNode::waitForInterfaceStable(const std::string& typeName,
     }
     if (!prev.first)
     {
+        // 按收敛末轮的实际原因归类回填，不再统一报"type not found"（该文本会误导调用方
+        // 以为类型名拼错，而实际可能是对端不提供 TypeObject）
+        if (error != nullptr)
+        {
+            if (1 == lastReason)
+            {
+                *error = "type object for [" + typeName + "] not available";
+            }
+            else if (2 == lastReason)
+            {
+                *error = lastDetail.empty()
+                        ? "interface build failed for [" + typeName + "]" : lastDetail;
+            }
+            else
+            {
+                *error = "type [" + typeName + "] not found";
+            }
+        }
         return false;  // 收敛时仍无此类型（或 TypeObject 始终未就绪）
     }
     lines = std::move(prev.second);
@@ -1210,7 +1322,7 @@ bool FastDDSDebugNode::waitForInterfaceStable(const std::string& typeName,
 }
 
 bool FastDDSDebugNode::buildInterfaceLines(const xtypes::TypeObject& type_object,
-        const std::string& typeName, std::vector<std::string>& lines)
+        const std::string& typeName, std::vector<std::string>& lines, std::string* error)
 {
     // TypeObject → DynamicType（shared_ptr 持有，离开作用域自动释放；不注册类型不建订阅，
     // 纯类型内省）
@@ -1218,6 +1330,10 @@ bool FastDDSDebugNode::buildInterfaceLines(const xtypes::TypeObject& type_object
                 type_object)->build();
     if (dyn_type == nullptr || xtypes::TK_STRUCTURE != dyn_type->get_kind())
     {
+        if (error != nullptr)
+        {
+            *error = "type [" + typeName + "] is not a struct, interface display unsupported";
+        }
         return false;  // 仅支持顶层为 struct 的类型
     }
     // IDL 源语法行集：struct 头 + 逐字段行（四空格缩进）+ 结尾 }
@@ -1227,6 +1343,10 @@ bool FastDDSDebugNode::buildInterfaceLines(const xtypes::TypeObject& type_object
     DynamicTypeMembersById members;
     if (RETCODE_OK != dyn_type->get_all_members(members) || members.size() != count)
     {
+        if (error != nullptr)
+        {
+            *error = "interface introspection failed for [" + typeName + "]";
+        }
         return false;
     }
     for (const auto& pair : members)  // map 按 MemberId 升序 == struct 成员声明序
@@ -1279,11 +1399,16 @@ bool FastDDSDebugNode::fetchTypeObject(const std::string& typeName,
     return fetch(seen_) || fetch(seenReaders_);
 }
 
-bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::string& out)
+bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::string& out,
+        std::string* error)
 {
     xtypes::TypeObject type_object;
     if (!fetchTypeObject(typeName, type_object))
     {
+        if (error != nullptr)
+        {
+            *error = "type object for [" + typeName + "] not available";
+        }
         return false;  // 类型未发现或 TypeObject 未就绪
     }
     // 锁外重建 DynamicType 并取默认值样本序列化为 JSON 示例（不注册类型不建订阅，纯类型内省）
@@ -1291,11 +1416,19 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
                 type_object)->build();
     if (dyn_type == nullptr)
     {
+        if (error != nullptr)
+        {
+            *error = "type rebuild failed for [" + typeName + "]";
+        }
         return false;
     }
     auto data = DynamicDataFactory::get_instance()->create_data(dyn_type);
     if (data == nullptr)
     {
+        if (error != nullptr)
+        {
+            *error = "example generation failed for [" + typeName + "]: create_data";
+        }
         return false;
     }
     std::ostringstream os;
@@ -1303,6 +1436,10 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
     if (ok)
     {
         out = os.str();
+    }
+    else if (error != nullptr)
+    {
+        *error = "example generation failed for [" + typeName + "]: json_serialize";
     }
     DynamicDataFactory::get_instance()->delete_data(data);
     return ok;
@@ -1745,8 +1882,11 @@ void FastDDSDebugNode::onParticipantDiscovered(const rtps::ParticipantBuiltinTop
 
 // 官方文档 15.16 "Remote type discovery and endpoint matching" 接收端形态：
 // TypeInformation → TypeObject → DynamicType → DynamicPubSubType → Topic → DataReader。
+// 失败告警统一经 warnThrottled 节流：本函数由工作线程每 100ms 重试一次，全静默会使
+// topic print / topic hz 的调用方永久得不到失败原因（尤其是 ROS2 端点不提供 TypeObject
+// 这类不可恢复情形），不节流则持续失败刷屏。
 bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
-        const rtps::PublicationBuiltinTopicData& info, bool typeNotReadyWarn)
+        const rtps::PublicationBuiltinTopicData& info)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     // 未登记 / 已建立订阅 → 忽略（同名 writer 重复发现由此去重）
@@ -1755,6 +1895,23 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
     {
         return false;
     }
+
+    // 按（主题, 告警类型）节流：首次立即打印，之后距上次打印 ≥ kSubWarnIntervalMs 才重复。
+    // warnAt_ 受 mtx_ 保护（本函数入口即持 mtx_）
+    auto warnThrottled = [this, &topicName](const char* kind, const std::string& text)
+    {
+        const std::string key = topicName + "|" + kind;
+        const auto now = std::chrono::steady_clock::now();
+        const auto it = warnAt_.find(key);
+        if (warnAt_.end() != it &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second).count() <
+                static_cast<int64_t>(kSubWarnIntervalMs))
+        {
+            return;
+        }
+        warnAt_[key] = now;
+        std::cout << "warning: " << text << std::endl;
+    };
 
     // 远端 TypeInformation → TypeObject：complete 优先、未设（TK_NONE）时回退 minimal，
     // 对齐 DynamicPubSubType 构造的类型标识选择逻辑
@@ -1767,11 +1924,14 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
                 tid, type_object))
     {
         // TypeLookup 尚未取回远端 TypeObject：保留登记，等待轮询/后续重复发现事件重试
-        if (typeNotReadyWarn)
-        {
-            std::cout << "[FastDDSDebugNode] warning: TypeObject not ready, keep pending. topic="
-                      << topicName << " type=" << info.type_name.to_string() << std::endl;
-        }
+        warnThrottled("type-object",
+                "TypeObject not ready, keep pending. topic=" + topicName +
+                " type=" + info.type_name.to_string() +
+                " -- the remote endpoint does not publish XTypes TypeInformation/TypeObject" +
+                " (ROS2 rmw_fastrtps endpoints are built with compile-time type mapping and" +
+                " usually provide none), or TypeLookup has not completed yet; this topic cannot" +
+                " be subscribed dynamically. Retrying every " +
+                std::to_string(kSubWarnIntervalSec) + "s.");
         return false;
     }
 
@@ -1780,8 +1940,11 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
                 type_object)->build();
     if (dyn_type == nullptr)
     {
-        std::cout << "[FastDDSDebugNode] warning: build DynamicType failed. topic=" << topicName
-                  << " type=" << info.type_name.to_string() << std::endl;
+        warnThrottled("dyn-type",
+                "build DynamicType failed. topic=" + topicName +
+                " type=" + info.type_name.to_string() +
+                " -- TypeObject was fetched but DynamicType construction failed" +
+                " (the type contains constructs unsupported by the dynamic type builder).");
         return false;
     }
 
@@ -1791,8 +1954,9 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
     Topic* topic = participant_->create_topic(topicName, ts.get_type_name(), TOPIC_QOS_DEFAULT);
     if (topic == nullptr)
     {
-        std::cout << "[FastDDSDebugNode] warning: create_topic failed. topic=" << topicName
-                  << " type=" << ts.get_type_name() << std::endl;
+        warnThrottled("create-topic",
+                "create_topic failed. topic=" + topicName + " type=" + ts.get_type_name() +
+                " -- a topic with the same name is already registered with a different type.");
         return false;
     }
 
@@ -1808,8 +1972,10 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
         entry.reader = subscriber_->create_datareader(topic, DATAREADER_QOS_DEFAULT, entry.listener.get());
         if (entry.reader == nullptr)
         {
-            std::cout << "[FastDDSDebugNode] warning: create_datareader failed. topic=" << topicName
-                      << " type=" << ts.get_type_name() << std::endl;
+            warnThrottled("datareader",
+                    "create_datareader failed. topic=" + topicName +
+                    " type=" + ts.get_type_name() +
+                    " -- QoS incompatibility or resource limit.");
             subs_.erase(topicName);
             participant_->delete_topic(topic);
             return false;
@@ -1817,19 +1983,26 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
     }
     catch (...)
     {
+        warnThrottled("exception",
+                "subscribe setup threw an exception. topic=" + topicName +
+                " type=" + ts.get_type_name() + " -- rolled back, keep pending for retry.");
         subs_.erase(topicName);
         participant_->delete_topic(topic);
         return false;
     }
 
     pending_.erase(topicName);
-    std::cout << "[FastDDSDebugNode] subscribed topic=" << topicName
+    pendingSince_.erase(topicName);
+    std::cout << "subscribed topic=" << topicName
               << " type=" << ts.get_type_name() << std::endl;
     return true;
 }
 
 // 订阅建立工作线程：轮询 pending_ × seen_ 交集建订阅；cv_ 有界超时兼顾"新发现/新登记即时响应"
 // 与"TypeObject 稍后就绪的重试"。查交集时按锁序 mtx_ → seenMtx_ 嵌套。
+// 附带职责：对登记满 kPendingHintDelayMs 仍无 writer 的主题打一次性等待提示，消除
+// 主题名拼错 / 发布者未上线 / 仅有订阅者无发布者三种情形下 topic print 与 topic hz 的
+// 永久静默（仅提示，不改登记状态与返回值：后续 writer 上线仍会自动建订）。
 void FastDDSDebugNode::workerLoop()
 {
     constexpr auto kWorkerInterval = std::chrono::milliseconds(100);  // 空闲等待/重试节奏
@@ -1837,6 +2010,7 @@ void FastDDSDebugNode::workerLoop()
     while (workerRunning_)
     {
         std::string todo;
+        std::string undiscovered;  // 宽限期满仍无 writer 的主题（待打一次性提示）
         rtps::PublicationBuiltinTopicData info;
         {
             std::lock_guard<std::mutex> seenLock(seenMtx_);
@@ -1849,12 +2023,30 @@ void FastDDSDebugNode::workerLoop()
                     info = it->second.front();  // 取任一同主题 writer 发现信息快照，解锁后使用
                     break;
                 }
+                // 无 writer（含仅见 reader 的情形，建订只由 writer 驱动）：登记满宽限窗且
+                // 尚未提示过（已提示者值为 time_point::max()）→ 记一个待提示主题
+                auto since = pendingSince_.find(name);
+                if (pendingSince_.end() != since &&
+                        std::chrono::steady_clock::time_point::max() != since->second &&
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - since->second).count() >=
+                        static_cast<int64_t>(kPendingHintDelayMs))
+                {
+                    undiscovered = name;
+                }
             }
+        }
+        if (!undiscovered.empty())
+        {
+            // 先置 max() 作已提示标记再打印，保证同一主题只提示一次
+            pendingSince_[undiscovered] = std::chrono::steady_clock::time_point::max();
+            std::cout << "topic [" << undiscovered
+                      << "] not discovered yet, waiting for publisher..." << std::endl;
         }
         if (!todo.empty())
         {
             lock.unlock();
-            tryStartSubscription(todo, info, false);
+            tryStartSubscription(todo, info);
             lock.lock();
         }
         if (workerRunning_)

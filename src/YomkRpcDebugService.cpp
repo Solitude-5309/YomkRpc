@@ -97,10 +97,21 @@ YomkResponse YomkRpcDebugService::topicPrint(YomkPkgPtr pkg)
     }
     // 先 setOutputSink 后 subscribeTopic：sink 须在工作线程建立订阅前就位（FastDDSDebugNode 约定）。
     node_->setOutputSink(p->msg.output);
-    if (!node_->subscribeTopic(p->msg.topicName))
+    // 拒绝原因由节点层归类透传（未入域 / subscriber 未建 / 主题名空 / 重复登记），
+    // 不再统一报笼统 failed；保留 failed 字样以维持调用方对失败语义的既有判定
+    std::string error;
+    if (!node_->subscribeTopic(p->msg.topicName, &error))
     {
-        YOMK_ERROR_TAG("YomkRpcDebugService::topicPrint", "subscribeTopic [", p->msg.topicName, "] failed");
-        return YomkResponse(YomkResponse::eNo, "subscribeTopic [" + p->msg.topicName + "] failed");
+        if (error.empty())
+        {
+            error = "subscribeTopic [" + p->msg.topicName + "] failed";  // 兜底，避免空 m_msg
+        }
+        else
+        {
+            error = "subscribeTopic [" + p->msg.topicName + "] failed: " + error;
+        }
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicPrint", error);
+        return YomkResponse(YomkResponse::eNo, error);
     }
     return YomkResponse(YomkResponse::eOk, "ok");
 }
@@ -172,12 +183,18 @@ YomkResponse YomkRpcDebugService::interfaceShow(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "debug node not created");
     }
     // 持锁取该类型的 IDL 行集（节点层收敛轮询：TypeInformation→TypeObject→DynamicType 内省）；
-    // 未发现该类型按查询失败处理（find 族语义），便于调用方发现类型名拼写错误
+    // 未发现该类型按查询失败处理（find 族语义），便于调用方发现类型名拼写错误。
+    // 失败原因由节点层归类透传：类型名未出现 / TypeObject 不可得 / 顶层非 struct / IDL 拼装失败
     std::vector<std::string> lines;
-    if (!node_->interfaceShow(p->msg.typeName, lines, p->msg.stableRounds, p->msg.intervalMs))
+    std::string error;
+    if (!node_->interfaceShow(p->msg.typeName, lines, p->msg.stableRounds, p->msg.intervalMs, &error))
     {
-        YOMK_ERROR_TAG("YomkRpcDebugService::interfaceShow", "type [", p->msg.typeName, "] not found");
-        return YomkResponse(YomkResponse::eNo, "type [" + p->msg.typeName + "] not found");
+        if (error.empty())
+        {
+            error = "type [" + p->msg.typeName + "] not found";  // 兜底，保证既有文本语义不回退
+        }
+        YOMK_ERROR_TAG("YomkRpcDebugService::interfaceShow", error);
+        return YomkResponse(YomkResponse::eNo, error);
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
@@ -225,12 +242,18 @@ YomkResponse YomkRpcDebugService::topicExample(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "debug node not created");
     }
     // 持锁取该主题的发布示例三段行集（节点层依次收敛：类型名→IDL 行集→JSON 示例；
-    // 未发现主题按查询失败处理，info 族语义）
+    // 未发现主题按查询失败处理，info 族语义）。失败原因由节点层按步归类透传：
+    // 步骤 1 topic not found / 步骤 2 类型侧原因 / 步骤 3 示例生成侧原因
     std::vector<std::string> lines;
-    if (!node_->topicExample(p->msg.topicName, lines, p->msg.stableRounds, p->msg.intervalMs))
+    std::string error;
+    if (!node_->topicExample(p->msg.topicName, lines, p->msg.stableRounds, p->msg.intervalMs, &error))
     {
-        YOMK_ERROR_TAG("YomkRpcDebugService::topicExample", "topic [", p->msg.topicName, "] not found");
-        return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
+        if (error.empty())
+        {
+            error = "topic [" + p->msg.topicName + "] not found";  // 兜底，保证既有文本语义不回退
+        }
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicExample", error);
+        return YomkResponse(YomkResponse::eNo, error);
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
@@ -247,14 +270,20 @@ YomkResponse YomkRpcDebugService::topicMsg(YomkPkgPtr pkg)
     }
     // 持锁取该主题的消息描述两要素（节点层依次收敛：类型名→JSON 模板；未发现主题按
     // 查询失败处理，info 族语义）；StringArray 恰 2 行：d[0]=类型名、d[1]=紧凑 msg JSON
-    // （机器可读契约，非展示行集）
+    // （机器可读契约，非展示行集）。失败原因由节点层按步归类透传：步骤 1 topic not found /
+    // 步骤 2 JSON 模板生成侧原因
     std::string typeName;
     std::string json;
+    std::string error;
     if (!node_->topicMsgJson(p->msg.topicName, typeName, json,
-                p->msg.stableRounds, p->msg.intervalMs))
+                p->msg.stableRounds, p->msg.intervalMs, &error))
     {
-        YOMK_ERROR_TAG("YomkRpcDebugService::topicMsg", "topic [", p->msg.topicName, "] not found");
-        return YomkResponse(YomkResponse::eNo, "topic [" + p->msg.topicName + "] not found");
+        if (error.empty())
+        {
+            error = "topic [" + p->msg.topicName + "] not found";  // 兜底，保证既有文本语义不回退
+        }
+        YOMK_ERROR_TAG("YomkRpcDebugService::topicMsg", error);
+        return YomkResponse(YomkResponse::eNo, error);
     }
     return YomkResponse(YomkResponse::eOk, "ok",
             YomkMkPtr(StringArray, std::vector<std::string>{typeName, json}));

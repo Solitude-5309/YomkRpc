@@ -80,7 +80,12 @@
     YOMK_REQUEST("/YomkRpcDebugService/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{domainId}))
 
 // 登记调试主题：发现匹配的远端 DataWriter 后自动解析类型并建立订阅，消息 JSON 文本逐条投递
-// output（DDSDebugOutputFunc，用户自定义，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误。返回 YomkResponse。
+// output（DDSDebugOutputFunc，用户自定义，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误。
+// 登记为发现驱动的延迟行为：主题尚未被任何发布者上线时仍返回成功，订阅待 writer 出现后
+// 自动建立；登记约 3s 后仍无 writer 时由节点层工作线程打一次性等待提示（宽限窗避开
+// 刚入域发现未完成时对"发布者早已在线"的误报）。失败时 m_msg 携带节点层归类的具体拒绝原因
+// （debug node not created / subscriber not created / empty topic name /
+// topic [...] already registered）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output) \
     YOMK_REQUEST(                              \
         "/YomkRpcDebugService/topic_print",    \
@@ -132,8 +137,12 @@
         YomkMkPtr(DDSDebugFind, DDSDebugFind{typeName, stableRounds, intervalMs}))
 
 // 按数据类型名输出该类型的 IDL 结构描述（独立收敛，语义同 topic_find）：类型名精确匹配，
-// 命中返回 StringArray 多行（IDL 源语法：struct 头 + 四空格缩进字段行 + 结尾 };）；未发现
-// 类型返回错误（type [...] not found）。须先创建调试节点。返回 YomkResponse。
+// 命中返回 StringArray 多行（IDL 源语法：struct 头 + 四空格缩进字段行 + 结尾 };）。失败时 m_msg
+// 携带节点层归类的具体原因，不再是单一 not found：type [...] not found（类型名未出现在发现
+// 缓存）/ type object for [...] not available（对端未提供 XTypes TypeObject，ROS2
+// rmw_fastrtps 端点即此情形）/ type [...] is not a struct, interface display unsupported
+// （顶层非 struct）/ interface introspection failed for [...]（字段内省失败）。
+// 须先创建调试节点。返回 YomkResponse。
 #define YOMKRPC_DEBUG_INTERFACE_SHOW(typeName, stableRounds, intervalMs)     \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/interface_show",                               \
@@ -150,9 +159,11 @@
 
 // 按主题名查询发布示例三段行集（独立收敛，同 interface_show）："Type: <类型名>" + "IDL:"
 // + IDL 行集 + "example:" + 可复制发布命令（JSON 默认值模板整体包单引号，改字段值即可
-// 发布）。命中返回
-// StringArray 多行；未发现主题返回错误（topic [...] not found）。须先创建调试节点。返回
-// YomkResponse。
+// 发布）。命中返回 StringArray 多行。失败时 m_msg 按节点层三步骤归类携带具体原因：
+// 步骤 1 topic [...] not found（主题未发现）；步骤 2 类型侧原因（同 interface_show：
+// type [...] not found / type object for [...] not available / 非 struct）；步骤 3 示例
+// 生成侧原因（type rebuild failed for [...] / example generation failed for [...]:
+// create_data 或 json_serialize）。须先创建调试节点。返回 YomkResponse。
 #define YOMKRPC_DEBUG_TOPIC_EXAMPLE(topicName, stableRounds, intervalMs)    \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/topic_example",                                \
@@ -160,7 +171,10 @@
 
 // 按主题名查询消息描述两要素（供导出消息描述文件，独立收敛同 interface_show）：命中返回
 // StringArray 恰 2 行：d[0]=类型名、d[1]=紧凑 msg JSON（单行，可直接作为发布载荷模板）。
-// 未发现主题返回错误（topic [...] not found）。须先创建调试节点。返回 YomkResponse。
+// 失败时 m_msg 按节点层两步骤归类携带具体原因：步骤 1 topic [...] not found（主题未发现）；
+// 步骤 2 JSON 模板生成侧原因（同 topic_example 步骤 2/3：类型名未出现 / TypeObject 不可得 /
+// 非 struct / type rebuild failed for [...] / example generation failed for [...]）。
+// 须先创建调试节点。返回 YomkResponse。
 #define YOMKRPC_DEBUG_TOPIC_MSG(topicName, stableRounds, intervalMs)        \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/topic_msg",                                    \

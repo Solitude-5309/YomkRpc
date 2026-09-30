@@ -125,6 +125,10 @@ int main()
     CHECK(topicExampleMiss.m_status == YomkResponse::eNo &&
           topicExampleMiss.m_msg.find("topic [t_example_miss] not found") != std::string::npos,
           "topic_example 空域未发现主题 → eNo topic [...] not found（info 族语义）");
+    // 错误精确化回归：空域下仍属第一层"主题未发现"，m_msg 不得被误归类为第二层原因
+    // （TypeObject 不可得 / 类型重建失败），验证服务层兜底与节点层按步归类均正确
+    CHECK(topicExampleMiss.m_msg.find("not available") == std::string::npos,
+          "topic_example 空域 m_msg 仍为第一层文本（未误归类为 TypeObject 不可得）");
 
     // topic_pub：同域无此主题，eNo（发布前的发现收敛失败即早退，不建任何发布实体）
     auto topicPubMiss = svc->invoke("/topic_pub", YomkMkPtr(
@@ -139,6 +143,8 @@ int main()
     CHECK(topicMsgMiss.m_status == YomkResponse::eNo &&
           topicMsgMiss.m_msg.find("topic [t_msg_miss] not found") != std::string::npos,
           "topic_msg 空域未发现主题 → eNo topic [...] not found（info 族语义）");
+    CHECK(topicMsgMiss.m_msg.find("not available") == std::string::npos,
+          "topic_msg 空域 m_msg 仍为第一层文本（未误归类为 TypeObject 不可得）");
 
     // list_nodes：ctest 串行执行，此刻域 200 无其他参与者；调试节点自身不在自身发现缓存中，
     // stableRounds=1 单次快照即得空列表（空列表合法：域内暂无命名参与者，语义同 list_topics 空域）
@@ -169,6 +175,11 @@ int main()
     auto dupTopic = svc->invoke("/topic_print", mkPrint("t_debug_a"));
     CHECK(dupTopic.m_status == YomkResponse::eNo && dupTopic.m_msg.find("failed") != std::string::npos,
           "同主题重复登记 → eNo（subscribeTopic 去重拒绝）");
+    // 拒绝原因由节点层归类透传：保留 failed 前缀的同时携具体原因，不再只有笼统 failed
+    CHECK(dupTopic.m_msg.find("subscribeTopic [t_debug_a] failed: ") != std::string::npos &&
+              dupTopic.m_msg.find("already registered") != std::string::npos,
+          "重复登记 m_msg 为 failed: + 具体原因（already registered）");
+    std::cout << "[OBSERVE] dup topic_print msg |" << dupTopic.m_msg << "|" << std::endl;
 
     CHECK(svc->invoke("/topic_print", mkPrint("t_debug_b")).m_status == YomkResponse::eOk,
           "topicPrint(t_debug_b) → eOk（异主题可并行登记）");
@@ -392,6 +403,10 @@ int main()
                 CHECK(ifaceMiss.m_status == YomkResponse::eNo &&
                           ifaceMiss.m_msg.find("type [Not::Exist] not found") != std::string::npos,
                       "interface_show 未发现类型 → eNo type [Not::Exist] not found（find 族语义）");
+                // 错误精确化回归：类型名未入发现缓存属第一层，m_msg 不得被误归类为
+                // TypeObject 不可得（writer 已在场且 TypeObject 已就绪）
+                CHECK(ifaceMiss.m_msg.find("not available") == std::string::npos,
+                      "interface_show 未发现类型 m_msg 仍为第一层文本");
 
                 // interface_list：hit 域内唯一类型名（去重后单行，interface show 配套导航）
                 auto ifaceListHit = svc->invoke("/interface_list", YomkMkPtr(

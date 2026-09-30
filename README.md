@@ -17,7 +17,7 @@
 | `YOMKRPC_LOAN(nodeName, topicName, outPtr)` | `/YomkRpcService/loan` | 借出发送缓冲 | outPtr 为输出参数，成功指向 `DDSLoanResult{sample}` 池内样本、失败置 nullptr；仅 plain 类型支持 |
 | `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | `/YomkRpcService/discard_loan` | 归还未发布的借出缓冲 | 打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
 | `YOMKRPC_DEBUG_NODE(domainId)` | `/YomkRpcDebugService/create_node` | 创建调试节点 | 打包 `DDSDebugNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试 |
-| `YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误 |
+| `YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output)` | `/YomkRpcDebugService/topic_print` | 登记调试主题 | 打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；登记为发现驱动的延迟行为，主题尚未被发布者上线时仍返回成功（登记约 3s 后仍无发布者则打一次性等待提示）；须先创建调试节点，失败时 `m_msg` 携具体拒绝原因（`debug node not created` / `subscriber not created` / `empty topic name` / `already registered`） |
 | `YOMKRPC_DEBUG_TOPIC_LIST(stableRounds, intervalMs)` | `/YomkRpcDebugService/list_topics` | 列出域内主题 | 打包 `DDSDebugList{stableRounds, intervalMs}`；自适应收敛查询：内部每 ~200ms 轮询一次发现缓存快照，连续 stableRounds 次集合不变即返回（0 值钳制默认 5 次/200ms，最长阻塞约 stableRounds\*intervalMs）；远端 DataWriter 与 DataReader 均记录（仅有订阅者而无发布者的主题同样列出）；返回 StringArray 包，每行一个 topicName（仅主题名，不含类型）按主题名排序；须先创建调试节点，列表可为空（域内无 writer/reader） |
 | `YOMKRPC_DEBUG_TOPIC_INFO(topicName, stableRounds, intervalMs)` | `/YomkRpcDebugService/topic_info` | 查询主题详情 | 打包 `DDSDebugInfo{topicName, stableRounds, intervalMs}`；独立收敛查询单个主题的发现详情（不依赖 list_topics），连续 stableRounds 次快照不变即返回（0 值钳制默认 5 次/200ms）；命中返回 StringArray 三行：`Type: 原始 DDS 类型名`（不做任何风格转换）、`Publisher count: N`、`Subscription count: N`；未发现主题返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_NODE_LIST(stableRounds, intervalMs)` | `/YomkRpcDebugService/list_nodes` | 列出域内节点 | 打包 `DDSNodeList{stableRounds, intervalMs}`；独立收敛查询域内已发现的命名参与者（不依赖 list_topics/topic_info），连续 stableRounds 次快照不变即返回（0 值钳制默认 5 次/200ms）；返回 StringArray，每行一个节点名（participant_name 非空且非 "/" 才列出，空名与 ROS2 参与者默认占位名 "/" 跳过，不输出 GUID 串）按名称排序；调试节点自身不在自身发现回调中，天然不列出；须先创建调试节点，列表可为空（域内无有效命名参与者） |
@@ -325,6 +325,12 @@ ExampleYomkRpcPub
 {"data":"hello world 0"}
 ```
 
+登记后三类提示与失败原因（均为节点层直接输出，不经回调）：
+
+- **主题尚未发现**：登记满约 3s 发现宽限窗后域内仍无该主题的 DataWriter（主题名拼错 / 发布者未上线 / 仅有订阅者）→ 由工作线程一次性打印 `[FastDDSDebugNode] topic [<主题名>] not discovered yet, waiting for publisher...`（仅提示，不阻塞不改返回码；订阅建立本就是发现驱动的延迟行为，发布者上线后自动建订）；
+- **主题已发现但类型不可重建**（典型为 ROS2 rmw_fastrtps 端点：编译期类型映射，不提供 XTypes TypeObject）→ 工作线程打印 `warning: TypeObject not ready, keep pending. topic=... type=... -- the remote endpoint does not publish XTypes TypeInformation/TypeObject ...`，**首次立即打印、之后按 5s 节流**重复（既不静默也不因 100ms 重试轮询而刷屏）；同类告警覆盖 DynamicType 构建失败 / `create_topic` 失败 / `create_datareader` 失败 / 建订异常四类；
+- **登记被拒**：`register debug topic failed: subscribeTopic [<主题名>] failed: <具体原因>`（重复登记为 `topic [<主题名>] already registered`）。
+
 工具经 `YomkRpcDebugService` 调试服务实现，等价的用户代码（`YOMKRPC_DEBUG_*` 宏定义于 `YomkRpcAPI.h`，链接 `YomkRpc::YomkRpc YomkServer::YomkServer`）：
 
 ```cpp
@@ -522,7 +528,7 @@ average rate: 1.000
         min: 0.998s max: 1.004s std dev: 0.00209s window: 10
 ```
 
-各输出项含义（对齐 ros2 topic hz）：`average rate` 为窗口内相邻消息间隔均值的倒数（Hz）；`min`/`max` 为间隔极值（秒）；`std dev` 为间隔的总体标准差（秒，除以 n）；`window` 为间隔样本数（上限 `--window`，默认 10000，对齐 ros2 默认窗口）。无新消息不重复打印；首条消息前静默等待；Ctrl+C 退出。
+各输出项含义（对齐 ros2 topic hz）：`average rate` 为窗口内相邻消息间隔均值的倒数（Hz）；`min`/`max` 为间隔极值（秒）；`std dev` 为间隔的总体标准差（秒，除以 n）；`window` 为间隔样本数（上限 `--window`，默认 10000，对齐 ros2 默认窗口）。无新消息不重复打印；首条消息前不打印统计（登记后的等待提示与类型不可重建告警同 `topic print`，见 6.2）；Ctrl+C 退出。
 
 #### interface show：按类型名输出 IDL 结构
 
@@ -535,7 +541,14 @@ struct YomkRpc::MString {
 };
 ```
 
-字段类型名为 ROS2/IDL4 风格映射（bool/int32/uint32/float32/string 等；有界 `string<N>`；`sequence<T>`/`sequence<T, N>`；数组 `T[N]`；嵌套 struct/enum/alias 显示成员子类型名不递归展开）。仅支持顶层为 struct 的类型；未发现类型报错退出（可发现类型名拼写错误）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
+字段类型名为 ROS2/IDL4 风格映射（bool/int32/uint32/float32/string 等；有界 `string<N>`；`sequence<T>`/`sequence<T, N>`；数组 `T[N]`；嵌套 struct/enum/alias 显示成员子类型名不递归展开）。仅支持顶层为 struct 的类型；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。失败报错退出，错误文本按卡点分层归类（可直接判定问题在哪一层，不再统一报 not found）：
+
+| 错误文本 | 卡点 |
+|---|---|
+| `type [<类型名>] not found` | 类型名未出现在发现缓存（拼写错误或端点不在本域） |
+| `type object for [<类型名>] not available` | 对端未提供 XTypes TypeObject（**ROS2 rmw_fastrtps 端点即此情形**）或 TypeLookup 尚未完成 |
+| `type [<类型名>] is not a struct, interface display unsupported` | 顶层为 enum/alias 等非 struct 类型 |
+| `interface introspection failed for [<类型名>]` | DynamicType 成员枚举失败 |
 
 #### interface list：列出已发现的全部类型名
 
@@ -565,7 +578,16 @@ example:
 yomkrpc topic pub hello_world '{"data":""}'
 ```
 
-未发现主题报错退出（info 族语义）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
+失败报错退出，错误文本按节点层三步骤归类（步骤 1 发现 → 步骤 2 类型重建 → 步骤 3 示例生成），不再统一报 `topic [...] not found`；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
+
+| 错误文本 | 卡点 |
+|---|---|
+| `topic [<主题名>] not found` | 步骤 1：主题在收敛窗口内始终未被发现（主题名拼错 / 未加 `rt/` 前缀 / 对端未发布 / 域号不一致） |
+| `type [<类型名>] not found` | 步骤 2：类型名未入发现缓存（`interface show` 同款语义） |
+| `type object for [<类型名>] not available` | 步骤 2：对端未提供 XTypes TypeObject（**ROS2 rmw_fastrtps 端点即此情形**）或 TypeLookup 尚未完成 |
+| `type [<类型名>] is not a struct, interface display unsupported` | 步骤 2：顶层非 struct，IDL 段无法拼装 |
+| `type rebuild failed for [<类型名>]` | 步骤 3：DynamicType 构建失败 |
+| `example generation failed for [<类型名>]: create_data` / `: json_serialize` | 步骤 3：默认值样本创建或 JSON 序列化失败 |
 
 #### topic pub：向主题发布消息（JSON 载荷，缺省 1Hz 持续发送）
 
@@ -696,7 +718,7 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 
 - **`-o <目录>` / `--output <目录>`**：指定生成目录（相对/绝对路径均可），缺省当前目录；目录不存在报错退出，不自动创建
 - 文件整体可直接填进发布命令（与 `topic pub -e` 输出的 example 命令同构对称）：`yomkrpc topic pub hello_world "$(cat hello_world_msg_2026-09-28-12-14-42-626.json)"`——`"$(cat)"` 命令替换结果不再经历引号删除，内层双引号与换行原样保留，多行缩进 JSON 解析无碍；主题名/类型名不在文件内，从文件名与 stdout 提示行追溯
-- 未发现主题报错退出（info 族语义）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）
+- 失败报错退出，错误文本按节点层两步骤归类（步骤 1 `topic [<主题名>] not found` 主题未发现；步骤 2 类型重建与 JSON 模板生成侧原因，同 `topic pub -e` 的步骤 2/3：`type object for [...] not available`（ROS2 端点即此情形）、`type rebuild failed for [...]`、`example generation failed for [...]: create_data|json_serialize` 等）；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
