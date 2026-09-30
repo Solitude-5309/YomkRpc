@@ -61,11 +61,11 @@
  * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / example
  * 可复制发布命令——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，改命令里
  * JSON 字段值即可发布）；未发现主题报错退出。
- * topic pub：按主题名发布 JSON 载荷消息（缺省仅发一次；-w/--wait N 期望建匹配订阅端数：
- * matched 计数达到 N 才发布，否则一直等待并打印等待进度日志，Ctrl+C 中断报错退出；
- * -r/--rate N 持续发布模式：首轮完整校验后按 N Hz 周期重发，尽力而为，Ctrl+C 停止并输出
- * 统计 total/failed；-w 与 -r 独立识别可任意顺序叠加：先等匹配达标再首轮发布进入持续
- * 循环）：节点层先
+ * topic pub：按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出统计
+ * total/failed；-w/--wait N 期望建匹配订阅端数：matched 计数达到 N 才开始发布，否则一直
+ * 等待并打印等待进度日志，Ctrl+C 中断报错退出；-r/--rate N 调整持续发布频率：首轮完整
+ * 校验后按 N Hz 周期重发，尽力而为；-w 与 -r 独立识别可任意顺序叠加：先等匹配达标再首轮
+ * 发布进入持续循环）：节点层先
  * 发现收敛（类型名 + 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何
  * 发布实体），临时 RELIABLE+TRANSIENT_LOCAL writer 匹配收敛后 write；存在 RELIABLE 订阅
  * 者时以 ack 确认送达（未全部确认报错退出），全 BEST_EFFORT 或无订阅者退化尽力而为；
@@ -177,7 +177,8 @@ static void printUsage(std::ostream &os)
           "                      订阅端计数达到 N 才发布，否则每 200ms 轮询并打印等待进度日志一直\n"
           "                      等待（Ctrl+C 中断报错退出）；省略则发现稳定即发（自动收敛）\n"
           "  -r, --rate N        持续发布频率 Hz（仅 topic pub 发布模式生效）：首轮校验发布成功后\n"
-          "                      按该频率周期重发（尽力而为），Ctrl+C 停止并输出统计；省略则仅发一次\n"
+          "                      按该频率周期重发（尽力而为），Ctrl+C 停止并输出统计；省略则缺省\n"
+          "                      1Hz 持续发送\n"
           "  --window N          频率统计窗口大小（相邻消息间隔样本数上限，默认 10000，仅 topic hz 生效）\n"
           "  -h, --help          显示帮助\n"
           "\n"
@@ -949,16 +950,16 @@ static int runTopicPubExample(uint32_t domainId, const std::string &topicName, u
     return 0;
 }
 
-// topic pub 子命令：按主题名发布 JSON 载荷消息（缺省仅发一次，查完即退；-w/--wait N 为
-// 期望建匹配订阅端数：writer 的 matched 订阅端计数达到 N 才发布，否则一直等待并打印等待
-// 进度日志，Ctrl+C 中断报错退出；-r/--rate N 为持续发布：首轮完整校验后按 N Hz 周期重发，
-// Ctrl+C 退出并输出统计；-w 与 -r 独立识别可任意顺序叠加：先等匹配达标再首轮发布进入
-// 持续循环）；调试节点内部依次：主题未发现时先等待主题出现（requiredSubs>0，订阅端
-// 上线即宣告主题与类型）→ 发现收敛（主题+订阅者数稳定）→ 类型重建 + JSON 解析 →
-// 临时 RELIABLE writer 匹配收敛（requiredSubs>0 先阻塞等待达标）→ write 一次 → 存在
-// RELIABLE 订阅者时 ack 确认送达（超时报错），全 BEST_EFFORT 或无订阅者退化尽力而为；
-// 持续模式节点层保留发布链周期重复 write（尽力而为），Ctrl+C 经停止标志退出并回传
-// total/failed 统计
+// topic pub 子命令：按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出
+// 统计 total/failed；-w/--wait N 为期望建匹配订阅端数：writer 的 matched 订阅端计数达
+// 到 N 才开始发布，否则一直等待并打印等待进度日志，Ctrl+C 中断报错退出；-r/--rate N 调
+// 整持续发布频率：首轮完整校验后按 N Hz 周期重发；-w 与 -r 独立识别可任意顺序叠加：先
+// 等匹配达标再首轮发布进入持续循环）；调试节点内部依次：主题未发现时先等待主题出现
+// （requiredSubs>0，订阅端上线即宣告主题与类型）→ 发现收敛（主题+订阅者数稳定）→
+// 类型重建 + JSON 解析 → 临时 RELIABLE writer 匹配收敛（requiredSubs>0 先阻塞等待达
+// 标）→ write 一次 → 存在 RELIABLE 订阅者时 ack 确认送达（超时报错），全 BEST_EFFORT
+// 或无订阅者退化尽力而为；持续模式节点层保留发布链周期重复 write（尽力而为），Ctrl+C
+// 经停止标志退出并回传 total/failed 统计
 static int runTopicPub(uint32_t domainId, const std::string &topicName, const std::string &json,
         uint32_t waitRounds, double rateHz, uint32_t requiredSubs)
 {
@@ -975,20 +976,14 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
 
     // 2. 收敛后发布（ack 自适应确认）；未发现（未指定 -w 时，指定 -w 则等待主题出现）/
     //    载荷不合法/未确认/等待被中断均报错退出。
-    //    requiredSubs>0 或 rateHz>0 时注册 SIGINT 处理（同 print/hz 框架）：Ctrl+C 经
-    //    yomk::debugPubStop 置停止标志（无锁 store，async-signal-safe）——-w 等待期中断
-    //    报错退出，-r 持续循环退出并回传 total/failed
-    if (rateHz > 0 || requiredSubs > 0)
-    {
-        std::signal(SIGINT, onSignal);
-    }
-    if (rateHz > 0)
-    {
-        YOMK_INFO_TAG("yomkrpc", "publishing to topic \"", topicName, "\" at ",
-                      std::to_string(rateHz), " Hz, press Ctrl+C to stop");
-    }
-    const auto repeatIntervalMs = rateHz > 0 ?
-        std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(1000.0 / rateHz))) : 0;
+    //    无条件注册 SIGINT 处理（同 print/hz 框架）：缺省即 1Hz 持续发送必须可 Ctrl+C
+    //    停止，Ctrl+C 经 yomk::debugPubStop 置停止标志（无锁 store，async-signal-safe）
+    //    ——-w 等待期中断报错退出，持续循环退出并回传 total/failed
+    std::signal(SIGINT, onSignal);
+    YOMK_INFO_TAG("yomkrpc", "publishing to topic \"", topicName, "\" at ",
+                  std::to_string(rateHz), " Hz, press Ctrl+C to stop");
+    const auto repeatIntervalMs =
+        std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(1000.0 / rateHz)));
     resp = YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, waitRounds, 200, repeatIntervalMs, requiredSubs);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -996,41 +991,34 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
         YOMKRPC_DEBUG_QUIT();
         return 1;
     }
-    if (rateHz > 0)
+    // 持续发布统计：响应 data 为 StringArray { "total=N", "failed=M" }（含首轮）
+    uint32_t total = 1;
+    uint32_t failed = 0;
+    YomkUnPackPkg(resp.m_data, StringArray, stats);
+    if (stats != nullptr)
     {
-        // 持续发布统计：响应 data 为 StringArray { "total=N", "failed=M" }（含首轮）
-        uint32_t total = 1;
-        uint32_t failed = 0;
-        YomkUnPackPkg(resp.m_data, StringArray, stats);
-        if (stats != nullptr)
+        for (const auto &kv : stats->d)
         {
-            for (const auto &kv : stats->d)
+            const auto eq = kv.find('=');
+            if (eq == std::string::npos)
             {
-                const auto eq = kv.find('=');
-                if (eq == std::string::npos)
-                {
-                    continue;
-                }
-                const auto key = kv.substr(0, eq);
-                const auto val =
-                    static_cast<uint32_t>(std::strtoul(kv.c_str() + eq + 1, nullptr, 10));
-                if (key == "total")
-                {
-                    total = val;
-                }
-                else if (key == "failed")
-                {
-                    failed = val;
-                }
+                continue;
+            }
+            const auto key = kv.substr(0, eq);
+            const auto val =
+                static_cast<uint32_t>(std::strtoul(kv.c_str() + eq + 1, nullptr, 10));
+            if (key == "total")
+            {
+                total = val;
+            }
+            else if (key == "failed")
+            {
+                failed = val;
             }
         }
-        std::cout << "published total=" << total << " failed=" << failed
-                  << " to topic " << topicName << std::endl;
     }
-    else
-    {
-        std::cout << "delivered to topic " << topicName << std::endl;
-    }
+    std::cout << "published total=" << total << " failed=" << failed
+              << " to topic " << topicName << std::endl;
 
     // 3. 退出前显式删除调试节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理（同 print/list 不变式）
     resp = YOMKRPC_DEBUG_QUIT();
@@ -1042,8 +1030,9 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
     return 0;
 }
 
-// topic pub -f 子命令：按主题名发布 JSON 载荷文件（缺省仅发一次，查完即退；-w/--wait N
-// 与 -r/--rate N 语义同 runTopicPub，可任意顺序叠加）：文件内容整体作为发布载荷（与 topic
+// topic pub -f 子命令：按主题名发布 JSON 载荷文件（缺省 1Hz 持续发送，Ctrl+C 停止并输
+// 出统计；-w/--wait N 与 -r/--rate N 语义同 runTopicPub，可任意顺序叠加）：文件内容整体
+// 作为发布载荷（与 topic
 // pub -ef 导出的消息描述
 // 文件对接，形成导出→改值→按文件发布闭环；json_deserialize 对载荷前后空白不敏感，多行
 // 缩进 JSON 直接可发）：文件不存在/打不开报错退出，内容裁剪首尾空白后为空也报错退出；
@@ -1211,7 +1200,7 @@ int main(int argc, char *argv[])
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
     std::string msgOutDir;   // 输出目录（-o/--output；仅 topic pub -ef 生效，缺省当前目录）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
-    double pubRateHz = 0.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，0=仅发一次）
+    double pubRateHz = 1.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，缺省 1Hz 持续发送，Ctrl+C 停止）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
@@ -1268,6 +1257,7 @@ int main(int argc, char *argv[])
                 printUsage(std::cerr);
                 return 2;
             }
+            // -r 0 不再表示"仅发一次"（缺省已改 1Hz 持续发送，单次模式已移除）：仍须 >0
             char *end = nullptr;
             const double value = std::strtod(argv[++i], &end);
             if (end == argv[i] || *end != '\0' || value <= 0.0)
