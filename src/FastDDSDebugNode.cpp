@@ -1310,7 +1310,8 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
 
 bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string& json,
         std::string& error, uint32_t stableRounds, uint32_t intervalMs,
-        uint32_t repeatIntervalMs, uint32_t* total, uint32_t* failed)
+        uint32_t repeatIntervalMs, uint32_t requiredSubscribers,
+        uint32_t* total, uint32_t* failed)
 {
     if (total != nullptr)
     {
@@ -1336,6 +1337,49 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
         {
             error = "debug node not created";
             return false;  // 未入域
+        }
+    }
+    // ⓪ 期望订阅者等待前置段（requiredSubscribers>0，CLI -w N）：主题尚未被发现时（域内
+    // 无任何该主题端点，典型为订阅端尚未上线的"先发布后订阅"场景）无法重建类型，先无限
+    // 轮询等待主题出现——订阅端上线即宣告主题与类型，出现后进入既有稳定收敛。每
+    // intervalMs 轮询一次，首轮打印提示、约每 5s 重复打印防静默（stdout，与等待订阅者
+    // 进度同通道）；yomk::g_debugPubStop 置位（CLI Ctrl+C）即中断，报错返回不发布（此
+    // 时未创建任何实体，直接返回）
+    if (requiredSubscribers > 0)
+    {
+        const uint32_t topicLogEveryRounds = std::max<uint32_t>(1, 5000 / intervalMs);
+        uint32_t topicQuietRounds = 0;
+        bool topicInterrupted = false;
+        bool topicFound = false;
+        while (true)
+        {
+            if (yomk::g_debugPubStop.load())
+            {
+                topicInterrupted = true;
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(seenMtx_);
+                topicFound = seen_.find(topicName) != seen_.end() ||
+                        seenReaders_.find(topicName) != seenReaders_.end();
+            }
+            if (topicFound)
+            {
+                break;
+            }
+            if (topicQuietRounds == 0 || topicQuietRounds >= topicLogEveryRounds)
+            {
+                std::cout << "waiting for topic " << topicName
+                          << " to be discovered" << std::endl;
+                topicQuietRounds = 0;
+            }
+            ++topicQuietRounds;
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        }
+        if (topicInterrupted)
+        {
+            error = "waiting for subscribers interrupted";
+            return false;
         }
     }
     // ① 发现收敛：类型名 + 订阅者数快照稳定（订阅者不再新增）
@@ -1398,6 +1442,60 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
         }
         error = "create datawriter failed";
         return false;
+    }
+    // 期望订阅者等待（requiredSubscribers>0，CLI -w N）：阻塞等待 matched 订阅端计数达到 N
+    // 才继续发布流程（用户显式指定期望匹配数时的收敛判据，防自动收敛过早、订阅者尚未全部
+    // 上线即发布漏发）；每 intervalMs 轮询一次，计数变化或约每 5s 打印等待进度日志
+    // （stdout，与持续发布 publishing 进度同通道），一直等待不设超时；yomk::g_debugPubStop
+    // 置位（CLI Ctrl+C）即中断——清理发布链后报错返回，不发布不追发。计数口径为
+    // PublicationMatchedStatus.current_count（含 BEST_EFFORT 订阅端，与 ros2 topic pub -w
+    // 的 get_subscription_count 口径一致）；调试节点自身不订阅目标主题，无 intra-participant
+    // 计数干扰。状态查询失败视为匹配情况未知，放弃等待交由稳定收敛与 GUID 校验把关。
+    if (requiredSubscribers > 0)
+    {
+        int32_t lastLogged = -1;
+        uint32_t quietRounds = 0;  // 计数无变化轮数（约每 5s 重复打印进度防完全静默）
+        const uint32_t logEveryRounds = std::max<uint32_t>(1, 5000 / intervalMs);
+        bool interrupted = false;
+        while (true)
+        {
+            if (yomk::g_debugPubStop.load())
+            {
+                interrupted = true;
+                break;
+            }
+            PublicationMatchedStatus status;
+            if (RETCODE_OK != writer->get_publication_matched_status(status))
+            {
+                break;  // 状态查询失败：放弃等待（匹配情况未知），交由稳定收敛/GUID 校验
+            }
+            if (status.current_count >= static_cast<int32_t>(requiredSubscribers))
+            {
+                break;  // 达标：以 N 作为收敛结束，进入稳定确认后发布
+            }
+            if (status.current_count != lastLogged || quietRounds >= logEveryRounds)
+            {
+                std::cout << "waiting for subscribers: " << status.current_count << "/"
+                          << requiredSubscribers << " matched on topic " << topicName
+                          << std::endl;
+                lastLogged = status.current_count;
+                quietRounds = 0;
+            }
+            else
+            {
+                ++quietRounds;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+        }
+        if (interrupted)
+        {
+            error = "waiting for subscribers interrupted";
+            publisher->delete_datawriter(writer);
+            participant_->delete_publisher(publisher);
+            participant_->delete_topic(topic);
+            DynamicDataFactory::get_instance()->delete_data(data);
+            return false;
+        }
     }
     // 匹配收敛：matched 计数连续 stableRounds 轮不变（无订阅者恒 0 也收敛照发）
     uint32_t unchanged = 0;

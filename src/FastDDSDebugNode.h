@@ -169,8 +169,12 @@ public:
     // EPROSIMA 格式，与 topic pub -e 模板对称；失败 false，error="invalid json ..."，不建
     // writer）→ ③建临时发布链（DynamicPubSubType 注册 + create_topic/publisher/datawriter，
     // QoS 固定 RELIABLE+TRANSIENT_LOCAL 最大兼容：请求 ≤ 提供规则下覆盖 FastDDSNode 默认与
-    // ros2 常见组合）+ 匹配收敛（publication matched 计数连续 stableRounds 轮不变；无订阅者
-    // 恒 0 也收敛照发）→ ④write 恰一次 + ack 自适应确认：发现缓存该主题存在 RELIABLE 订阅者
+    // ros2 常见组合）+ 匹配收敛（requiredSubscribers>0 时先阻塞等待 matched 订阅端计数达到
+    // 该值——每 intervalMs 轮询一次，计数变化或约每 5s 打印等待进度日志（stdout），一直等
+    // 待不设超时，yomk::g_debugPubStop 置位即中断返回 false（error="waiting for subscribers
+    // interrupted"）；=0 时跳过直接进入稳定收敛）+ publication matched 计数连续 stableRounds
+    // 轮不变；无订阅者恒 0 也收敛照发）→ ④write 恰一次 + ack 自适应确认：发现缓存该主题
+    // 存在 RELIABLE 订阅者
     // 时 wait_for_acknowledgments(2s)，OK 才成功（全部 RELIABLE 订阅者已确认收到）、超时
     // false（error="not all subscribers acknowledged"）；全 BEST_EFFORT 或无订阅者则退化
     // 尽力而为：intervalMs 保底窗后即成功（BEST_EFFORT 无 ack 协议）。⑤repeatIntervalMs>0
@@ -179,13 +183,15 @@ public:
     // 复位残留），置位后落到底部清理。成败均清理临时发布链
     // （delete_datawriter/publisher/topic；类型注册幂等不注销）。未入域 false（error=
     // "debug node not created"）。0 值钳制默认 5 次/200ms；最长阻塞约
-    // 2*stableRounds*intervalMs + 2s（ack 可用时）；持续模式再叠加用户 Ctrl+C 前的全部
+    // 2*stableRounds*intervalMs + 2s（ack 可用时）；requiredSubscribers>0 时匹配等待不设
+    // 上限（直至达标或 g_debugPubStop 中断）；持续模式再叠加用户 Ctrl+C 前的全部
     // 间隔时长。total/failed 统计出参可空（仅持续模式回填；单次发布成功隐含 total=1）。
     bool topicPub(const std::string& topicName, const std::string& json,
             std::string& error,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs,
             uint32_t repeatIntervalMs = 0,
+            uint32_t requiredSubscribers = 0,
             uint32_t* total = nullptr,
             uint32_t* failed = nullptr);
 

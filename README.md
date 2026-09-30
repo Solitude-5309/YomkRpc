@@ -290,8 +290,8 @@ ExampleYomkRpcPub
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
 | `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc topic pub -ef <主题名> [-o 目录]` | 按主题名导出消息描述 JSON 文件（内容即默认值模板 JSON 本身，多行缩进可直接 `$(cat)` 填进发布命令；仅发描述不发布） |
-| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省仅发一次，收敛 + ack 确认送达；`-r N` 按 N Hz 持续发布，Ctrl+C 停止并输出统计） |
-| `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省仅发一次，`-r N` 持续发布） |
+| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省仅发一次，收敛 + ack 确认送达；`-w N` 期望建匹配订阅端数，计数达到 N 才发布否则一直等待（主题未发现时先等待主题出现）；`-r N` 按 N Hz 持续发布，Ctrl+C 停止并输出统计；`-w`/`-r` 可任意顺序叠加） |
+| `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省仅发一次，`-w N` 等待订阅者匹配、`-r N` 持续发布，语义同直发） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 
@@ -569,11 +569,11 @@ yomkrpc topic pub hello_world '{"data":""}'
 
 #### topic pub：向主题发布消息（JSON 载荷，缺省仅发一次）
 
-`yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存），载荷可直接给 JSON 参数，或经 `-f/--file` 从文件整体读取（`yomkrpc topic pub <主题名> -f <文件>`）；追加 `-r/--rate N`（单位 Hz）则首轮发布成功后按该频率持续重发（见下文持续发布模式）。发布链路：
+`yomkrpc topic pub <主题名> <json>` 发布一条消息到指定主题（与 `topic pub -e` 示例模式共存），载荷可直接给 JSON 参数，或经 `-f/--file` 从文件整体读取（`yomkrpc topic pub <主题名> -f <文件>`）；追加 `-w/--wait N` 指定期望匹配的订阅端数量（计数达到 N 才发布，否则一直等待并打印进度，见下文等待订阅者匹配）；追加 `-r/--rate N`（单位 Hz）则首轮发布成功后按该频率持续重发（见下文持续发布模式）。发布链路：
 
-1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出；
+1. **发现收敛**：轮询主题类型名 + 订阅者数快照，连续 N 轮（默认 5，环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 可调）不变即收敛——保证不早发（避免订阅者还没被发现就漏收）；未发现主题报错退出（`-w N` 时改为先等待主题出现，订阅端上线即宣告主题与类型，见下文等待订阅者匹配）；
 2. **类型重建 + 载荷解析**：由发现的类型重建 DynamicType，`json_deserialize` 解析载荷（与 `topic pub -e` 输出的 example 命令中的 JSON 格式对称）；解析失败报错退出，不建任何发布实体；
-3. **匹配收敛 + 发布一次**：临时 RELIABLE + TRANSIENT_LOCAL writer（请求 ≤ 提供，最大兼容既有订阅者 QoS）匹配收敛后 **write 恰一次**；匹配收敛后执行 **matched 校验**：以 writer 实际匹配的订阅端 GUID 集与发现缓存中该主题 RELIABLE 订阅者逐一比对，缓存里有订阅者却不在匹配集（订阅者在匹配建立前已挂起/异常退出，EDP 不可达）则不发布、报错退出；
+3. **匹配收敛 + 发布一次**：临时 RELIABLE + TRANSIENT_LOCAL writer（请求 ≤ 提供，最大兼容既有订阅者 QoS）匹配收敛后 **write 恰一次**；`-w N` 时匹配收敛前先阻塞等待 matched 计数达到 N（见下文等待订阅者匹配）；匹配收敛后执行 **matched 校验**：以 writer 实际匹配的订阅端 GUID 集与发现缓存中该主题 RELIABLE 订阅者逐一比对，缓存里有订阅者却不在匹配集（订阅者在匹配建立前已挂起/异常退出，EDP 不可达）则不发布、报错退出；
 4. **ack 自适应确认送达**：存在 RELIABLE 订阅者时以 `wait_for_acknowledgments` 协议级确认——每个 RELIABLE 订阅者确认样本已入 reader history 才返回成功（未全部确认报错退出，如订阅者已挂起）；全 BEST_EFFORT 或无订阅者退化尽力而为（保底窗后返回成功，BEST_EFFORT 无协议保证）。
 
 ```bash
@@ -603,9 +603,24 @@ publishing to topic "hello_world" at 10.000000 Hz, press Ctrl+C to stop
 publishing #2 to topic hello_world
 publishing #3 to topic hello_world
 ^Cpublished total=17 failed=0 to topic hello_world
+
+# 等待订阅者匹配：期望建匹配 2 个订阅端，计数达标才发布（否则持续打印等待进度，Ctrl+C 中断）
+$ yomkrpc topic pub -w 2 hello_world '{"data":"hello yomkrpc"}'
+waiting for subscribers: 1/2 matched on topic hello_world
+waiting for subscribers: 2/2 matched on topic hello_world
+delivered to topic hello_world
+
+# 先发布后订阅：订阅端尚未上线（主题未被发现）时先等待主题出现，上线后自动进入匹配等待
+$ yomkrpc topic pub -w 1 hello_world '{"data":"hello yomkrpc"}'
+waiting for topic hello_world to be discovered
+waiting for subscribers: 0/1 matched on topic hello_world
+delivered to topic hello_world
+
+# -w 与 -r 叠加（顺序任意）：先等 2 个订阅端匹配，再按 10 Hz 持续发布
+$ yomkrpc topic pub -r 10 -w 2 hello_world '{"data":"hello yomkrpc"}'
 ```
 
-非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-r/--rate` 频率非法（非数值或 ≤0）报错退出（`非法频率 "..."`），`-r` 后缺参数同用法错误退出；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
+非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-r/--rate` 频率非法（非数值或 ≤0）报错退出（`非法频率 "..."`），`-r` 后缺参数同用法错误退出；`-w/--wait` 等待被 Ctrl+C 中断报错退出（`waiting for subscribers interrupted`），订阅者数量非法（非数值、0 或溢出）报错退出（`非法订阅者数量 "..."`），`-w` 后缺参数同用法错误退出；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
 
 ack 确认的覆盖语义（端到端实测校准）：
 
@@ -615,6 +630,17 @@ ack 确认的覆盖语义（端到端实测校准）：
 - 订阅者在发布端启动前已离线/挂起（发布端从未发现过该订阅者）→ 发布端无从期待，照常返回成功——这是 DDS 发现机制的客观边界，任何发布端机制均不可达。
 
 BEST_EFFORT 订阅者不参与 ack 与 matched 校验，始终尽力而为。
+
+#### topic pub 等待订阅者匹配（-w/--wait N）
+
+两种发布形态（JSON 直发 / `-f` 文件）均支持 `-w N | --wait N`（N 为 >=1 整数），用于关闭"自动收敛可能漏掉尚未上线订阅者"的缺口——显式指定期望匹配的订阅端数量，以 N 作为收敛结束：
+
+- **主题未发现时先等待主题出现**：`-w N` 下若域内尚无该主题任何端点（典型为订阅端尚未上线的"先发布后订阅"场景），无法重建类型，先无限轮询等待主题被发现（订阅端上线即经 SPDP/EDP 宣告主题与类型），每 ~200ms 轮询、首轮打印 `waiting for topic <主题名> to be discovered`、约每 5 秒重复打印防静默；主题出现后自动进入类型重建与匹配等待；
+- **计数达标才发布**：临时 writer 建立后轮询 `PublicationMatchedStatus.current_count`（writer 实际匹配的订阅端计数，含 BEST_EFFORT 订阅端，与 `ros2 topic pub -w` 口径一致），达到 N 才继续发布；未达到则每 ~200ms 轮询一次并打印等待进度日志（计数变化时立即打印，长期无变化约每 5 秒重复打印）：`waiting for subscribers: 1/2 matched on topic hello_world`；
+- **一直等待不设超时**：主题等待与匹配等待两阶段均持续等待（N 大于实际订阅端总数、或主题迟迟未出现将无限等待），Ctrl+C 中断等待并报错退出（exit=1，`waiting for subscribers interrupted`），不发布任何数据；
+- **达标后仍走完整安全网**：达到 N 后进入既有稳定收敛确认、matched GUID 校验与 ack 自适应确认——N 是"至少 N 个"的门槛，已发现但未匹配的 RELIABLE 订阅者（挂起/异常退出）仍会如实报错；
+- **与 `-r` 任意叠加**：`-w` 与 `-r` 独立识别、顺序任意（`-w 2 -r 10` 等价 `-r 10 -w 2`）——先等待 N 个订阅端匹配，再首轮完整校验发布，随后进入持续发布循环（等待期 Ctrl+C 同样可中断）；
+- 省略 `-w`（或 N=0）行为与旧版完全一致：发现稳定即发（自动收敛）。
 
 #### topic pub 持续发布模式（-r/--rate N）
 

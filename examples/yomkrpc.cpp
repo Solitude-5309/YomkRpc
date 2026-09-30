@@ -61,8 +61,11 @@
  * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / example
  * 可复制发布命令——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，改命令里
  * JSON 字段值即可发布）；未发现主题报错退出。
- * topic pub：按主题名发布 JSON 载荷消息（缺省仅发一次；-r/--rate N 持续发布模式：首轮
- * 完整校验后按 N Hz 周期重发，尽力而为，Ctrl+C 停止并输出统计 total/failed）：节点层先
+ * topic pub：按主题名发布 JSON 载荷消息（缺省仅发一次；-w/--wait N 期望建匹配订阅端数：
+ * matched 计数达到 N 才发布，否则一直等待并打印等待进度日志，Ctrl+C 中断报错退出；
+ * -r/--rate N 持续发布模式：首轮完整校验后按 N Hz 周期重发，尽力而为，Ctrl+C 停止并输出
+ * 统计 total/failed；-w 与 -r 独立识别可任意顺序叠加：先等匹配达标再首轮发布进入持续
+ * 循环）：节点层先
  * 发现收敛（类型名 + 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何
  * 发布实体），临时 RELIABLE+TRANSIENT_LOCAL writer 匹配收敛后 write；存在 RELIABLE 订阅
  * 者时以 ack 确认送达（未全部确认报错退出），全 BEST_EFFORT 或无订阅者退化尽力而为；
@@ -148,8 +151,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub -e | --example [-d N | --domain N] <topic-name>\n"
           "  yomkrpc topic pub -ef | --example-file [-d N | --domain N]\n"
           "          [-o <dir> | --output <dir>] <topic-name>\n"
-          "  yomkrpc topic pub [-d N | --domain N] [-r N | --rate N] <topic-name> <json>\n"
-          "  yomkrpc topic pub [-d N | --domain N] [-r N | --rate N] <topic-name> -f <file> | --file <file>\n"
+          "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] [-r N | --rate N] <topic-name> <json>\n"
+          "  yomkrpc topic pub [-d N | --domain N] [-w N | --wait N] [-r N | --rate N] <topic-name> -f <file> | --file <file>\n"
           "  yomkrpc node list [-d N | --domain N]\n"
           "  yomkrpc node info [-d N | --domain N] <node-name>\n"
           "  yomkrpc -h | --help\n"
@@ -170,6 +173,9 @@ static void printUsage(std::ostream &os)
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
+          "  -w, --wait N        期望建匹配订阅端数（仅 topic pub 发布模式生效）：writer 的 matched\n"
+          "                      订阅端计数达到 N 才发布，否则每 200ms 轮询并打印等待进度日志一直\n"
+          "                      等待（Ctrl+C 中断报错退出）；省略则发现稳定即发（自动收敛）\n"
           "  -r, --rate N        持续发布频率 Hz（仅 topic pub 发布模式生效）：首轮校验发布成功后\n"
           "                      按该频率周期重发（尽力而为），Ctrl+C 停止并输出统计；省略则仅发一次\n"
           "  --window N          频率统计窗口大小（相邻消息间隔样本数上限，默认 10000，仅 topic hz 生效）\n"
@@ -192,6 +198,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub -ef -o /tmp hello_world\n"
           "  yomkrpc topic pub hello_world '{\"data\":\"hi\"}'\n"
           "  yomkrpc topic pub hello_world -f msg.json\n"
+          "  yomkrpc topic pub -w 2 hello_world '{\"data\":\"hi\"}'\n"
+          "  yomkrpc topic pub -w 2 -r 10 hello_world '{\"data\":\"hi\"}'\n"
           "  yomkrpc topic pub -r 10 hello_world '{\"data\":\"hi\"}'\n"
           "  yomkrpc topic pub -r 1 hello_world -f msg.json\n"
           "  yomkrpc node list\n"
@@ -941,14 +949,18 @@ static int runTopicPubExample(uint32_t domainId, const std::string &topicName, u
     return 0;
 }
 
-// topic pub 子命令：按主题名发布 JSON 载荷消息（缺省仅发一次，查完即退；-r/--rate N 为
-// 持续发布：首轮完整校验后按 N Hz 周期重发，Ctrl+C 退出并输出统计）；调试节点内部依次：
-// 发现收敛（主题+订阅者数稳定）→ 类型重建 + JSON 解析 → 临时 RELIABLE writer 匹配
-// 收敛 → write 一次 → 存在 RELIABLE 订阅者时 ack 确认送达（超时报错），全 BEST_EFFORT 或
-// 无订阅者退化尽力而为；持续模式节点层保留发布链周期重复 write（尽力而为），Ctrl+C 经
-// 停止标志退出并回传 total/failed 统计
+// topic pub 子命令：按主题名发布 JSON 载荷消息（缺省仅发一次，查完即退；-w/--wait N 为
+// 期望建匹配订阅端数：writer 的 matched 订阅端计数达到 N 才发布，否则一直等待并打印等待
+// 进度日志，Ctrl+C 中断报错退出；-r/--rate N 为持续发布：首轮完整校验后按 N Hz 周期重发，
+// Ctrl+C 退出并输出统计；-w 与 -r 独立识别可任意顺序叠加：先等匹配达标再首轮发布进入
+// 持续循环）；调试节点内部依次：主题未发现时先等待主题出现（requiredSubs>0，订阅端
+// 上线即宣告主题与类型）→ 发现收敛（主题+订阅者数稳定）→ 类型重建 + JSON 解析 →
+// 临时 RELIABLE writer 匹配收敛（requiredSubs>0 先阻塞等待达标）→ write 一次 → 存在
+// RELIABLE 订阅者时 ack 确认送达（超时报错），全 BEST_EFFORT 或无订阅者退化尽力而为；
+// 持续模式节点层保留发布链周期重复 write（尽力而为），Ctrl+C 经停止标志退出并回传
+// total/failed 统计
 static int runTopicPub(uint32_t domainId, const std::string &topicName, const std::string &json,
-        uint32_t waitRounds, double rateHz)
+        uint32_t waitRounds, double rateHz, uint32_t requiredSubs)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -961,18 +973,23 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
         return 1;
     }
 
-    // 2. 收敛后发布（ack 自适应确认）；未发现/载荷不合法/未确认均报错退出。rateHz>0 为
-    //    持续发布：注册 SIGINT 处理（同 print/hz 框架），Ctrl+C 经 yomk::debugPubStop 置
-    //    停止标志（无锁 store，async-signal-safe），节点层退出循环并回传 total/failed
-    if (rateHz > 0)
+    // 2. 收敛后发布（ack 自适应确认）；未发现（未指定 -w 时，指定 -w 则等待主题出现）/
+    //    载荷不合法/未确认/等待被中断均报错退出。
+    //    requiredSubs>0 或 rateHz>0 时注册 SIGINT 处理（同 print/hz 框架）：Ctrl+C 经
+    //    yomk::debugPubStop 置停止标志（无锁 store，async-signal-safe）——-w 等待期中断
+    //    报错退出，-r 持续循环退出并回传 total/failed
+    if (rateHz > 0 || requiredSubs > 0)
     {
         std::signal(SIGINT, onSignal);
+    }
+    if (rateHz > 0)
+    {
         YOMK_INFO_TAG("yomkrpc", "publishing to topic \"", topicName, "\" at ",
                       std::to_string(rateHz), " Hz, press Ctrl+C to stop");
     }
     const auto repeatIntervalMs = rateHz > 0 ?
         std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(1000.0 / rateHz))) : 0;
-    resp = YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, waitRounds, 200, repeatIntervalMs);
+    resp = YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, waitRounds, 200, repeatIntervalMs, requiredSubs);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "topic pub failed: ", resp.m_msg);
@@ -1025,13 +1042,14 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
     return 0;
 }
 
-// topic pub -f 子命令：按主题名发布 JSON 载荷文件（缺省仅发一次，查完即退；-r/--rate N
-// 持续发布语义同 runTopicPub）：文件内容整体作为发布载荷（与 topic pub -ef 导出的消息描述
+// topic pub -f 子命令：按主题名发布 JSON 载荷文件（缺省仅发一次，查完即退；-w/--wait N
+// 与 -r/--rate N 语义同 runTopicPub，可任意顺序叠加）：文件内容整体作为发布载荷（与 topic
+// pub -ef 导出的消息描述
 // 文件对接，形成导出→改值→按文件发布闭环；json_deserialize 对载荷前后空白不敏感，多行
 // 缩进 JSON 直接可发）：文件不存在/打不开报错退出，内容裁剪首尾空白后为空也报错退出；
 // 发布链路复用 runTopicPub（发现收敛→类型重建→载荷解析→匹配收敛→write→ack 自适应确认）
 static int runTopicPubJsonFile(uint32_t domainId, const std::string &topicName,
-        const std::string &jsonFile, uint32_t waitRounds, double rateHz)
+        const std::string &jsonFile, uint32_t waitRounds, double rateHz, uint32_t requiredSubs)
 {
     YOMK_INIT();
 
@@ -1055,7 +1073,7 @@ static int runTopicPubJsonFile(uint32_t domainId, const std::string &topicName,
     const std::string json = raw.substr(first, last - first + 1);
 
     // 2. 复用发布链路
-    return runTopicPub(domainId, topicName, json, waitRounds, rateHz);
+    return runTopicPub(domainId, topicName, json, waitRounds, rateHz, requiredSubs);
 }
 
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
@@ -1194,6 +1212,7 @@ int main(int argc, char *argv[])
     std::string msgOutDir;   // 输出目录（-o/--output；仅 topic pub -ef 生效，缺省当前目录）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     double pubRateHz = 0.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，0=仅发一次）
+    uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -1257,6 +1276,24 @@ int main(int argc, char *argv[])
                 return 2;
             }
             pubRateHz = value;
+            continue;
+        }
+        if (arg == "-w" || arg == "--wait")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少订阅者数量参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            char *end = nullptr;
+            const unsigned long value = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value == 0 || value > 0xFFFFFFFFul)
+            {
+                std::cerr << "yomkrpc: 非法订阅者数量 \"" << argv[i] << "\"（须为 >=1 的整数）\n";
+                return 2;
+            }
+            pubWaitSubs = static_cast<uint32_t>(value);
             continue;
         }
         if (arg == "-v" || arg == "--verbose")
@@ -1351,12 +1388,13 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "pub" &&
             !pos[2].empty() && !pubJsonFile.empty())
     {
-        return runTopicPubJsonFile(domainId, pos[2], pubJsonFile, waitRounds, pubRateHz);
+        return runTopicPubJsonFile(domainId, pos[2], pubJsonFile, waitRounds, pubRateHz,
+                pubWaitSubs);
     }
     if (pos.size() == 4 && pos[0] == "topic" && pos[1] == "pub" &&
             !pos[2].empty() && !pos[3].empty())
     {
-        return runTopicPub(domainId, pos[2], pos[3], waitRounds, pubRateHz);
+        return runTopicPub(domainId, pos[2], pos[3], waitRounds, pubRateHz, pubWaitSubs);
     }
     if (pos.size() >= 2 && pos[0] == "topic" && pos[1] == "pub")
     {

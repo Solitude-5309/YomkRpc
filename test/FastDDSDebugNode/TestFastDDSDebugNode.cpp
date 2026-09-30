@@ -43,6 +43,7 @@
 #include "TestCheck.h"
 #include "FastDDSDebugNode.h"
 #include "FastDDSNode.h"
+#include "YomkRpcDebugService.h" // yomk::debugPubStop/debugPubReset（topicPub 期望建匹配中断用例）
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MString 数据类（仅发布端使用）
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅发布端使用）
@@ -835,6 +836,152 @@ int main()
             }
             dds::DomainParticipantFactory::get_instance()->delete_participant(offParticipant);
         }
+    }
+
+    // ---- topicPub 期望建匹配数用例（requiredSubscribers，CLI -w N）：matched 计数达到 N
+    // 才继续发布；订阅端不足时阻塞等待并打印等待进度日志，停止标志置位即中断报错，不发布
+    // 不追发 ----
+    {
+        namespace dds = eprosima::fastdds::dds;
+        // A. 达标即发：RELIABLE reader 已在场（matched=1），requiredSubscribers=1 首轮即达标
+        auto *wsParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(wsParticipant != nullptr, "期望建匹配场景 participant 创建成功");
+        if (wsParticipant != nullptr)
+        {
+            constexpr const char *WS_TOPIC = "t_pub_wait_sub";
+            auto *sub = wsParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            auto *pub = wsParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            dds::TypeSupport wsTs(new YomkRpc::MStringPubSubType());
+            wsTs.register_type(wsParticipant);
+            auto *topic = (sub != nullptr && pub != nullptr) ? wsParticipant->create_topic(
+                WS_TOPIC, wsTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            auto *writer = (pub != nullptr && topic != nullptr) ?
+                pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+            dds::DataReaderQos rqos;
+            rqos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
+            auto *reader = (sub != nullptr && topic != nullptr) ?
+                sub->create_datareader(topic, rqos, nullptr) : nullptr;
+            CHECK(writer != nullptr && reader != nullptr,
+                  "期望建匹配场景 writer/reader 创建成功");
+
+            if (writer != nullptr && reader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（期望建匹配场景）");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                // 按位置传参：stableRounds=5, intervalMs=200, repeatIntervalMs=0,
+                // requiredSubscribers=1（reader 已在场，等待首轮即达标进入稳定收敛与发布）
+                std::string wsErr;
+                CHECK(dbg.topicPub(WS_TOPIC, R"({"data":"ws1"})", wsErr, 5, 200, 0, 1),
+                      "topicPub(requiredSubscribers=1, RELIABLE reader 在场) → true（达标即发）");
+                CHECK(wsErr.empty(), "达标即发 error 为空");
+            }
+
+            // 清理：writer → reader → topic → publisher → subscriber → participant
+            if (pub != nullptr && writer != nullptr)
+            {
+                pub->delete_datawriter(writer);
+            }
+            if (sub != nullptr && reader != nullptr)
+            {
+                sub->delete_datareader(reader);
+            }
+            if (topic != nullptr)
+            {
+                wsParticipant->delete_topic(topic);
+            }
+            if (pub != nullptr)
+            {
+                wsParticipant->delete_publisher(pub);
+            }
+            if (sub != nullptr)
+            {
+                wsParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(wsParticipant);
+        }
+
+        // B. 等待中断：仅 writer（无 reader，matched 恒 0）→ requiredSubscribers=1 阻塞等待，
+        // 1s 后工作线程置停止标志 → topicPub 中断返回 false（error 含 interrupted），不发布
+        auto *wiParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(wiParticipant != nullptr, "等待中断场景 participant 创建成功");
+        if (wiParticipant != nullptr)
+        {
+            constexpr const char *WI_TOPIC = "t_pub_wait_intr";
+            auto *pub = wiParticipant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+            dds::TypeSupport wiTs(new YomkRpc::MStringPubSubType());
+            wiTs.register_type(wiParticipant);
+            auto *topic = (pub != nullptr) ? wiParticipant->create_topic(
+                WI_TOPIC, wiTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            // writer 使主题被发现（无 reader：matched 恒 0，等待永不自然达标）
+            auto *writer = (pub != nullptr && topic != nullptr) ?
+                pub->create_datawriter(topic, dds::DATAWRITER_QOS_DEFAULT) : nullptr;
+            CHECK(writer != nullptr, "等待中断场景 writer 创建成功（无 reader）");
+
+            if (writer != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN), "被测端 setDomainId(200) → true（等待中断场景）");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                // 工作线程 1s 后置停止标志（topicPub 入口 debugPubReset 复位残留后才读它，
+                // 故必须异步置位而非预置）
+                std::atomic<bool> stopperDone{false};
+                std::thread stopper([&stopperDone]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    yomk::debugPubStop();
+                    stopperDone.store(true);
+                });
+                std::string wiErr;
+                CHECK(!dbg.topicPub(WI_TOPIC, R"({"data":"wi"})", wiErr, 5, 200, 0, 1),
+                      "topicPub(requiredSubscribers=1, 无订阅端) 阻塞等待中停止标志置位 → false");
+                CHECK(wiErr.find("interrupted") != std::string::npos,
+                      "等待中断 error 含 interrupted");
+                stopper.join();
+                CHECK(stopperDone.load(), "置位线程已执行（时序健全性）");
+                yomk::debugPubReset();  // 复位停止标志，防残留影响后续调用
+            }
+
+            // 清理：writer → topic → publisher → participant
+            if (pub != nullptr && writer != nullptr)
+            {
+                pub->delete_datawriter(writer);
+            }
+            if (topic != nullptr)
+            {
+                wiParticipant->delete_topic(topic);
+            }
+            if (pub != nullptr)
+            {
+                wiParticipant->delete_publisher(pub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(wiParticipant);
+        }
+    }
+
+    // 主题未发现 + requiredSubscribers=1：等待主题发现前置段（域内无任何该主题端点，
+    // "先发布后订阅"场景）阻塞等待中停止标志置位 → false（error 含 interrupted），不发布
+    {
+        FastDDSDebugNode dbg;
+        CHECK(dbg.setDomainId(TEST_DOMAIN),
+              "被测端 setDomainId(200) → true（主题未发现等待场景）");
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // 工作线程 1s 后置停止标志（入口 debugPubReset 复位残留后才读它，必须异步置位）
+        std::atomic<bool> ntStopperDone{false};
+        std::thread ntStopper([&ntStopperDone]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            yomk::debugPubStop();
+            ntStopperDone.store(true);
+        });
+        std::string ntErr;
+        CHECK(!dbg.topicPub("t_pub_wait_notopic", R"({"data":"nt"})", ntErr, 5, 200, 0, 1),
+              "topicPub(requiredSubscribers=1, 主题未发现) 等待主题出现中置位 → false");
+        CHECK(ntErr.find("interrupted") != std::string::npos,
+              "主题未发现等待中断 error 含 interrupted");
+        ntStopper.join();
+        CHECK(ntStopperDone.load(), "置位线程已执行（时序健全性）");
+        yomk::debugPubReset();  // 复位停止标志，防残留影响后续调用
     }
 
     return testReport("TestFastDDSDebugNode");
