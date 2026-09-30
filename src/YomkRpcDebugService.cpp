@@ -274,14 +274,15 @@ YomkResponse YomkRpcDebugService::topicPub(YomkPkgPtr pkg)
     // 阻塞等待期望建匹配数达标，可被停止标志中断）→write 一次→ack 自适应确认；失败原因
     // 透传调用方：not found / invalid json / not all subscribers acknowledged /
     // waiting for subscribers interrupted 等）；repeatIntervalMs>0 为持续发布模式：首轮
-    // 校验后节点层周期重复发送直到 g_debugPubStop 置位（CLI Ctrl+C），统计 total/failed
+    // 校验后节点层周期重复发送直到 g_debugPubStop 置位（CLI Ctrl+C）或发满 maxTimes 条
+    // （>0 时，发满达标在销毁发布链前保底排空 200ms），统计 total/failed
     // （含首轮）经 StringArray 随响应带回
     std::string error;
     uint32_t total = 0;
     uint32_t failed = 0;
     if (!node_->topicPub(p->msg.topicName, p->msg.json, error, p->msg.stableRounds,
                 p->msg.intervalMs, p->msg.repeatIntervalMs, p->msg.requiredSubscribers,
-                &total, &failed))
+                p->msg.maxTimes, &total, &failed))
     {
         YOMK_ERROR_TAG("YomkRpcDebugService::topicPub", "pub failed: ", error);
         return YomkResponse(YomkResponse::eNo, error);

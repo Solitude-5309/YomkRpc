@@ -984,5 +984,96 @@ int main()
         yomk::debugPubReset();  // 复位停止标志，防残留影响后续调用
     }
 
+    // ---- topicPub 条数上限用例（maxTimes，CLI -t N）：持续循环发满 N 条（含首轮）自动停止，
+    // 达标路径在销毁发布链前排空 200ms；与 requiredSubscribers（CLI -w N）正交叠加 ----
+    {
+        namespace dds = eprosima::fastdds::dds;
+        auto *mtParticipant = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(mtParticipant != nullptr, "条数上限场景 participant 创建成功");
+        if (mtParticipant != nullptr)
+        {
+            auto *sub = mtParticipant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+            dds::TypeSupport mtTs(new YomkRpc::MStringPubSubType());
+            mtTs.register_type(mtParticipant);
+            dds::DataReaderQos rqos;
+            rqos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
+            // D. 发满即停：RELIABLE reader 在场（t_pub_maxtimes），maxTimes=3 → 恰发 3 条后退出
+            constexpr const char *MT_TOPIC = "t_pub_maxtimes";
+            auto *mtTopic = sub != nullptr ? mtParticipant->create_topic(
+                MT_TOPIC, mtTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            PubTestListener mtListener;
+            auto *mtReader = (sub != nullptr && mtTopic != nullptr) ?
+                sub->create_datareader(mtTopic, rqos, &mtListener) : nullptr;
+            CHECK(mtReader != nullptr, "条数上限场景 RELIABLE 订阅端 DataReader 创建成功");
+            // E. 条数上限与期望建匹配叠加：reader 在场（t_pub_maxtimes_wait），
+            // requiredSubscribers=1 + maxTimes=2 → 匹配达标后恰发 2 条退出
+            constexpr const char *MW_TOPIC = "t_pub_maxtimes_wait";
+            auto *mwTopic = sub != nullptr ? mtParticipant->create_topic(
+                MW_TOPIC, mtTs.get_type_name(), dds::TOPIC_QOS_DEFAULT) : nullptr;
+            PubTestListener mwListener;
+            auto *mwReader = (sub != nullptr && mwTopic != nullptr) ?
+                sub->create_datareader(mwTopic, rqos, &mwListener) : nullptr;
+            CHECK(mwReader != nullptr, "条数上限叠加场景 RELIABLE 订阅端 DataReader 创建成功");
+
+            if (mtReader != nullptr && mwReader != nullptr)
+            {
+                FastDDSDebugNode dbg;
+                CHECK(dbg.setDomainId(TEST_DOMAIN),
+                      "被测端 setDomainId(200) → true（条数上限场景）");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                // D：位置传参 stableRounds=5, intervalMs=50（加速节拍）, repeatIntervalMs=50,
+                // requiredSubscribers=0, maxTimes=3 → 发满 3 条（含首轮）即停（排空 200ms 后返回）
+                std::string mtErr;
+                uint32_t mtTotal = 0;
+                uint32_t mtFailed = 0;
+                CHECK(dbg.topicPub(MT_TOPIC, R"({"data":"mt"})", mtErr, 5, 50, 50, 0, 3,
+                            &mtTotal, &mtFailed),
+                      "topicPub(maxTimes=3) → true（发满即停，排空 200ms 后返回）");
+                CHECK(mtErr.empty(), "发满即停 error 为空");
+                CHECK(mtTotal == 3, "maxTimes=3 统计 total==3（含首轮）");
+                CHECK(mtFailed == 0, "maxTimes=3 统计 failed==0");
+                CHECK(mtListener.received_.load(), "订阅端收到发满即停消息（送达实证）");
+
+                // E：requiredSubscribers=1（reader 在场等待首轮即达标）+ maxTimes=2 →
+                // 等匹配达标后恰发 2 条退出（-w 与 -t 正交叠加）
+                std::string mwErr;
+                uint32_t mwTotal = 0;
+                uint32_t mwFailed = 0;
+                CHECK(dbg.topicPub(MW_TOPIC, R"({"data":"mw"})", mwErr, 5, 50, 50, 1, 2,
+                            &mwTotal, &mwFailed),
+                      "topicPub(requiredSubscribers=1, maxTimes=2) → true（匹配达标后发满即停）");
+                CHECK(mwErr.empty(), "叠加场景 error 为空");
+                CHECK(mwTotal == 2, "requiredSubscribers=1 + maxTimes=2 统计 total==2");
+                CHECK(mwFailed == 0, "叠加场景统计 failed==0");
+                CHECK(mwListener.received_.load(), "订阅端收到叠加场景消息（送达实证）");
+            }
+
+            // 清理：reader ×2 → topic ×2 → subscriber → participant
+            if (sub != nullptr && mtReader != nullptr)
+            {
+                sub->delete_datareader(mtReader);
+            }
+            if (sub != nullptr && mwReader != nullptr)
+            {
+                sub->delete_datareader(mwReader);
+            }
+            if (mtTopic != nullptr)
+            {
+                mtParticipant->delete_topic(mtTopic);
+            }
+            if (mwTopic != nullptr)
+            {
+                mtParticipant->delete_topic(mwTopic);
+            }
+            if (sub != nullptr)
+            {
+                mtParticipant->delete_subscriber(sub);
+            }
+            dds::DomainParticipantFactory::get_instance()->delete_participant(mtParticipant);
+        }
+    }
+
     return testReport("TestFastDDSDebugNode");
 }

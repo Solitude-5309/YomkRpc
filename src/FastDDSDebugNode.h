@@ -180,18 +180,21 @@ public:
     // 尽力而为：intervalMs 保底窗后即成功（BEST_EFFORT 无 ack 协议）。⑤repeatIntervalMs>0
     // 持续发布：首轮校验成功后保留发布链按该周期重复 write（尽力而为：write 失败仅计入
     // failed 不返回，不再等 ack），循环只读 yomk::g_debugPubStop（入口先 debugPubReset
-    // 复位残留），置位后落到底部清理。成败均清理临时发布链
+    // 复位残留）；maxTimes>0 为条数上限（含首轮）：发满即停止循环并在销毁发布链前保底
+    // 排空 200ms（进程即将退出、writer 即将销毁，末条消息失去协议重传窗口；Ctrl+C 中断
+    // 不排空），=0 持续到停止标志置位才退出。成败均清理临时发布链
     // （delete_datawriter/publisher/topic；类型注册幂等不注销）。未入域 false（error=
     // "debug node not created"）。0 值钳制默认 5 次/200ms；最长阻塞约
     // 2*stableRounds*intervalMs + 2s（ack 可用时）；requiredSubscribers>0 时匹配等待不设
-    // 上限（直至达标或 g_debugPubStop 中断）；持续模式再叠加用户 Ctrl+C 前的全部
-    // 间隔时长。total/failed 统计出参可空（仅持续模式回填；单次发布成功隐含 total=1）。
+    // 上限（直至达标或 g_debugPubStop 中断）；持续模式再叠加用户 Ctrl+C 或发满 maxTimes
+    // 前的全部间隔时长。total/failed 统计出参可空（仅持续模式回填；单次发布成功隐含 total=1）。
     bool topicPub(const std::string& topicName, const std::string& json,
             std::string& error,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs,
             uint32_t repeatIntervalMs = 0,
             uint32_t requiredSubscribers = 0,
+            uint32_t maxTimes = 0,
             uint32_t* total = nullptr,
             uint32_t* failed = nullptr);
 

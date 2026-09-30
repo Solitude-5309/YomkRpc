@@ -161,7 +161,8 @@ struct DDSDebugTopicMsg
 // （节点层打印等待进度日志）直至达标或停止标志置位中断（不设超时）；=0 自动收敛。repeatIntervalMs
 // >0 为持续发布模式：首轮校验成功后保留发布链按该周期重复 write（尽力而为：write 失败仅
 // 计数不返回，不再等 ack），直到停止标志 g_debugPubStop 置位（CLI Ctrl+C 经 debugPubStop）
-// 才退出并清理，发布条数统计经出参 total/failed 带回响应
+// 或发满 maxTimes 条（>0 时）才退出并清理：发满达标路径在销毁发布链前保底排空 200ms（进程
+// 即将退出、writer 即将销毁，末条消息失去重传窗口），发布条数统计经出参 total/failed 带回响应
 struct DDSDebugTopicPub
 {
     std::string topicName;  // 目标主题名（须已在域内被发现）
@@ -170,6 +171,7 @@ struct DDSDebugTopicPub
     uint32_t intervalMs;    // 快照轮询间隔毫秒
     uint32_t repeatIntervalMs = 0;  // 持续发布间隔毫秒；0=仅发一次（缺省兼容旧 4 字段聚合初始化）
     uint32_t requiredSubscribers = 0;  // 期望建匹配订阅端数门槛；0=自动收敛（缺省兼容旧 5 字段聚合初始化）
+    uint32_t maxTimes = 0;  // 发布条数上限（含首轮）；0=不限（缺省兼容旧 6 字段聚合初始化）
 };
 
 // clang-format off

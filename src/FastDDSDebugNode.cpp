@@ -1311,7 +1311,7 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
 bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string& json,
         std::string& error, uint32_t stableRounds, uint32_t intervalMs,
         uint32_t repeatIntervalMs, uint32_t requiredSubscribers,
-        uint32_t* total, uint32_t* failed)
+        uint32_t maxTimes, uint32_t* total, uint32_t* failed)
 {
     if (total != nullptr)
     {
@@ -1619,7 +1619,8 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
     // ⑤ 持续发布模式（repeatIntervalMs>0）：首轮校验（含 ack 确认）成功后保留发布链按周期
     // 重复 write，尽力而为（write 失败仅计数不返回；RELIABLE 的 NACK 重传由协议自主完成，
     // 不再同步等 ack），直到 yomk::g_debugPubStop 置位（CLI Ctrl+C 经 debugPubStop，无锁
-    // store）才退出并落到底部清理。total/failed 含首轮 1 条。发布节拍为绝对时刻网格（对齐
+    // store）或发满 maxTimes 条（>0 时，含首轮）才退出并落到底部清理。total/failed 含首轮
+    // 1 条。发布节拍为绝对时刻网格（对齐
     // ros2 rcl_timer：next 基于首发时刻按周期累加而非 now，平均频率精确贴合 -r 标称值）。
     if (ok && repeatIntervalMs > 0)
     {
@@ -1627,7 +1628,7 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
         uint32_t failCount = 0;
         const auto interval = std::chrono::milliseconds(repeatIntervalMs);
         auto next = std::chrono::steady_clock::now() + interval;  // 首个网格点 = 首发时刻 + 周期
-        while (!yomk::g_debugPubStop.load())
+        while (!yomk::g_debugPubStop.load() && (maxTimes == 0 || sent < maxTimes))
         {
             std::this_thread::sleep_until(next);
             if (yomk::g_debugPubStop.load())
@@ -1652,6 +1653,16 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
             {
                 next += interval * (1 + (now - next) / interval);
             }
+        }
+        // 发满 maxTimes 条达标退出（非 Ctrl+C 中断）：进程即将退出、临时发布链（writer）
+        // 即将销毁，末条消息失去一切后续重传机会——销毁前保底排空 200ms 等待异步传输落地
+        // （RELIABLE 首轮已有 ack 确认，持续轮尽力而为在此收尾；BEST_EFFORT 全靠此窗）；
+        // Ctrl+C 用户主动停止立即退出不排空。排空必须在 delete_datawriter 之前（writer 销毁
+        // 即切断重传路径）
+        static constexpr uint32_t kPubDrainMs = 200;
+        if (maxTimes > 0 && !yomk::g_debugPubStop.load())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPubDrainMs));
         }
         if (total != nullptr)
         {

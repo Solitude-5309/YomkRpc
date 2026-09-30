@@ -174,14 +174,15 @@
 // 直至达标或停止标志置位中断（不设超时，报错 waiting for subscribers interrupted）；=0
 // 自动收敛。repeatIntervalMs>0 为持续发布模式：首轮校验
 // 成功后保留发布链按该周期重复 write（尽力而为：write 失败仅计数不返回，不再等 ack），
-// 直到 yomk::g_debugPubStop 置位（CLI Ctrl+C 经 debugPubStop 置，async-signal-safe）才
-// 退出清理；成功响应 data 为 StringArray {"total=N", "failed=M"}（仅持续模式，含首轮）。
-// 未发现主题（topic [...] not found）/载荷不合法（invalid json for type [...]）/送达未确认
-// 返回 eNo。须先创建调试节点。返回 YomkResponse。
-#define YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers)  \
+// 直到 yomk::g_debugPubStop 置位（CLI Ctrl+C 经 debugPubStop 置，async-signal-safe）或
+// 发满 maxTimes 条（>0 时，含首轮；发满达标在销毁发布链前保底排空 200ms 后返回，Ctrl+C
+// 中断不排空）才退出清理；成功响应 data 为 StringArray {"total=N", "failed=M"}（仅持续
+// 模式，含首轮）。未发现主题（topic [...] not found）/载荷不合法（invalid json for type [...]）/
+// 送达未确认返回 eNo。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes)  \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/topic_pub",                                    \
-        YomkMkPtr(DDSDebugTopicPub, DDSDebugTopicPub{topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers}))
+        YomkMkPtr(DDSDebugTopicPub, DDSDebugTopicPub{topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes}))
 
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；
