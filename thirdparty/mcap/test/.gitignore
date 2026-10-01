@@ -1,0 +1,3 @@
+# 根 .gitignore 末尾 !thirdparty/** 会使 build 忽略规则对 thirdparty 失效，
+# 在本目录重新忽略示例工程的构建产物
+build/
