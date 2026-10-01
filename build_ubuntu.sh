@@ -259,7 +259,7 @@ done
 unset _BIN
 echo " 可直接运行 ExampleYomkRpcTopic（发布订阅流程演示）/ ExampleYomkRpcTopicLoan（loan 借出机制演示）；"
 echo " 示例程序 ExampleYomkRpcPub/ExampleYomkRpcSub 可另开两个终端分别运行观察跨进程发布/订阅；"
-echo " 命令行工具 yomkrpc 观察任意主题：yomkrpc topic print [-d N] <主题名>"
+echo " 命令行工具 yomkrpc 观察任意主题：yomkrpc topic print <主题名>"
 echo "==========================================="
 echo "编译完成，扩展库已注册到系统动态库缓存，新开任意终端即可使用"
 }

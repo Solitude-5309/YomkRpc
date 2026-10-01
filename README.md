@@ -297,7 +297,7 @@ ExampleYomkRpcPub
 
 公共参数（各命令通用）：
 
-- **`-d N`**：指定 DDS 域号（合法范围 [0,232]）。优先级 `-d` > 环境变量 > 0：`-d N` 为临时指定，直接使用该值（不读、也不写环境变量）；环境变量 `YOMKRPC_DDS_DOMAIN_ID` 为默认路径，yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行
+- **环境变量 `YOMKRPC_DDS_DOMAIN_ID`**：指定 DDS 域号（合法范围 [0,232]，默认 0）。yomkrpc 启动时无该变量则自动创建并默认 0，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释便于识别）——新开任意终端可直接 `echo $YOMKRPC_DDS_DOMAIN_ID` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改默认域 id 可直接编辑 .bashrc 中该行，或临时 `export YOMKRPC_DDS_DOMAIN_ID=5`
 - **环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS`**：收敛判定次数——查询类命令内部每 ~200ms 轮询一次发现缓存快照，连续 N 次集合不变即认为发现收敛、立即输出（默认 5；`topic list`、`topic info`、`topic type`、`topic find`、`interface show`、`interface list`、`topic pub -e`、`topic pub -ef`、`topic pub`、`node list` 与 `node info` 生效，`topic print`/`topic hz` 为持续订阅/测量型不用）。该环境变量为收敛次数唯一配置入口：yomkrpc 启动时无该变量则自动创建并默认 5，同时**幂等写入 `~/.bashrc`**（仅当其中无该变量时，带 `# added by yomkrpc` 注释）——新开任意终端可直接 `echo $YOMKRPC_DDS_DISCOVER_ROUNDS` 查看并自动继承；已打开的终端须 `source ~/.bashrc` 或重开才生效。修改收敛次数可直接编辑 .bashrc 中该行，或临时 `export YOMKRPC_DDS_DISCOVER_ROUNDS=7`（值须为 >=1 的整数，非法报错退出）
 
 ### 6.2 调试主题观察（yomkrpc topic print）
@@ -306,7 +306,6 @@ ExampleYomkRpcPub
 
 ```bash
 yomkrpc topic print hello_world        # 默认域 0
-yomkrpc topic print -d 5 sensor_data   # 指定 DDS 域号
 ```
 
 与发布端配合观察（另开两个终端）：
@@ -383,7 +382,6 @@ int main(int argc, char *argv[])
 
 ```bash
 yomkrpc topic list          # 默认域 0
-yomkrpc topic list -d 5     # 指定 DDS 域号
 yomkrpc topic list -t       # 类型名模式：每行输出 主题名 [类型名]
 ```
 
@@ -429,7 +427,6 @@ resp = YOMKRPC_DEBUG_QUIT();                // 3. 退出前显式清理
 
 ```bash
 yomkrpc topic info hello_world        # 默认域 0
-yomkrpc topic info -d 5 sensor_data   # 指定 DDS 域号
 yomkrpc topic info -v hello_world     # 端点详情模式：逐端点列出 Node name/GUID/QoS profile
 ```
 
@@ -503,7 +500,6 @@ resp = YOMKRPC_DEBUG_QUIT();                       // 3. 退出前显式清理
 
 ```bash
 yomkrpc topic type hello_world        # 输出：YomkRpc::MString
-yomkrpc topic type -d 5 sensor_data   # 指定域号
 ```
 
 未发现主题时报错退出（`topic [<主题名>] not found`，与 topic info 同语义）。等价宏调用同上（`YOMKRPC_DEBUG_TOPIC_INFO` 取首行去前缀）。
@@ -514,7 +510,6 @@ yomkrpc topic type -d 5 sensor_data   # 指定域号
 
 ```bash
 yomkrpc topic find YomkRpc::MString       # 输出：hello_world
-yomkrpc topic find -d 5 YomkRpc::MString  # 指定域号
 ```
 
 域内无该类型主题时报错退出（`type [<类型名>] not found`，info 族语义，可发现类型名拼写错误）。等价宏调用：`YOMKRPC_DEBUG_TOPIC_FIND(typeName, stableRounds, intervalMs)`。
@@ -726,7 +721,6 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 
 ```bash
 yomkrpc node list          # 默认域 0
-yomkrpc node list -d 5     # 指定 DDS 域号
 ```
 
 与发布端配合观察（先启动发布端——`ExampleYomkRpcPub` 创建节点 `pub_node`，工具创建调试节点入域后对参与者发现缓存独立收敛查询）：
@@ -765,7 +759,6 @@ resp = YOMKRPC_DEBUG_QUIT();                  // 3. 退出前显式清理
 
 ```bash
 yomkrpc node info pub_node          # 默认域 0
-yomkrpc node info -d 5 my_node      # 指定 DDS 域号
 ```
 
 与发布端配合观察（先启动发布端并等待其稳定入域——工具每次运行创建全新调试节点，发现经 PDP/EDP 传播约需 1-3 秒，随后对该节点名独立收敛查询）：
