@@ -223,6 +223,12 @@ public:
             {
                 continue;
             }
+            // --start-paused 暂停态：照常 take 排空（防恢复后旧数据涌入），不写不计数，
+            // sequence 不递增（恢复后首条消息 sequence 从 0 起）
+            if (yomk::g_bagRecordPaused.load(std::memory_order_relaxed))
+            {
+                continue;
+            }
             auto* blob = static_cast<Blob*>(data_);
             const auto nowNs = steadyToSystemNs();
             mcap::Message msg;

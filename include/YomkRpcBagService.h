@@ -36,17 +36,33 @@ private:
 // bag record 录制停止标志：录制循环（FastDDSBagNode::record 内部，每 100ms 轮询）只读，
 // SIGINT 处理函数（CLI onSignal）经 bagRecordStop 写——atomic 无锁 store 保证
 // async-signal-safe（不可经 YOMK_REQUEST 停止：请求链路含锁与内存分配，handler 内禁用）。
-// 调用方在发起录制前应先 bagRecordReset 复位，避免上次会话残留置位导致秒退。
+// 调用方在发起录制前应先 bagRecordReset 复位，避免上次会话残留置位导致秒退；
+// bag 服务 handler 录制前亦兜底复位 stop（只复位 stop 不动 paused——暂停是调用方启动意图）。
+//
+// bag record 暂停标志（--start-paused）：暂停态由 CLI --start-paused 或库用户
+// bagRecordPause 置位，回调写路径（BagSubListener）每条消息检查——置位期间照常 take
+// 排空（防恢复后旧数据涌入）但丢弃不写，bagRecordResume 后开始写入。订阅与落盘路径
+// 不受影响；不经 DDSBagRecord 协议传递（CLI 与 bag 服务同进程，全局标志直读）。
 namespace yomk
 {
 inline std::atomic<bool> g_bagRecordStop{false};
+inline std::atomic<bool> g_bagRecordPaused{false};
 inline void bagRecordStop()
 {
     g_bagRecordStop.store(true);
 }
+inline void bagRecordPause()
+{
+    g_bagRecordPaused.store(true);
+}
+inline void bagRecordResume()
+{
+    g_bagRecordPaused.store(false);
+}
 inline void bagRecordReset()
 {
     g_bagRecordStop.store(false);
+    g_bagRecordPaused.store(false);  // 双复位：防上次会话残留暂停态（表现为何都不录）
 }
 }  // namespace yomk
 

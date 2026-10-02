@@ -82,7 +82,9 @@ public:
     //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
     //   每主题建订成功即输出一行 recording topic=<名> type=<类型>（stdout，通配展开后的实际
     //   录制清单由此可见——CLI 启动行仅显示清单项数）。
-    // ④等待 yomk::g_bagRecordStop（每 100ms 轮询，SIGINT 经 bagRecordStop 置位）。
+    // ④等待 yomk::g_bagRecordStop（每 100ms 轮询，SIGINT 经 bagRecordStop 置位）；
+    //   g_bagRecordPaused 置位期间（--start-paused / bagRecordPause）回调照常 take 但丢弃，
+    //   bagRecordResume 后开始写入（订阅与落盘路径照常，暂停期不计入 starting_time/duration）。
     // ⑤停止序列：delete 全部 reader（杜绝并发回调）→ writer.close()（补写 summary 索引）→
     //   写 metadata.json（storage_identifier=mcap，起始时间/时长附 _format 可读键）→ 回填 stats。
     // 成功返回 true 且节点定格（再次 record 报错须重建）；失败（未入域/重复/输入有误/资源创建

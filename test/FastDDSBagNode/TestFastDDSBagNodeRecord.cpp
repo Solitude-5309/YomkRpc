@@ -22,7 +22,9 @@
  *   R9 通配模式录制（新节点）：精确项 + 前缀模式命中同前缀双主题 → 展开去重合并
  *      （stats 两项升序、各有条数）、metadata 列出展开后的实际主题、录制定格同样成立；
  *   R10 outputDir 指定目录名（新节点）：bagDir() == 指定名（非时间戳名）、指定目录下
- *      bag_0.mcap 与 metadata.json 落盘。
+ *      bag_0.mcap 与 metadata.json 落盘；
+ *   R11 --start-paused 暂停态启动（新节点两段）：全程暂停零写入（消息丢弃、目录照建）；
+ *      暂停后恢复开始写入（metadata starting_time 非零——暂停期不计入）。
  *
  * 域号 202：与 TestYomkRpcBagServiceLifecycle(200)/TestFastDDSBagNodeValidation(201) 错开，
  * ctest 串行执行互不残留。
@@ -65,6 +67,11 @@ namespace
     constexpr int kPubIntervalMs = 150;
     // R9 模式录制时长：新主题 EDP 发现（PDP 已互通约 1~3s）+ 快路径两轮防抖 + ~4s 录制期
     constexpr int kPatternRecordMs = 8000;
+    // R11a 全程暂停录制窗：校验收敛（1~3s）+ 暂停丢弃期（≥1s，证零写入）
+    constexpr int kPausedRecordMs = 4000;
+    // R11b 恢复前暂停窗（校验收敛后仍有丢弃期）与恢复后录制窗
+    constexpr int kResumeDelayMs = 2000;
+    constexpr int kResumeRecordMs = 3000;
 } // namespace
 
 int main()
@@ -403,6 +410,124 @@ int main()
         {
             std::cerr << "record outputDir error: " << errorCustom << std::endl;
         }
+    }
+
+    // ---- R11a：--start-paused 全程暂停不恢复 → 零写入 ----
+    {
+        // 复位双标志（R10 已置 stop；bagRecordReset 现同时复位 paused）
+        yomk::bagRecordReset();
+        FastDDSBagNode node4;
+        CHECK(node4.setDomainId(TEST_DOMAIN), "R11a 新节点 setDomainId(202) 成功");
+
+        // 远端新增发布者（复用 peer participant 与 MString 类型）
+        auto *topicPauseA = peerParticipant->create_topic(
+            "rt/bag_rec_pause_a", ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        auto *writerPauseA = (pub != nullptr && topicPauseA != nullptr)
+                                 ? pub->create_datawriter(topicPauseA, dds::DATAWRITER_QOS_DEFAULT)
+                                 : nullptr;
+        CHECK(writerPauseA != nullptr, "R11a 远端 DataWriter 创建成功（rt/bag_rec_pause_a）");
+
+        std::atomic<bool> pubStop4{false};
+        std::thread pubThread4([&]()
+        {
+            YomkRpc::MString msg;
+            uint32_t seq = 0;
+            while (!pubStop4.load())
+            {
+                msg.data("bag-record-pause-a-" + std::to_string(seq++));
+                writerPauseA->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPubIntervalMs));
+            }
+        });
+
+        // 暂停态启动：bagRecordPause 先于 record（对齐 CLI --start-paused 前置置位）
+        yomk::bagRecordPause();
+        std::vector<FastDDSBagNode::BagTopicStat> statsPaused;
+        std::string errorPaused;
+        std::atomic<bool> recDone4{false};
+        bool okPaused = false;
+        std::thread recThread4([&]()
+        {
+            okPaused = node4.record({"rt/bag_rec_pause_a"}, statsPaused, &errorPaused);
+            recDone4.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPausedRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone4.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread4.join();
+        pubStop4.store(true);
+        pubThread4.join();
+
+        CHECK(okPaused, "R11a 全程暂停 record → true（暂停不影响录制会话本身）");
+        CHECK(!statsPaused.empty() && statsPaused[0].count == 0,
+              "R11a 全程暂停零写入（暂停期消息全部丢弃）");
+        CHECK(!statsPaused.empty() && statsPaused[0].bytes == 0, "R11a 全程暂停零字节");
+        CHECK(node4.bagDir().size() == std::string("bag_YYYY-MM-DD_HH-MM-SS_mmm").size(),
+              "R11a 暂停态目录照建（订阅与落盘路径不受影响）");
+    }
+
+    // ---- R11b：暂停后恢复 → 恢复后开始写入 ----
+    {
+        yomk::bagRecordReset();
+        FastDDSBagNode node5;
+        CHECK(node5.setDomainId(TEST_DOMAIN), "R11b 新节点 setDomainId(202) 成功");
+
+        auto *topicPauseB = peerParticipant->create_topic(
+            "rt/bag_rec_pause_b", ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        auto *writerPauseB = (pub != nullptr && topicPauseB != nullptr)
+                                 ? pub->create_datawriter(topicPauseB, dds::DATAWRITER_QOS_DEFAULT)
+                                 : nullptr;
+        CHECK(writerPauseB != nullptr, "R11b 远端 DataWriter 创建成功（rt/bag_rec_pause_b）");
+
+        std::atomic<bool> pubStop5{false};
+        std::thread pubThread5([&]()
+        {
+            YomkRpc::MString msg;
+            uint32_t seq = 0;
+            while (!pubStop5.load())
+            {
+                msg.data("bag-record-pause-b-" + std::to_string(seq++));
+                writerPauseB->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPubIntervalMs));
+            }
+        });
+
+        yomk::bagRecordPause();
+        std::vector<FastDDSBagNode::BagTopicStat> statsResume;
+        std::string errorResume;
+        std::atomic<bool> recDone5{false};
+        bool okResume = false;
+        std::thread recThread5([&]()
+        {
+            okResume = node5.record({"rt/bag_rec_pause_b"}, statsResume, &errorResume);
+            recDone5.store(true);
+        });
+        // 暂停一段（校验收敛后仍有丢弃期）后置恢复标志，再录一段
+        std::this_thread::sleep_for(std::chrono::milliseconds(kResumeDelayMs));
+        yomk::bagRecordResume();
+        std::this_thread::sleep_for(std::chrono::milliseconds(kResumeRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone5.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread5.join();
+        pubStop5.store(true);
+        pubThread5.join();
+
+        CHECK(okResume, "R11b 暂停后恢复 record → true");
+        CHECK(!statsResume.empty() && statsResume[0].count >= 1,
+              "R11b 恢复后开始写入（count >= 1）");
+        // metadata starting_time 非零：firstNs 被恢复后首条写入消息置位（暂停期丢弃不置位）
+        std::ifstream meta5(node5.bagDir() + "/metadata.json");
+        std::stringstream buf5;
+        buf5 << meta5.rdbuf();
+        const std::string text5 = buf5.str();
+        CHECK(text5.find("\"nanoseconds_since_epoch\": 0") == std::string::npos,
+              "R11b metadata starting_time 非零（暂停期不计入）");
     }
 
     // 远端发布端清理（先于 bag 节点析构亦可，二者独立参与者）

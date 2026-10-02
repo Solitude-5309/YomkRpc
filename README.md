@@ -302,7 +302,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省 1Hz 持续发送，`-w N` 等待订阅者匹配、`-r N` 持续发布、`-t N` 条数上限，语义同直发） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
-| `yomkrpc bag record [-o <目录>\|--output <目录>] <主题名\|模式> [<主题名\|模式> ...]` | 录制主题列表为 mcap bag（启动校验后透传订阅直写原始 CDR 字节，长驻阻塞至 Ctrl+C 收尾；清单项支持通配——恰好一个 `*` 的前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre*suf` 模式，单独 `*` 匹配全部，按发现缓存展开为实际主题集合去重升序，未命中报错；bag 目录名经 `-o` 指定，缺省按时间戳命名，目录已存在报错退出；校验失败不建目录不产生文件，详见 6.7） |
+| `yomkrpc bag record [-o <目录>\|--output <目录>] [--start-paused] <主题名\|模式> [<主题名\|模式> ...]` | 录制主题列表为 mcap bag（启动校验后透传订阅直写原始 CDR 字节，长驻阻塞至 Ctrl+C 收尾；清单项支持通配——恰好一个 `*` 的前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre*suf` 模式，单独 `*` 匹配全部，按发现缓存展开为实际主题集合去重升序，未命中报错；bag 目录名经 `-o` 指定，缺省按时间戳命名，目录已存在报错退出；`--start-paused` 暂停态启动——订阅与发现照常、收到的消息丢弃不写入，按空格后启动录制；校验失败不建目录不产生文件，详见 6.7） |
 
 公共参数（各命令通用）：
 
@@ -805,13 +805,14 @@ resp = YOMKRPC_DEBUG_QUIT();                            // 3. 退出前显式清
 
 ### 6.7 录制主题到 bag（yomkrpc bag record）
 
-`yomkrpc bag record [-o <目录>|--output <目录>] <主题名|模式> [<主题名|模式> ...]` 将主题列表录制为 mcap bag（类型无关，无需 IDL 生成代码——发现匹配远端 DataWriter 自动解析类型，透传订阅将原始 CDR 字节直写 mcap；命令形态对齐 `ros2 bag record`：显式主题清单 + 可选 `-o` 指定 bag 目录名 + Ctrl+C 停止）。域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择（同其他命令）。经 `YomkRpcBagService` bag 服务实现（等价宏 `YOMKRPC_BAG_*` 定义于 `YomkRpcAPI.h`，见本节末尾）：
+`yomkrpc bag record [-o <目录>|--output <目录>] [--start-paused] <主题名|模式> [<主题名|模式> ...]` 将主题列表录制为 mcap bag（类型无关，无需 IDL 生成代码——发现匹配远端 DataWriter 自动解析类型，透传订阅将原始 CDR 字节直写 mcap；命令形态对齐 `ros2 bag record`：显式主题清单 + 可选 `-o` 指定 bag 目录名 + 可选 `--start-paused` 暂停态启动 + Ctrl+C 停止）。域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择（同其他命令）。经 `YomkRpcBagService` bag 服务实现（等价宏 `YOMKRPC_BAG_*` 定义于 `YomkRpcAPI.h`，见本节末尾）：
 
 ```bash
 yomkrpc bag record hello_world           # 录制单主题（默认域 0）
 yomkrpc bag record rt/chatter rt/tf      # 多主题清单
 yomkrpc bag record 'hello_*' '*_world'   # 通配模式（清单项恰好含一个 *，引号防 shell glob 展开）
 yomkrpc bag record -o my_session hello_world   # 指定 bag 目录名（相对/绝对路径均可）
+yomkrpc bag record --start-paused hello_world  # 暂停态启动（订阅照常、消息丢弃不写入，按空格启动录制）
 ```
 
 与发布端配合观察（另开两个终端）：
@@ -838,7 +839,7 @@ hello_world: 12 条 / 288 字节
 1. **启动校验**：清单快速校验（空清单/空名/重复/多通配/`-o` 目录已存在即报错）先于发现轮询瞬间返回；随后轮询发现缓存快照（每 200ms 一轮，连续 15 轮不变或全部清单项确认有端点即提前收敛；总窗不足 6s 自动提升轮数，防 SPDP 公告期误判；校验参数固定，不经 `YOMKRPC_DDS_DISCOVER_ROUNDS` 调整）；**模式项逐轮展开**——按发现缓存全表匹配合并进录制清单（去重升序）。收敛后逐项判定，任一精确主题既无发布者也无订阅者、或任一模式未命中任何主题即整体报错退出（逐项列出；**校验失败发生在建目录之前，不产生任何文件**）。仅有订阅者的主题同样通过（类型名取自订阅端点公告，先建订阅，发布者上线匹配后自动开始录流）；
 2. **建目录与 writer**：bag 目录名经 `-o` 指定（相对/绝对路径均可，父目录自动多级创建）或缺省当前路径下 `bag_<YYYY-MM-DD_HH-MM-SS_mmm>`（毫秒精度防同秒重名），内建 `bag_0.mcap`；
 3. **透传订阅**：每主题一个 reader（QoS 的 Reliability/Durability 跟随远端 writer offered 值，requested ≤ offered 恒成立）与一个 mcap Channel（`messageEncoding="cdr"`、`schemaId=0`），消息以 CDR 全量字节（含 encapsulation header）逐条直写，sequence 从 0 单调递增；每主题建订成功即输出一行 `recording topic=<名> type=<类型>`（stdout）——实际录制清单以此为准；
-4. **等待停止**：SIGINT 经无锁原子置位停止标志（录制循环 100ms 轮询），进程内自收尾，无外部命令依赖；
+4. **等待停止**：SIGINT 经无锁原子置位停止标志（录制循环 100ms 轮询），进程内自收尾，无外部命令依赖；`--start-paused` 暂停态期间暂停标志置位——订阅与发现照常，回调照常 take 排空（防恢复后旧数据涌入）但丢弃不写不计数，CLI 侧按空格启动录制（termios 非规范模式单字符读，按空格立即恢复写入；stdin 非 tty 时保持暂停，Ctrl+C 退出不受影响）；暂停期不计入 starting_time/duration（首条写入消息方置位起始时间，sequence 恢复后仍从 0 起）；
 5. **收尾**：删全部 reader（杜绝并发回调）→ `writer.close()` 补写 mcap summary 三层索引 → 写 `metadata.json` → 输出统计退出（exit 0）。
 
 #### 通配模式（清单项恰好含一个 `*`）
@@ -901,7 +902,7 @@ hello_world: 12 条 / 288 字节
 | `主题 [x] 既无发布者也无订阅者，请检查主题名输入（域 N，已等待 M ms）` | 校验收敛后该精确主题仍无任何端点（主题名拼错 / 对端未上线 / 域号不一致） |
 | `模式 [x] 未匹配到任何主题，请检查通配输入（域 N，已等待 M ms）` | 校验收敛后该模式命中 0 主题（模式拼错或域内确无匹配主题） |
 
-工具经 `YomkRpcBagService` bag 服务实现，等价的用户代码（`YOMKRPC_BAG_*` 宏定义于 `YomkRpcAPI.h`，链接 `YomkRpc::YomkRpc YomkServer::YomkServer`；SIGINT 处理经 `yomk::bagRecordStop` 无锁置位——async-signal-safe，声明于 `YomkRpcBagService.h`）：
+工具经 `YomkRpcBagService` bag 服务实现，等价的用户代码（`YOMKRPC_BAG_*` 宏定义于 `YomkRpcAPI.h`，链接 `YomkRpc::YomkRpc YomkServer::YomkServer`；SIGINT 处理经 `yomk::bagRecordStop` 无锁置位——async-signal-safe，声明于 `YomkRpcBagService.h`；暂停控制同头文件 `yomk::bagRecordPause()`/`bagRecordResume()`，即 `--start-paused` 的库侧等价物）：
 
 ```cpp
 #include <YomkServer/YomkAPI.h>
@@ -929,7 +930,8 @@ int main()
         return 1;
     }
 
-    // 2. Ctrl+C → bagRecordStop 置位
+    // 2. Ctrl+C → bagRecordStop 置位；可选暂停态启动：录制前 bagRecordPause() 置位
+    //    （订阅照常、消息丢弃不写入，等价 CLI --start-paused），bagRecordResume() 恢复写入
     std::signal(SIGINT, onSignal);
 
     // 3. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
