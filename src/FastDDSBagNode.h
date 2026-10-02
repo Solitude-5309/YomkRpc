@@ -68,13 +68,18 @@ public:
     // 录制主题列表（长驻阻塞：调用线程阻塞至 Ctrl+C 停止标志置位并完成收尾）：
     // ①启动校验——轮询发现缓存快照（各主题 writer/reader 有无），连续 stableRounds 次不变或
     //   全部主题有端点即收敛（总窗不足 kMinValidateWindowMs 自动提升 rounds；0 值钳制默认
-    //   15 次/200ms）；收敛后逐主题判定，任一主题既无发布者也无订阅者即整体报错返回 false
-    //   （error 逐主题列出，不建 bag 目录，不产生任何文件）；仅有订阅者的主题同样通过（类型名
-    //   取自订阅端点公告，建 reader 等发布者匹配后自动开始录流）。
+    //   15 次/200ms）；清单项支持通配模式（恰好一个 '*'：前缀 pre* / 后缀 *suf / 中间
+    //   pre*suf，"*" 匹配全部主题；≥2 个 '*' 输入有误报错），模式项按发现缓存全表匹配
+    //   展开为实际主题集合（去重升序，与精确项合并，展开于启动校验时定型）；收敛后逐项
+    //   判定，任一精确主题既无发布者也无订阅者、或任一模式未命中任何主题即整体报错返回
+    //   false（error 逐项列出，不建 bag 目录，不产生任何文件）；仅有订阅者的主题同样通过
+    //   （类型名取自订阅端点公告，建 reader 等发布者匹配后自动开始录流）。
     // ②建 bag 目录（缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，毫秒精度防同秒重名）+ mcap writer（bag_0.mcap）。
     // ③逐主题注册透传类型并建立订阅（reader QoS 的 Reliability/Durability 跟随远端 writer
     //   offered 值——requested ≤ offered 恒成立；仅有订阅者的主题无 offered 可跟随，用默认
-    //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）。
+    //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
+    //   每主题建订成功即输出一行 recording topic=<名> type=<类型>（stdout，通配展开后的实际
+    //   录制清单由此可见——CLI 启动行仅显示清单项数）。
     // ④等待 yomk::g_bagRecordStop（每 100ms 轮询，SIGINT 经 bagRecordStop 置位）。
     // ⑤停止序列：delete 全部 reader（杜绝并发回调）→ writer.close()（补写 summary 索引）→
     //   写 metadata.json（storage_identifier=mcap，起始时间/时长附 _format 可读键）→ 回填 stats。
@@ -84,7 +89,7 @@ public:
             std::string* error = nullptr,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs);
-    // 最近一次成功录制的 bag 目录名（当前路径相对名，如 bag_20260101_120000）；未录制过为空。
+    // 最近一次成功录制的 bag 目录名（当前路径相对名，如 bag_2026-01-01_12-00-00_000）；未录制过为空。
     const std::string& bagDir() const
     {
         return bagDir_;

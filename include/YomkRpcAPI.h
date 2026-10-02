@@ -231,8 +231,10 @@
     YOMK_REQUEST("/YomkRpcBagService/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{domainId}))
 
 // 录制主题列表（长驻阻塞：调用线程阻塞至录制收尾完成，SIGINT 经 yomk::bagRecordStop
-// 无锁置位后收尾返回）。启动时先等发现收敛并校验：任一主题既无发布者也无订阅者视为
-// 输入有误，整体报错（m_msg 逐主题列出，不建 bag）；通过校验的主题以透传方式订阅并将
+// 无锁置位后收尾返回）。清单项支持通配模式（恰好一个 '*'：前缀 pre* / 后缀 *suf /
+// 中间 pre*suf，"*" 匹配全部主题；≥2 个 '*' 返回错误），模式项启动时按发现缓存全表
+// 匹配展开为实际主题集合（去重升序，与精确项合并），未命中任何主题的模式与既无发布者
+// 也无订阅者的精确主题同样整体报错（m_msg 逐项列出，不建 bag）；通过校验的主题以透传方式订阅并将
 // 原始 CDR 字节直写 mcap（bag 目录缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，含 bag_0.mcap
 // 与 metadata.json）。须先创建 bag 节点；清单内重复/空名主题返回错误。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。

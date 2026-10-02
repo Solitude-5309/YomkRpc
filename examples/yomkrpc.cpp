@@ -17,7 +17,7 @@
  *           [-o <dir> | --output <dir>] <topic-name>
  *   yomkrpc node list
  *   yomkrpc node info <node-name>
- *   yomkrpc bag record <topic-name> [<topic-name> ...]
+ *   yomkrpc bag record <topic-name|pattern> [<topic-name|pattern> ...]
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -37,6 +37,7 @@
  *   yomkrpc node info my_node
  *   yomkrpc bag record hello_world
  *   yomkrpc bag record rt/chatter rt/tf
+ *   yomkrpc bag record 'hello_*' '*_world'   # 通配模式（单个 *，引号防 shell 展开）
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -158,7 +159,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] <topic-name> -f <file> | --file <file>\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info <node-name>\n"
-          "  yomkrpc bag record <topic-name> [<topic-name> ...]\n"
+          "  yomkrpc bag record <topic-name|pattern> [<topic-name|pattern> ...]\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -188,6 +189,10 @@ static void printUsage(std::ostream &os)
           "                      短名 -t 复用判定：下一参数为整数时视为条数（topic pub 语境），\n"
           "                      否则为 topic list 的类型名模式开关\n"
           "  --window N          频率统计窗口大小（相邻消息间隔样本数上限，默认 10000，仅 topic hz 生效）\n"
+          "  topic-name|pattern  录制清单项（仅 bag record 生效）：支持通配模式——恰好一个 '*'，\n"
+          "                      前缀 hello_* / 后缀 *_hello / 中间 pre*suf，单独 '*' 匹配全部主题，\n"
+          "                      ≥2 个 '*' 报错；模式按发现缓存匹配展开为实际主题集合（去重升序），\n"
+          "                      未命中任何主题报错；shell 下模式须加引号防 '*' 被 glob 展开\n"
           "  -h, --help          显示帮助\n"
           "\n"
           "Examples:\n"
@@ -216,6 +221,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc node info my_node\n"
           "  yomkrpc bag record hello_world\n"
           "  yomkrpc bag record rt/chatter rt/tf\n"
+          "  yomkrpc bag record 'hello_*' '*_world'   # 通配模式（引号防 shell 展开）\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -357,8 +363,8 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics)
 
     // 2. 监听 Ctrl+C：处理函数经 yomk::bagRecordStop 无锁置位，节点层录制循环读它收尾
     std::signal(SIGINT, onSignal);
-    YOMK_INFO_TAG("yomkrpc", "recording ", std::to_string(topics.size()), " topic(s) on domain ",
-                  std::to_string(domainId), ", press Ctrl+C to stop");
+    YOMK_INFO_TAG("yomkrpc", "recording topics from ", std::to_string(topics.size()),
+                  " list item(s) on domain ", std::to_string(domainId), ", press Ctrl+C to stop");
 
     // 3. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
     resp = YOMKRPC_BAG_RECORD(topics);

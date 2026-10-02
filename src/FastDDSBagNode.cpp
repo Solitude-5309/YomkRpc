@@ -26,6 +26,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -96,6 +98,19 @@ std::string formatEpochNs(uint64_t epochNs)
     std::ostringstream out;
     out << timeBuf.data() << '_' << formatSubSecondNs(epochNs % kNsPerSecond);
     return out.str();
+}
+
+// 通配模式匹配：'*' 拆前缀/后缀夹逼（* 匹配任意主题名片段，不与首尾共享字符，对齐
+// fnmatch 语义）；pattern 已由输入校验保证恰好含一个 '*'——"pre*" 前缀、"*suf" 后缀、
+// "pre*suf" 中间，"*"（前后均空）即匹配全部主题。
+bool matchTopicPattern(const std::string& pattern, const std::string& topic)
+{
+    const std::size_t star = pattern.find('*');
+    const std::string prefix = pattern.substr(0, star);
+    const std::string suffix = pattern.substr(star + 1);
+    return topic.size() >= prefix.size() + suffix.size() &&
+           topic.compare(0, prefix.size(), prefix) == 0 &&
+           topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 // 透传数据载体：原始 CDR 字节（含 encapsulation header）。
@@ -404,6 +419,15 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     {
         return fail("no topics given");
     }
+    // 通配模式：清单项支持恰好一个 '*'（前缀 pre* / 后缀 *suf / 中间 pre*suf），出现
+    // 两次及以上按输入有误拒绝
+    for (const auto& topic : topics)
+    {
+        if (std::count(topic.begin(), topic.end(), '*') > 1)
+        {
+            return fail("topic [" + topic + "] 中 '*' 出现多次，仅支持单个通配");
+        }
+    }
     // 重复主题名会导致同主题重复订阅与 channel 注册，按输入有误拒绝
     for (std::size_t i = 0; i < topics.size(); ++i)
     {
@@ -420,9 +444,18 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         }
     }
 
-    // ---- ①启动校验：轮询发现缓存，全部主题有端点即收敛；快照连续 stableRounds 次不变也
-    // 收敛（收敛后仍缺端点的主题即输入有误）。总窗不足 kMinValidateWindowMs 时提升 rounds
-    // ——SPDP 参与者公告周期约 3s，短窗会把"发布者早已在线但发现未完成"误判为无端点
+    // ---- ①启动校验：轮询发现缓存，精确主题全部有端点即收敛；清单含通配模式（单个
+    // '*'，前缀/后缀/中间夹逼匹配）时，模式项按当轮发现缓存全表匹配展开为实际主题，
+    // 展开集连续 stableRounds 次不变也收敛（收敛后仍缺端点的精确主题、未命中任何主题
+    // 的模式即输入有误）。总窗不足 kMinValidateWindowMs 时提升 rounds——SPDP 参与者
+    // 公告周期约 3s，短窗会把"发布者早已在线但发现未完成"误判为无端点
+    std::vector<std::string> exactTopics;  // 精确名子集（无端点时按输入有误报错）
+    std::vector<std::string> patterns;     // 通配模式子集（已保证恰好一个 '*'）
+    for (const auto& topic : topics)
+    {
+        (topic.find('*') == std::string::npos ? exactTopics : patterns).push_back(topic);
+    }
+    const bool hasPatterns = !patterns.empty();
     uint32_t rounds = stableRounds == 0 ? kDefaultStableRounds : stableRounds;
     uint32_t interval = intervalMs == 0 ? kDefaultIntervalMs : intervalMs;
     if (static_cast<uint64_t>(rounds) * interval < kMinValidateWindowMs)
@@ -430,28 +463,62 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         rounds = static_cast<uint32_t>(kMinValidateWindowMs / interval) + 1;
     }
     const auto validateStart = std::chrono::steady_clock::now();
-    std::vector<std::string> missing;  // 收敛后仍无任何端点的主题
+    std::vector<std::string> missing;       // 收敛后仍无任何端点的精确主题
+    std::vector<std::string> recordTopics;  // 展开后的实际录制清单（精确项 ∪ 模式命中项）
     {
-        std::vector<bool> prevPresence(topics.size(), false);
+        std::vector<std::string> prevSnapshot;
         uint32_t stableCount = 0;
         while (true)
         {
-            std::vector<bool> presence(topics.size(), false);
-            bool allPresent = true;
+            std::set<std::string> known;  // 发现缓存全表主题名（锁内拷 key，短临界区）
             {
                 // 仅读发现缓存：seenMtx_ 叶子锁短临界区
                 std::lock_guard<std::mutex> seenLock(seenMtx_);
-                for (std::size_t i = 0; i < topics.size(); ++i)
+                for (const auto& kv : seen_)
                 {
-                    presence[i] = seen_.count(topics[i]) > 0 || seenReaders_.count(topics[i]) > 0;
-                    allPresent = allPresent && presence[i];
+                    known.insert(kv.first);
+                }
+                for (const auto& kv : seenReaders_)
+                {
+                    known.insert(kv.first);
                 }
             }
-            if (allPresent)
+            // 锁外展开：精确项 ∪ 模式命中项（set 去重升序，多模式命中同一主题合并）
+            std::set<std::string> effective(exactTopics.begin(), exactTopics.end());
+            for (const auto& topic : known)
             {
-                break;
+                for (const auto& pattern : patterns)
+                {
+                    if (matchTopicPattern(pattern, topic))
+                    {
+                        effective.insert(topic);
+                        break;
+                    }
+                }
             }
-            if (presence == prevPresence)
+            const bool allExactPresent = std::all_of(exactTopics.begin(), exactTopics.end(),
+                [&known](const std::string& topic) { return known.count(topic) > 0; });
+            bool allPatternsHit = true;  // 每个模式在展开集中均有命中
+            for (const auto& pattern : patterns)
+            {
+                bool hit = false;
+                for (const auto& topic : effective)
+                {
+                    if (matchTopicPattern(pattern, topic))
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (!hit)
+                {
+                    allPatternsHit = false;
+                    break;
+                }
+            }
+            std::vector<std::string> snapshot(effective.begin(), effective.end());
+            const bool sameAsPrev = snapshot == prevSnapshot;
+            if (sameAsPrev)
             {
                 ++stableCount;
             }
@@ -459,22 +526,49 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
             {
                 stableCount = 1;
             }
-            prevPresence = presence;
             if (stableCount >= rounds)
             {
-                for (std::size_t i = 0; i < topics.size(); ++i)
+                // 慢路径收敛：展开集已稳定仍不满足快路径，结算缺端点主题后按输入有误报错
+                recordTopics = hasPatterns ? std::move(snapshot) : exactTopics;
+                for (const auto& topic : exactTopics)
                 {
-                    if (!presence[i])
+                    if (known.count(topic) == 0)
                     {
-                        missing.push_back(topics[i]);
+                        missing.push_back(topic);
                     }
                 }
                 break;
             }
+            if (allExactPresent && allPatternsHit && (!hasPatterns || sameAsPrev))
+            {
+                // 快路径收敛：全部精确项在线且模式全部命中（无模式保留原"全在线立即收敛"；
+                // 含模式再多等一轮确认展开集不再增长——匹配集开放无"到齐"信号，一轮无新增防抖）
+                recordTopics = hasPatterns ? std::move(snapshot) : exactTopics;
+                break;
+            }
+            prevSnapshot = std::move(snapshot);
             std::this_thread::sleep_for(std::chrono::milliseconds(interval));
         }
     }
-    if (!missing.empty())
+    // 模式空命中结算：展开集里查不到该模式命中即输入有误（与缺端点主题合并逐行列出）
+    std::vector<std::string> unmatchedPatterns;
+    for (const auto& pattern : patterns)
+    {
+        bool hit = false;
+        for (const auto& topic : recordTopics)
+        {
+            if (matchTopicPattern(pattern, topic))
+            {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit)
+        {
+            unmatchedPatterns.push_back(pattern);
+        }
+    }
+    if (!missing.empty() || !unmatchedPatterns.empty())
     {
         const auto waitedMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - validateStart)
@@ -487,6 +581,16 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
                 msg += "\n";
             }
             msg += "主题 [" + topic + "] 既无发布者也无订阅者，请检查主题名输入（域 " +
+                   std::to_string(participant_->get_domain_id()) + "，已等待 " +
+                   std::to_string(waitedMs) + " ms）";
+        }
+        for (const auto& pattern : unmatchedPatterns)
+        {
+            if (!msg.empty())
+            {
+                msg += "\n";
+            }
+            msg += "模式 [" + pattern + "] 未匹配到任何主题，请检查通配输入（域 " +
                    std::to_string(participant_->get_domain_id()) + "，已等待 " +
                    std::to_string(waitedMs) + " ms）";
         }
@@ -547,7 +651,7 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         writer.terminate();  // 异常收尾：不写 summary，文件为无效残片（可删目录）
     };
 
-    for (const auto& topic : topics)
+    for (const auto& topic : recordTopics)
     {
         // 类型名：writer 端点公告优先，无 writer 时取 reader 端点公告（仅订阅者场景）
         std::string typeName;
@@ -640,6 +744,9 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
             return fail("create datareader for [" + topic + "] failed");
         }
         subs_[topic] = std::move(sub);
+        // 逐主题启动回执（裸 cout 对齐 FastDDSDebugNode 的 subscribed 提示惯例）：CLI 启动行
+        // 只显示清单项数，通配展开后的实际录制清单由此逐条可见
+        std::cout << "recording topic=" << topic << " type=" << typeName << std::endl;
     }
 
     // ---- ④录制循环：每 100ms 轮询停止标志（SIGINT 经 yomk::bagRecordStop 置位，
@@ -662,7 +769,7 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     // nlohmann json 组装后 dump(4) 美化落盘
     uint64_t totalMessages = 0;
     nlohmann::json topicsWithCount = nlohmann::json::array();
-    for (const auto& topic : topics)
+    for (const auto& topic : recordTopics)
     {
         const auto& sub = subs_[topic];
         totalMessages += sub.listener->count();
@@ -687,10 +794,11 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         meta << info.dump(4) << "\n";
     }
 
-    // 统计回填（按用户输入顺序；reader 已删，listener 计数稳定可直读）
+    // 统计回填（按录制清单顺序：纯精确清单为输入顺序，含模式为展开后去重升序；
+    // reader 已删，listener 计数稳定可直读）
     stats.clear();
-    stats.reserve(topics.size());
-    for (const auto& topic : topics)
+    stats.reserve(recordTopics.size());
+    for (const auto& topic : recordTopics)
     {
         const auto& sub = subs_[topic];
         BagTopicStat stat;

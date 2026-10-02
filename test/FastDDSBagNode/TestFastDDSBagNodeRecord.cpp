@@ -18,7 +18,9 @@
  *   R7 metadata.json：storage_identifier=mcap / 起始时间与时长含 _format 可读伴生键 /
  *      relative_file_paths: bag_0.mcap /
  *      topics_with_message_count 的 name/type/message_count 与 stats 一致；
- *   R8 定格：成功后再次 record → false "record already finished, recreate node to record again"。
+ *   R8 定格：成功后再次 record → false "record already finished, recreate node to record again"；
+ *   R9 通配模式录制（新节点）：精确项 + 前缀模式命中同前缀双主题 → 展开去重合并
+ *      （stats 两项升序、各有条数）、metadata 列出展开后的实际主题、录制定格同样成立。
  *
  * 域号 202：与 TestYomkRpcBagServiceLifecycle(200)/TestFastDDSBagNodeValidation(201) 错开，
  * ctest 串行执行互不残留。
@@ -59,6 +61,8 @@ namespace
     // 录制时长：校验窗（SPDP 发现发布者约 1~3s + 全端点在线即收敛）+ ~5s 录制期（150ms/条）
     constexpr int kRecordMs = 12000;
     constexpr int kPubIntervalMs = 150;
+    // R9 模式录制时长：新主题 EDP 发现（PDP 已互通约 1~3s）+ 快路径两轮防抖 + ~4s 录制期
+    constexpr int kPatternRecordMs = 8000;
 } // namespace
 
 int main()
@@ -236,6 +240,99 @@ int main()
               "R8 error 含 record already finished");
         CHECK(errorAgain.find("recreate node") != std::string::npos,
               "R8 error 提示须重建节点");
+    }
+
+    // ---- R9：通配模式录制（新节点：精确项 + 前缀模式命中同前缀双主题，展开去重合并） ----
+    {
+        // 复位停止标志（R3 已置位）；同域新建 bag 节点（node 已定格不可复用）
+        yomk::bagRecordReset();
+        FastDDSBagNode node2;
+        CHECK(node2.setDomainId(TEST_DOMAIN), "R9 新节点 setDomainId(202) 成功");
+
+        // 远端新增两个同前缀发布者（复用 peer participant 与 MString 类型）
+        auto *topicA = peerParticipant->create_topic(
+            "rt/bag_rec_pre_a", ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        auto *topicB = peerParticipant->create_topic(
+            "rt/bag_rec_pre_b", ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        auto *writerA = (pub != nullptr && topicA != nullptr)
+                            ? pub->create_datawriter(topicA, dds::DATAWRITER_QOS_DEFAULT)
+                            : nullptr;
+        auto *writerB = (pub != nullptr && topicB != nullptr)
+                            ? pub->create_datawriter(topicB, dds::DATAWRITER_QOS_DEFAULT)
+                            : nullptr;
+        CHECK(writerA != nullptr && writerB != nullptr, "R9 远端同前缀双 DataWriter 创建成功");
+
+        std::atomic<bool> pubStop2{false};
+        std::thread pubThread2([&]()
+        {
+            YomkRpc::MString msg;
+            uint32_t seq = 0;
+            while (!pubStop2.load())
+            {
+                msg.data("bag-record-pattern-" + std::to_string(seq++));
+                writerA->write(&msg);
+                writerB->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPubIntervalMs));
+            }
+        });
+
+        // 录制清单：精确 a + 前缀模式（命中 a/b）→ 展开去重合并为 {a, b}（升序）
+        std::vector<FastDDSBagNode::BagTopicStat> statsPattern;
+        std::string errorPattern;
+        std::atomic<bool> recDone2{false};
+        bool okPattern = false;
+        std::thread recThread2([&]()
+        {
+            okPattern = node2.record({"rt/bag_rec_pre_a", "rt/bag_rec_pre_*"}, statsPattern, &errorPattern);
+            recDone2.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPatternRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone2.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread2.join();
+        pubStop2.store(true);
+        pubThread2.join();
+
+        CHECK(okPattern, "R9 模式录制 record → true（精确 + 模式展开去重后录制）");
+        if (okPattern)
+        {
+            CHECK(statsPattern.size() == 2, "R9 stats 两项（精确 a 与模式命中的 a/b 去重合并）");
+            if (statsPattern.size() == 2)
+            {
+                CHECK(statsPattern[0].topic == "rt/bag_rec_pre_a" &&
+                          statsPattern[1].topic == "rt/bag_rec_pre_b",
+                      "R9 展开清单去重且升序（a、b 各一项）");
+                CHECK(statsPattern[0].count >= 1 && statsPattern[1].count >= 1,
+                      "R9 两主题均有录制条数");
+                CHECK(statsPattern[0].type == "YomkRpc::MString",
+                      "R9 展开主题类型 == YomkRpc::MString");
+            }
+            const std::string &bagDir2 = node2.bagDir();
+            CHECK(bagDir2.size() == std::string("bag_YYYY-MM-DD_HH-MM-SS_mmm").size(),
+                  "R9 新 bag 目录形如 bag_<YYYY-MM-DD_HH-MM-SS_mmm>（27 字符）");
+            std::ifstream meta2(bagDir2 + "/metadata.json");
+            std::stringstream buf2;
+            buf2 << meta2.rdbuf();
+            const std::string text2 = buf2.str();
+            CHECK(text2.find("\"name\": \"rt/bag_rec_pre_a\"") != std::string::npos &&
+                      text2.find("\"name\": \"rt/bag_rec_pre_b\"") != std::string::npos,
+                  "R9 metadata topics_with_message_count 列出展开后的两主题");
+        }
+        else
+        {
+            std::cerr << "record pattern error: " << errorPattern << std::endl;
+        }
+
+        // 定格语义对展开录制同样成立
+        std::vector<FastDDSBagNode::BagTopicStat> statsAgain2;
+        std::string errorAgain2;
+        CHECK(!node2.record({"rt/bag_rec_pre_*"}, statsAgain2, &errorAgain2),
+              "R9 模式录制后节点定格：再次 record → false");
+        CHECK(errorAgain2.find("record already finished") != std::string::npos,
+              "R9 定格 error 含 record already finished");
     }
 
     // 远端发布端清理（先于 bag 节点析构亦可，二者独立参与者）

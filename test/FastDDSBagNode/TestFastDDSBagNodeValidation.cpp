@@ -10,11 +10,14 @@
  *   V1 未入域 record → false "bag node not created"；
  *   V2 setDomainId(201) 成功 → 重复 setDomainId 拒绝（仅成功一次）；
  *   V3 清单快速校验（收敛等待之前）：空清单 → "no topics given"、含空名 →
- *      "empty topic name in topic list"、重复主题 → "duplicate topic [..] in topic list"；
- *   V4 无端点主题（域 201 无 rt/bag_val_miss 端点，默认 15×200ms 收敛窗）→ false +
+ *      "empty topic name in topic list"、重复主题 → "duplicate topic [..] in topic list"、
+ *      多通配（≥2 个 '*'）→ "仅支持单个通配"；
+ *   V4 无端点主题（域 201 无 rt/bag_val_miss 端点，慢路径等满收敛窗）→ false +
  *      error 含 "主题 [rt/bag_val_miss] 既无发布者也无订阅者" 与域号、等待时长；bagDir() 为空；
  *   V5 混合清单 {"rt/bag_val_hit"（远端 MString 发布者在线）, "rt/bag_val_miss2"} → 整体报错
- *      （error 含 miss 主题、不含 hit 主题误报），不建 bag 目录；失败后节点未定格可重试。
+ *      （error 含 miss 主题、不含 hit 主题误报），不建 bag 目录；失败后节点未定格可重试；
+ *      精确命中 + 模式空命中 {"rt/bag_val_hit", "rt/bag_val_nope_*"} → 整体报错，
+ *      error 含「模式 [...] 未匹配到任何主题」且不误报 hit。
  * 校验失败不落盘断言：全程 bagDir() 为空，无 bag_* 目录产生（工作目录无新增 bag_ 前缀目录）。
  *
  * 域号 201：与 TestYomkRpcBagServiceLifecycle(200)/TestFastDDSBagNodeRecord(202) 错开，
@@ -103,9 +106,13 @@ int main()
         CHECK(!node.record({"t_dup", "t_dup"}, stats, &error), "V3 重复主题 → false");
         CHECK(error.find("duplicate topic [t_dup] in topic list") != std::string::npos,
               "V3 重复主题 → duplicate topic [t_dup] in topic list");
+
+        CHECK(!node.record({"a*b*c"}, stats, &error), "V3 多通配（≥2 个 '*'）→ false");
+        CHECK(error.find("仅支持单个通配") != std::string::npos,
+              "V3 多通配 → 仅支持单个通配");
     }
 
-    // ---- V4：无端点主题（等默认收敛窗 ~3s）→ 整体报错 + error 文本契约 ----
+    // ---- V4：无端点主题（慢路径等满收敛窗）→ 整体报错 + error 文本契约 ----
     {
         std::vector<FastDDSBagNode::BagTopicStat> stats;
         std::string error;
@@ -159,6 +166,17 @@ int main()
         CHECK(error2.find("record already finished") == std::string::npos,
               "V5 校验失败不定格（重试报错非 record already finished）");
         CHECK(error2.find("rt/bag_val_miss3") != std::string::npos, "V5 重试 error 含新清单主题");
+
+        // 精确命中 + 模式空命中 → 整体报错：error 含模式空命中文案、不误报有端点的 hit
+        std::string error3;
+        const bool ok3 = node.record({"rt/bag_val_hit", "rt/bag_val_nope_*"}, stats, &error3);
+        CHECK(!ok3, "V5 精确命中 + 模式空命中 → false（整体报错）");
+        CHECK(error3.find("模式 [rt/bag_val_nope_*] 未匹配到任何主题") != std::string::npos,
+              "V5 error 含「模式 [...] 未匹配到任何主题」逐项文本");
+        CHECK(error3.find("主题 [rt/bag_val_hit]") == std::string::npos,
+              "V5 error 不误报有端点的 hit 主题");
+        CHECK(node.bagDir().empty(), "V5 模式空命中拒绝不建 bag（bagDir() 为空）");
+        CHECK(!bagDirCreated(bagDirsBefore), "V5 模式空命中拒绝无 bag_ 目录产生");
 
         // 远端发布端清理（先于 bag 节点析构亦可，二者独立参与者）
         if (peerParticipant != nullptr)
