@@ -72,6 +72,9 @@ target_link_libraries(yomkrpc_under_test PUBLIC YomkServer::YomkServer fastdds)
 # 与宏定义完全一致以杜绝 ODR/条件编译视图差异）
 target_include_directories(yomkrpc_under_test PUBLIC ${YOMKRPC_ROOT}/thirdparty/mcap/include)
 target_compile_definitions(yomkrpc_under_test PUBLIC MCAP_COMPRESSION_NO_LZ4 MCAP_COMPRESSION_NO_ZSTD)
+# metadata.json：FastDDSBagNode.cpp 组装 bag 元信息需 vendored nlohmann json（纯 header-only
+# 无需实现宏，与根 CMakeLists 同源）
+target_include_directories(yomkrpc_under_test PUBLIC ${YOMKRPC_ROOT}/thirdparty/nlohmann_json/include)
 
 # ----------------------------- Sanitizer 开关 -----------------------------
 # off/asan/tsan；asan 合并 address+undefined（覆盖需求 #3 ASan 与 #4 UBSan），tsan 覆盖 #5。

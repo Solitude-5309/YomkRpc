@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.14)
 # 编译器预选模块：g++ 优先，回退 clang++（必须在 project() 之前 include）
 include(cmake/AbiInfo.cmake)
 
-project(YomkRpc VERSION 0.3.4 LANGUAGES CXX)
+project(YomkRpc VERSION 0.3.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,6 +55,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE YOMKRPC_VERSION_STRING="${PRO
 # 未定义 MCAP_COMPRESSION_NO_ZSTD 时 mcap 头文件内直接编译报错）
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/mcap/include)
 target_compile_definitions(${PROJECT_NAME} PRIVATE MCAP_COMPRESSION_NO_LZ4 MCAP_COMPRESSION_NO_ZSTD)
+# metadata.json：vendored nlohmann json 头库（纯 header-only 无需实现宏），FastDDSBagNode.cpp
+# 组装 bag 元信息使用
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nlohmann_json/include)
 
 # 安装规则
 set(INCLUDE_INSTALL_DIR "include")

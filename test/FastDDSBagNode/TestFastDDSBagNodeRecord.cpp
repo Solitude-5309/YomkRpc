@@ -3,8 +3,8 @@
  * @brief FastDDSBagNode 节点层录制收尾测试（真实 DDS 端到端：发布 → 录制 → Ctrl+C 停止 → 落盘断言）
  *
  * 范围：record 全链路——发现校验通过（远端 MString 发布者在线）、透传订阅、消息直写 mcap、
- *       bagRecordStop 触发收尾（删除 reader → writer.close 补 summary → metadata.yaml →
- *       stats 回填），以及收尾产物断言（bag 目录、bag_0.mcap 读回、metadata.yaml 字段、
+ *       bagRecordStop 触发收尾（删除 reader → writer.close 补 summary → metadata.json →
+ *       stats 回填），以及收尾产物断言（bag 目录、bag_0.mcap 读回、metadata.json 字段、
  *       stats 契约）与录制定格语义（成功后再次 record 拒绝）。启动校验分支归
  *       TestFastDDSBagNodeValidation。
  * 覆盖：
@@ -12,10 +12,11 @@
  *   R2 远端 MString 发布者（rt/bag_rec_hit）周期发布，录制线程 record 阻塞；
  *   R3 ~5s 后 bagRecordStop → record 返回 true；
  *   R4 stats 契约：单主题、topic/type（YomkRpc::MString）/count/bytes 一致；
- *   R5 落盘：bag 目录（bag_<YYYYMMDD_HHMMSS>）含 bag_0.mcap 与 metadata.yaml；
+ *   R5 落盘：bag 目录（bag_<YYYY-MM-DD_HH-MM-SS_mmm>）含 bag_0.mcap 与 metadata.json；
  *   R6 mcap 读回：条数 == stats.count；Channel topic/messageEncoding=cdr/schemaId=0；
  *      每条消息字节非空且总字节 == stats.bytes；sequence 从 0 单调递增；
- *   R7 metadata.yaml：storage_identifier: mcap / relative_file_paths: bag_0.mcap /
+ *   R7 metadata.json：storage_identifier=mcap / 起始时间与时长含 _format 可读伴生键 /
+ *      relative_file_paths: bag_0.mcap /
  *      topics_with_message_count 的 name/type/message_count 与 stats 一致；
  *   R8 定格：成功后再次 record → false "record already finished, recreate node to record again"。
  *
@@ -141,10 +142,10 @@ int main()
     // ---- R5：落盘文件断言 ----
     const std::string &bagDir = node.bagDir();
     CHECK(bagDir.rfind("bag_", 0) == 0, "R5 bagDir() 以 bag_ 开头");
-    CHECK(bagDir.size() == std::string("bag_YYYYMMDD_HHMMSS").size(),
-          "R5 bagDir() 形如 bag_<YYYYMMDD_HHMMSS>（19 字符）");
+    CHECK(bagDir.size() == std::string("bag_YYYY-MM-DD_HH-MM-SS_mmm").size(),
+          "R5 bagDir() 形如 bag_<YYYY-MM-DD_HH-MM-SS_mmm>（27 字符）");
     CHECK(std::filesystem::exists(bagDir + "/bag_0.mcap"), "R5 bag_0.mcap 存在");
-    CHECK(std::filesystem::exists(bagDir + "/metadata.yaml"), "R5 metadata.yaml 存在");
+    CHECK(std::filesystem::exists(bagDir + "/metadata.json"), "R5 metadata.json 存在");
     CHECK(std::filesystem::file_size(bagDir + "/bag_0.mcap") > 0, "R5 bag_0.mcap 非空");
 
     // ---- R6：mcap 读回断言（条数/通道契约/字节守恒/序号单调） ----
@@ -200,25 +201,28 @@ int main()
         }
     }
 
-    // ---- R7：metadata.yaml 字段断言 ----
+    // ---- R7：metadata.json 字段断言 ----
     {
-        std::ifstream meta(bagDir + "/metadata.yaml");
+        std::ifstream meta(bagDir + "/metadata.json");
         std::stringstream buf;
         buf << meta.rdbuf();
         const std::string text = buf.str();
-        CHECK(text.find("yomkrpc_bagfile_information:") != std::string::npos,
-              "R7 metadata 含 yomkrpc_bagfile_information 根键");
-        CHECK(text.find("version: 5") != std::string::npos, "R7 metadata version: 5");
-        CHECK(text.find("storage_identifier: mcap") != std::string::npos,
+        CHECK(text.find("\"nanoseconds_since_epoch_format\"") != std::string::npos,
+              "R7 metadata starting_time 含可读格式键");
+        CHECK(text.find("\"nanoseconds_format\"") != std::string::npos,
+              "R7 metadata duration 含可读格式键");
+        CHECK(text.find("\"version\": 1") != std::string::npos,
+              "R7 metadata version: 1（yomkrpc 自有元信息格式版本）");
+        CHECK(text.find("\"storage_identifier\": \"mcap\"") != std::string::npos,
               "R7 metadata storage_identifier: mcap");
         CHECK(text.find("bag_0.mcap") != std::string::npos, "R7 metadata relative_file_paths 列出 bag_0.mcap");
-        CHECK(text.find("name: " + std::string(REC_TOPIC)) != std::string::npos,
+        CHECK(text.find("\"name\": \"" + std::string(REC_TOPIC) + "\"") != std::string::npos,
               "R7 metadata topics_with_message_count 列出录制主题名");
-        CHECK(text.find("type: YomkRpc::MString") != std::string::npos,
+        CHECK(text.find("\"type\": \"YomkRpc::MString\"") != std::string::npos,
               "R7 metadata 主题类型 == YomkRpc::MString");
-        CHECK(text.find("message_count: " + std::to_string(recCount)) != std::string::npos,
+        CHECK(text.find("\"message_count\": " + std::to_string(recCount)) != std::string::npos,
               "R7 metadata message_count 与 stats 一致");
-        CHECK(text.find("nanoseconds_since_epoch:") != std::string::npos,
+        CHECK(text.find("\"nanoseconds_since_epoch\"") != std::string::npos,
               "R7 metadata starting_time 存在");
     }
 

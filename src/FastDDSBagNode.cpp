@@ -15,6 +15,8 @@
 #include <mcap/reader.hpp>   // 读回侧实现同译元编译（读回断言经链接本库取实现）
 #include <mcap/writer.hpp>
 
+#include <nlohmann/json.hpp> // metadata.json 组装（vendored 于 thirdparty/nlohmann_json）
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -23,6 +25,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -42,8 +46,57 @@ namespace
 {
 constexpr uint32_t kEncapsulationBytes = 4;   // CDR encapsulation header 长度
 constexpr uint32_t kMaxPayloadBytes = 65536;  // serialize 预判上限：64KB 覆盖常规消息
-constexpr size_t kTimeBufBytes = 32;          // bag 目录名时间戳格式化缓冲
+constexpr size_t kTimeBufBytes = 32;          // 时间戳 strftime 格式化缓冲（目录名与 metadata 共用）
 constexpr uint32_t kRecordPollMs = 100;       // 录制循环停止标志轮询间隔
+constexpr int kMsDigits = 3;                  // 定宽 3 位段位数（毫秒/微秒/纳秒）
+constexpr int kClockDigits = 2;               // 定宽 2 位段位数（时/分/秒）
+constexpr uint32_t kBagMetadataVersion = 1;   // yomkrpc 元信息格式自有版本号（1 起步，与参考来源 rosbag2 的 v5 无关）
+constexpr uint64_t kNsPerUs = 1000;                     // 纳秒每微秒
+constexpr uint64_t kNsPerMs = kNsPerUs * kNsPerUs;      // 纳秒每毫秒
+constexpr uint64_t kNsPerSecond = kNsPerMs * kNsPerUs;  // 纳秒每秒
+constexpr uint64_t kNsPerMinute = 60 * kNsPerSecond;    // 纳秒每分
+constexpr uint64_t kNsPerHour = 60 * kNsPerMinute;      // 纳秒每小时
+
+// ---- metadata 可读时间伴生键（_format）的格式化 ----
+// 毫秒-微秒-纳秒三段 → "mmm-uuu-nnn"（各 3 位补零，'-' 分隔）
+std::string formatSubSecondNs(uint64_t subNs)
+{
+    const uint64_t ms = subNs / kNsPerMs;
+    const uint64_t us = (subNs % kNsPerMs) / kNsPerUs;
+    const uint64_t ns = subNs % kNsPerUs;
+    std::ostringstream out;
+    out << std::setw(kMsDigits) << std::setfill('0') << ms << '-'
+        << std::setw(kMsDigits) << std::setfill('0') << us << '-'
+        << std::setw(kMsDigits) << std::setfill('0') << ns;
+    return out.str();
+}
+
+// 纳秒时长 → "HH-MM-SS_mmm-uuu-nnn"（时-分-秒_毫秒-微秒-纳秒）
+std::string formatDurationNs(uint64_t totalNs)
+{
+    const uint64_t hours = totalNs / kNsPerHour;
+    const uint64_t minutes = (totalNs % kNsPerHour) / kNsPerMinute;
+    const uint64_t seconds = (totalNs % kNsPerMinute) / kNsPerSecond;
+    std::ostringstream out;
+    out << std::setw(kClockDigits) << std::setfill('0') << hours << '-'
+        << std::setw(kClockDigits) << std::setfill('0') << minutes << '-'
+        << std::setw(kClockDigits) << std::setfill('0') << seconds << '_'
+        << formatSubSecondNs(totalNs % kNsPerSecond);
+    return out.str();
+}
+
+// epoch 纳秒 → "YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn"（本地时区）
+std::string formatEpochNs(uint64_t epochNs)
+{
+    const std::time_t secs = static_cast<std::time_t>(epochNs / kNsPerSecond);
+    std::tm localNow{};
+    localtime_r(&secs, &localNow);
+    std::array<char, kTimeBufBytes> timeBuf{};
+    std::strftime(timeBuf.data(), timeBuf.size(), "%Y-%m-%d_%H-%M-%S", &localNow);
+    std::ostringstream out;
+    out << timeBuf.data() << '_' << formatSubSecondNs(epochNs % kNsPerSecond);
+    return out.str();
+}
 
 // 透传数据载体：原始 CDR 字节（含 encapsulation header）。
 struct Blob
@@ -441,12 +494,22 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     }
 
     // ---- ②建 bag 目录 + mcap writer（校验通过才落盘，输入有误不产生任何文件）
+    // 目录名精确到毫秒（同秒录制不重名）：strftime 无毫秒，取 epoch 毫秒低 3 位手拼补零；
+    // 日期与时间段格式与 metadata 可读时间伴生键（_format）保持一致
+    const auto dirTime = std::chrono::system_clock::now();
+    std::time_t now = std::chrono::system_clock::to_time_t(dirTime);
+    const int msPart = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(dirTime.time_since_epoch())
+                .count() %
+            1000);
     std::array<char, kTimeBufBytes> timeBuf{};
-    std::time_t now = std::time(nullptr);
     std::tm localNow{};
     localtime_r(&now, &localNow);
-    std::strftime(timeBuf.data(), timeBuf.size(), "%Y%m%d_%H%M%S", &localNow);
-    const std::string bagDirName = std::string("bag_") + timeBuf.data();
+    std::strftime(timeBuf.data(), timeBuf.size(), "%Y-%m-%d_%H-%M-%S", &localNow);
+    std::ostringstream dirName;
+    dirName << "bag_" << timeBuf.data() << '_' << std::setw(kMsDigits) << std::setfill('0')
+            << msPart;
+    const std::string bagDirName = dirName.str();
     std::error_code fsError;
     if (!std::filesystem::create_directory(bagDirName, fsError))
     {
@@ -594,36 +657,34 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     }
     writer.close();  // 收尾写 summary（三层索引 + 统计）；close() 无返回值，索引异常经后续读回路径暴露
 
-    // metadata.yaml：yomkrpc_bagfile_information 形态（storage_identifier=mcap），
-    // 描述 bag 元信息（最小字段集：起始时间/时长/主题清单与计数）
+    // metadata.json：顶层平铺 bag 元信息（storage_identifier=mcap；起始时间/时长各附
+    // _format 可读伴生键便于人工阅读；最小字段集：起始时间/时长/主题清单与计数），
+    // nlohmann json 组装后 dump(4) 美化落盘
     uint64_t totalMessages = 0;
+    nlohmann::json topicsWithCount = nlohmann::json::array();
+    for (const auto& topic : topics)
     {
-        std::ofstream meta(bagDirName + "/metadata.yaml");
-        meta << "yomkrpc_bagfile_information:\n"
-             << "  version: 5\n"
-             << "  storage_identifier: mcap\n"
-             << "  relative_file_paths:\n"
-             << "    - bag_0.mcap\n"
-             << "  starting_time:\n"
-             << "    nanoseconds_since_epoch: " << firstNs.load() << "\n"
-             << "  duration:\n"
-             << "    nanoseconds: "
-             << (firstNs.load() == 0 ? 0 : lastNs.load() - firstNs.load()) << "\n"
-             << "  message_count: ";
-        for (const auto& topic : topics)
-        {
-            totalMessages += subs_[topic].listener->count();
-        }
-        meta << totalMessages << "\n"
-             << "  topics_with_message_count:\n";
-        for (const auto& topic : topics)
-        {
-            const auto& sub = subs_[topic];
-            meta << "    - topic_metadata:\n"
-                 << "        name: " << topic << "\n"
-                 << "        type: " << sub.type->get_name() << "\n"
-                 << "      message_count: " << sub.listener->count() << "\n";
-        }
+        const auto& sub = subs_[topic];
+        totalMessages += sub.listener->count();
+        topicsWithCount.push_back(
+            {{"topic_metadata", {{"name", topic}, {"type", sub.type->get_name()}}},
+             {"message_count", sub.listener->count()}});
+    }
+    const uint64_t startNs = firstNs.load();
+    const uint64_t durationNs = startNs == 0 ? 0 : lastNs.load() - startNs;
+    nlohmann::json info;
+    info["version"] = kBagMetadataVersion;
+    info["storage_identifier"] = "mcap";
+    info["relative_file_paths"] = nlohmann::json::array({"bag_0.mcap"});
+    info["starting_time"]["nanoseconds_since_epoch"] = startNs;
+    info["starting_time"]["nanoseconds_since_epoch_format"] = formatEpochNs(startNs);
+    info["duration"]["nanoseconds"] = durationNs;
+    info["duration"]["nanoseconds_format"] = formatDurationNs(durationNs);
+    info["message_count"] = totalMessages;
+    info["topics_with_message_count"] = topicsWithCount;
+    {
+        std::ofstream meta(bagDirName + "/metadata.json");
+        meta << info.dump(4) << "\n";
     }
 
     // 统计回填（按用户输入顺序；reader 已删，listener 计数稳定可直读）

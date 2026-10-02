@@ -36,7 +36,6 @@ json 自身质量由上游提供者测试。
 5. 序列化：`dump()` 输出紧凑串，`dump(2)` 输出 2 空格缩进的美化串（负值表示 tab）。
 6. 前向声明：仅需在头文件里声明 `nlohmann::json` 而不引入完整实现时，用更轻量的
    `#include <nlohmann/json_fwd.hpp>`，可显著降低编译开销。
-7. 主库集成方式：当前主库与 test 测试树均无 json 消费者，故未挂载到根/test 的
-   CMakeLists。将来有 TU 需要使用时，参照 mcap 在根 `CMakeLists.txt` 加
-   `target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nlohmann_json/include)`
-   即可（无需编译宏）。
+7. 主库集成方式：已挂载——bag record 的 metadata.json 元信息由 FastDDSBagNode.cpp 经
+   nlohmann json 组装（首个消费者），根 `CMakeLists.txt` 与 test 树均含
+   `target_include_directories(... thirdparty/nlohmann_json/include)`（无编译宏）。

@@ -233,8 +233,8 @@
 // 录制主题列表（长驻阻塞：调用线程阻塞至录制收尾完成，SIGINT 经 yomk::bagRecordStop
 // 无锁置位后收尾返回）。启动时先等发现收敛并校验：任一主题既无发布者也无订阅者视为
 // 输入有误，整体报错（m_msg 逐主题列出，不建 bag）；通过校验的主题以透传方式订阅并将
-// 原始 CDR 字节直写 mcap（bag 目录缺省当前路径下 bag_<YYYYMMDD_HHMMSS>，含 bag_0.mcap
-// 与 metadata.yaml）。须先创建 bag 节点；清单内重复/空名主题返回错误。
+// 原始 CDR 字节直写 mcap（bag 目录缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，含 bag_0.mcap
+// 与 metadata.json）。须先创建 bag 节点；清单内重复/空名主题返回错误。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
 #define YOMKRPC_BAG_RECORD(topics) \
