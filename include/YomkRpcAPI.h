@@ -222,3 +222,23 @@
 
 // 退出调试：删除调试节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_QUIT() YOMK_REQUEST("/YomkRpcDebugService/delete_node", nullptr)
+
+// ===== YomkRpcBagService 录制 API（端点定义见 YomkRpcBagService.h） =====
+
+// 创建 bag 节点（单节点模型：一个进程至多一个，重复创建须先删除）。
+// domainId：DDS 域号，合法范围 [0,232]。返回 YomkResponse。
+#define YOMKRPC_BAG_NODE(domainId) \
+    YOMK_REQUEST("/YomkRpcBagService/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{domainId}))
+
+// 录制主题列表（长驻阻塞：调用线程阻塞至录制收尾完成，SIGINT 经 yomk::bagRecordStop
+// 无锁置位后收尾返回）。启动时先等发现收敛并校验：任一主题既无发布者也无订阅者视为
+// 输入有误，整体报错（m_msg 逐主题列出，不建 bag）；通过校验的主题以透传方式订阅并将
+// 原始 CDR 字节直写 mcap（bag 目录缺省当前路径下 bag_<YYYYMMDD_HHMMSS>，含 bag_0.mcap
+// 与 metadata.yaml）。须先创建 bag 节点；清单内重复/空名主题返回错误。
+// 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
+// 返回 YomkResponse。
+#define YOMKRPC_BAG_RECORD(topics) \
+    YOMK_REQUEST("/YomkRpcBagService/bag_record", YomkMkPtr(DDSBagRecord, DDSBagRecord{topics}))
+
+// 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
+#define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

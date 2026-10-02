@@ -44,12 +44,14 @@ link_directories(${YomkRpc_LIB_DIR})
 message(STATUS "[test] YomkRpc lib dir: ${YomkRpc_LIB_DIR}")
 
 # ----------------------------- 被测目标 -----------------------------
-# 仅编译自有源码四个 TU；第三方以 IMPORTED/已安装库形式链接，不参与插桩
+# 仅编译自有源码六个 TU；第三方以 IMPORTED/已安装库形式链接，不参与插桩
 add_library(yomkrpc_under_test STATIC
     ${YOMKRPC_ROOT}/src/YomkRpcService.cpp
     ${YOMKRPC_ROOT}/src/YomkRpcDebugService.cpp
     ${YOMKRPC_ROOT}/src/FastDDSNode.cpp
     ${YOMKRPC_ROOT}/src/FastDDSDebugNode.cpp
+    ${YOMKRPC_ROOT}/src/YomkRpcBagService.cpp
+    ${YOMKRPC_ROOT}/src/FastDDSBagNode.cpp
 )
 target_include_directories(yomkrpc_under_test PUBLIC
     ${YOMKRPC_ROOT}/include
@@ -65,6 +67,11 @@ string(REGEX REPLACE "^project\\(YomkRpc[ \t]+VERSION[ \t]+([0-9]+\\.[0-9]+\\.[0
        YOMKRPC_SRC_VERSION "${_yomkrpc_ver_line}")
 target_compile_definitions(yomkrpc_under_test PUBLIC YOMKRPC_VERSION_STRING="${YOMKRPC_SRC_VERSION}")
 target_link_libraries(yomkrpc_under_test PUBLIC YomkServer::YomkServer fastdds)
+# bag record：FastDDSBagNode.cpp 编译需 vendored mcap 头与压缩禁用宏（与根 CMakeLists 同源，
+# PUBLIC——TestFastDDSBagNodeRecord 读回断言亦 include <mcap/reader.hpp>，需 include 路径
+# 与宏定义完全一致以杜绝 ODR/条件编译视图差异）
+target_include_directories(yomkrpc_under_test PUBLIC ${YOMKRPC_ROOT}/thirdparty/mcap/include)
+target_compile_definitions(yomkrpc_under_test PUBLIC MCAP_COMPRESSION_NO_LZ4 MCAP_COMPRESSION_NO_ZSTD)
 
 # ----------------------------- Sanitizer 开关 -----------------------------
 # off/asan/tsan；asan 合并 address+undefined（覆盖需求 #3 ASan 与 #4 UBSan），tsan 覆盖 #5。
@@ -129,3 +136,7 @@ add_subdirectory(YomkRpcService)
 add_subdirectory(FastDDSDebugNode)
 # YomkRpcDebugService：调试服务两层测试（契约 DDS-free + 生命周期真实 DDS）
 add_subdirectory(YomkRpcDebugService)
+# FastDDSBagNode：bag 录制节点两层测试（启动校验 + 录制收尾落盘真实 DDS）
+add_subdirectory(FastDDSBagNode)
+# YomkRpcBagService：bag 服务两层测试（契约 DDS-free + 生命周期真实 DDS）
+add_subdirectory(YomkRpcBagService)

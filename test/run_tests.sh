@@ -16,15 +16,18 @@
 #      被活跃进程持有的条目跳过并警告——误删活体会使其锁孤儿化，触发 FastDDS is_zombie
 #      误判导致 SHM 永久幽灵，须重启业务进程才能恢复）
 #   2. 逐个串行运行测试（快→慢，stress 压尾），每个测试在独立临时工作目录运行
+#      （bag 两例的 bag 目录/mcap/metadata.yaml 产物即落在该目录，随用例后清理）
 #   3. 任一测试失败（非 0 退出 / 超时 / 正常退出但 /dev/shm 残留未自清理）→ 立即停止，
 #      输出 [FAIL] 行摘要与日志路径
 #   4. 日志落盘: test/test_logs/<时间戳>/<测试名>.log + summary.log
 #   5. 全部结束后复查一次 /dev/shm 残留：无进程持有的残留清理并计为失败，
 #      被活跃进程持有的条目仅提示跳过（非本次测试泄漏），不计失败
 #
-# 写磁盘操作审计（2026-09 逐文件核对）:
-#   - 12 个测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress 两例
-#     只读 /proc/self/status 与 /proc/self/fd 的资源采样器（VmRSS/Threads/fd）。
+# 写磁盘操作审计（2026-09 逐文件核对，bag 四例新增时更新）：
+#   - 除 bag 四例外，其余测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress
+#     两例只读 /proc/self/status 与 /proc/self/fd 的资源采样器（VmRSS/Threads/fd）。
+#   - bag 四例的写盘：仅 TestFastDDSBagNodeRecord 会真实落盘（bag 目录内 bag_0.mcap 与
+#     metadata.yaml，落在运行时临时工作目录），其余三例校验失败路径不建任何文件。
 #   - 唯一运行时"磁盘"产物来自 FastDDS 3.6.1 默认 SHM 传输: /dev/shm 下
 #     fastdds_* / fastdds_port* / sem.fastdds_port*_mutex / fast_datasharing_*，
 #     正常销毁 participant 时自清；进程被 kill/崩溃/超时则遗留（本脚本接管清理）。
@@ -42,12 +45,18 @@ SKIP_STRESS=0
 FULL_MODE=0
 
 # 测试清单：快→慢，stress 压尾（与 test/CMakeLists.txt 注册的目标一一对应）
+# bag 四例：契约（DDS-free 快）→ 生命周期（含 ~3s 校验窗与 ~5s 录制）→ 节点校验（3 个 ~3s 收敛窗）→
+# 节点录制收尾（~5s 录制 + mcap 读回）；bag 产物写在各自临时工作目录，随 cleanup_workdir 清理
 ALL_TESTS=(
     TestHarnessSmoke
     TestYomkRpcServiceContract
     TestYomkRpcDebugServiceContract
+    TestYomkRpcBagServiceContract
     TestYomkRpcDebugServiceLifecycle
+    TestYomkRpcBagServiceLifecycle
     TestFastDDSDebugNode
+    TestFastDDSBagNodeValidation
+    TestFastDDSBagNodeRecord
     TestYomkRpcNodeLifecycle
     TestYomkRpcTopic
     TestYomkRpcLoan

@@ -17,6 +17,7 @@
  *           [-o <dir> | --output <dir>] <topic-name>
  *   yomkrpc node list
  *   yomkrpc node info <node-name>
+ *   yomkrpc bag record <topic-name> [<topic-name> ...]
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -34,7 +35,8 @@
  *   yomkrpc topic pub -ef hello_world
  *   yomkrpc node list
  *   yomkrpc node info my_node
- *
+ *   yomkrpc bag record hello_world
+ *   yomkrpc bag record rt/chatter rt/tf
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -104,6 +106,7 @@
  */
 
 #include <YomkRpc/YomkRpcAPI.h>
+#include <YomkRpc/YomkRpcBagService.h>
 #include <YomkServer/YomkAPI.h>
 
 #include <algorithm>
@@ -134,6 +137,7 @@ static void onSignal(int)
 {
     g_stop.store(true);
     yomk::debugPubStop(); // topic pub -r 持续发布：无锁置位（async-signal-safe），节点层发布循环读它退出
+    yomk::bagRecordStop(); // bag record：无锁置位（async-signal-safe），节点层录制循环读它收尾退出
 }
 
 static void printUsage(std::ostream &os)
@@ -154,6 +158,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] <topic-name> -f <file> | --file <file>\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info <node-name>\n"
+          "  yomkrpc bag record <topic-name> [<topic-name> ...]\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -209,6 +214,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub -t 5 -r 5 -w 1 hello_world '{\"data\":\"hi\"}'\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info my_node\n"
+          "  yomkrpc bag record hello_world\n"
+          "  yomkrpc bag record rt/chatter rt/tf\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -326,6 +333,57 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "debug quit failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
+// bag record 子命令：录制主题列表（透传原始 CDR 字节直写 mcap），服务端长驻阻塞至
+// Ctrl+C 触发收尾，返回后逐行打印统计（首行 bag 目录，其后每主题 "topic: N 条 / M 字节"），
+// 退出前删除 bag 节点
+static int runRecord(uint32_t domainId, const std::vector<std::string> &topics)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcBagService);
+
+    // 1. 复位停止标志（防上次会话残留置位导致秒退）后创建 bag 节点（单节点模型）
+    yomk::bagRecordReset();
+    auto resp = YOMKRPC_BAG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create bag node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 监听 Ctrl+C：处理函数经 yomk::bagRecordStop 无锁置位，节点层录制循环读它收尾
+    std::signal(SIGINT, onSignal);
+    YOMK_INFO_TAG("yomkrpc", "recording ", std::to_string(topics.size()), " topic(s) on domain ",
+                  std::to_string(domainId), ", press Ctrl+C to stop");
+
+    // 3. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
+    resp = YOMKRPC_BAG_RECORD(topics);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "bag record failed: ", resp.m_msg);
+        YOMKRPC_BAG_DEL_NODE(); // 失败路径同样须清理已建 bag 节点
+        return 2;
+    }
+
+    // 4. 输出统计：首行 bag 目录，其后每主题一行 "topic: N 条 / M 字节"
+    YomkUnPackPkg(resp.m_data, StringArray, lines);
+    if (lines != nullptr)
+    {
+        for (const auto &line : lines->d)
+        {
+            std::cout << line << std::endl;
+        }
+    }
+
+    // 5. 退出前显式删除 bag 节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理
+    resp = YOMKRPC_BAG_DEL_NODE();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "delete bag node failed: ", resp.m_msg);
         return 1;
     }
     return 0;
@@ -1371,7 +1429,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- 子命令分派：topic print <topic-name> / topic list / topic info <topic-name> /
-    //      node list / node info <node-name> ----
+    //      node list / node info <node-name> / bag record <topic-name> ... ----
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "print" && !pos[2].empty())
     {
         return runPrint(domainId, pos[2]);
@@ -1437,6 +1495,11 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "node" && pos[1] == "info" && !pos[2].empty())
     {
         return runNodeInfo(domainId, pos[2], waitRounds);
+    }
+    if (pos.size() >= 3 && pos[0] == "bag" && pos[1] == "record")
+    {
+        std::vector<std::string> topics(pos.begin() + 2, pos.end());
+        return runRecord(domainId, topics);
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node"))
     {

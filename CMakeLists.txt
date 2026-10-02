@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.14)
 # 编译器预选模块：g++ 优先，回退 clang++（必须在 project() 之前 include）
 include(cmake/AbiInfo.cmake)
 
-project(YomkRpc VERSION 0.3.2 LANGUAGES CXX)
+project(YomkRpc VERSION 0.3.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,12 +42,19 @@ add_library(${PROJECT_NAME} SHARED
     src/YomkRpcDebugService.cpp
     src/FastDDSNode.cpp
     src/FastDDSDebugNode.cpp
+    src/YomkRpcBagService.cpp
+    src/FastDDSBagNode.cpp
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE YomkServer::YomkServer)
 target_link_libraries(${PROJECT_NAME} PUBLIC fastdds)
 # MC9：版本号对象宏改名 YOMKRPC_VERSION→YOMKRPC_VERSION_STRING，消除与 YomkRpcAPI.h 公共 API 宏
 # YOMKRPC_VERSION() 的同名冲突（clang-tidy 报 clang-diagnostic-macro-redefined）。
 target_compile_definitions(${PROJECT_NAME} PRIVATE YOMKRPC_VERSION_STRING="${PROJECT_VERSION}")
+# bag record：vendored mcap 头库（仅 FastDDSBagNode.cpp 定义 MCAP_IMPLEMENTATION，其余 TU 只
+# include 头链接库内实现）；压缩算法禁用 LZ4/ZSTD（ZSTD 依赖缺失，LZ4 无需求，
+# 未定义 MCAP_COMPRESSION_NO_ZSTD 时 mcap 头文件内直接编译报错）
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/mcap/include)
+target_compile_definitions(${PROJECT_NAME} PRIVATE MCAP_COMPRESSION_NO_LZ4 MCAP_COMPRESSION_NO_ZSTD)
 
 # 安装规则
 set(INCLUDE_INSTALL_DIR "include")
