@@ -395,7 +395,8 @@ bool FastDDSBagNode::onReaderDiscovered(const std::string& topicName,
 bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<BagTopicStat>& stats,
         std::string* error,
         uint32_t stableRounds,
-        uint32_t intervalMs)
+        uint32_t intervalMs,
+        const std::string& outputDir)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -442,6 +443,12 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
                 return fail("duplicate topic [" + topics[i] + "] in topic list");
             }
         }
+    }
+    // 目录名检查 fail-fast 于发现校验前（纯输入错误）：outputDir 非空且已存在即拒绝，
+    // 对齐 ros2 避免混入旧数据；父目录不存在由②段 create_directories 自动创建，不在此拦
+    if (!outputDir.empty() && std::filesystem::exists(outputDir))
+    {
+        return fail("bag directory [" + outputDir + "] already exists, remove it or choose another name");
     }
 
     // ---- ①启动校验：轮询发现缓存，精确主题全部有端点即收敛；清单含通配模式（单个
@@ -598,24 +605,34 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     }
 
     // ---- ②建 bag 目录 + mcap writer（校验通过才落盘，输入有误不产生任何文件）
-    // 目录名精确到毫秒（同秒录制不重名）：strftime 无毫秒，取 epoch 毫秒低 3 位手拼补零；
-    // 日期与时间段格式与 metadata 可读时间伴生键（_format）保持一致
-    const auto dirTime = std::chrono::system_clock::now();
-    std::time_t now = std::chrono::system_clock::to_time_t(dirTime);
-    const int msPart = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(dirTime.time_since_epoch())
-                .count() %
-            1000);
-    std::array<char, kTimeBufBytes> timeBuf{};
-    std::tm localNow{};
-    localtime_r(&now, &localNow);
-    std::strftime(timeBuf.data(), timeBuf.size(), "%Y-%m-%d_%H-%M-%S", &localNow);
-    std::ostringstream dirName;
-    dirName << "bag_" << timeBuf.data() << '_' << std::setw(kMsDigits) << std::setfill('0')
-            << msPart;
-    const std::string bagDirName = dirName.str();
+    // outputDir 非空：用指定目录名/路径（相对/绝对均可，父目录由 create_directories 自动
+    // 多级创建；已存在已在①段拒绝）；为空：按时间戳生成——目录名精确到毫秒（同秒录制不
+    // 重名）：strftime 无毫秒，取 epoch 毫秒低 3 位手拼补零；日期与时间段格式与 metadata
+    // 可读时间伴生键（_format）保持一致
+    std::string bagDirName;
+    if (!outputDir.empty())
+    {
+        bagDirName = outputDir;
+    }
+    else
+    {
+        const auto dirTime = std::chrono::system_clock::now();
+        std::time_t now = std::chrono::system_clock::to_time_t(dirTime);
+        const int msPart = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(dirTime.time_since_epoch())
+                    .count() %
+                1000);
+        std::array<char, kTimeBufBytes> timeBuf{};
+        std::tm localNow{};
+        localtime_r(&now, &localNow);
+        std::strftime(timeBuf.data(), timeBuf.size(), "%Y-%m-%d_%H-%M-%S", &localNow);
+        std::ostringstream dirName;
+        dirName << "bag_" << timeBuf.data() << '_' << std::setw(kMsDigits) << std::setfill('0')
+                << msPart;
+        bagDirName = dirName.str();
+    }
     std::error_code fsError;
-    if (!std::filesystem::create_directory(bagDirName, fsError))
+    if (!std::filesystem::create_directories(bagDirName, fsError))
     {
         return fail("create bag directory [" + bagDirName + "] failed: " + fsError.message());
     }

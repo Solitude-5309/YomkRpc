@@ -20,7 +20,9 @@
  *      topics_with_message_count 的 name/type/message_count 与 stats 一致；
  *   R8 定格：成功后再次 record → false "record already finished, recreate node to record again"；
  *   R9 通配模式录制（新节点）：精确项 + 前缀模式命中同前缀双主题 → 展开去重合并
- *      （stats 两项升序、各有条数）、metadata 列出展开后的实际主题、录制定格同样成立。
+ *      （stats 两项升序、各有条数）、metadata 列出展开后的实际主题、录制定格同样成立；
+ *   R10 outputDir 指定目录名（新节点）：bagDir() == 指定名（非时间戳名）、指定目录下
+ *      bag_0.mcap 与 metadata.json 落盘。
  *
  * 域号 202：与 TestYomkRpcBagServiceLifecycle(200)/TestFastDDSBagNodeValidation(201) 错开，
  * ctest 串行执行互不残留。
@@ -333,6 +335,74 @@ int main()
               "R9 模式录制后节点定格：再次 record → false");
         CHECK(errorAgain2.find("record already finished") != std::string::npos,
               "R9 定格 error 含 record already finished");
+    }
+
+    // ---- R10：outputDir 指定目录名（-o 选项节点层分流：非空用指定名而非时间戳） ----
+    {
+        // 复位停止标志（R9 已置位）；同域新建 bag 节点（node2 已定格不可复用）
+        yomk::bagRecordReset();
+        FastDDSBagNode node3;
+        CHECK(node3.setDomainId(TEST_DOMAIN), "R10 新节点 setDomainId(202) 成功");
+
+        // 远端新增发布者（复用 peer participant 与 MString 类型；新主题避免与 R9 残留混淆）
+        auto *topicOut = peerParticipant->create_topic(
+            "rt/bag_rec_out", ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        auto *writerOut = (pub != nullptr && topicOut != nullptr)
+                              ? pub->create_datawriter(topicOut, dds::DATAWRITER_QOS_DEFAULT)
+                              : nullptr;
+        CHECK(writerOut != nullptr, "R10 远端 DataWriter 创建成功（rt/bag_rec_out）");
+
+        std::atomic<bool> pubStop3{false};
+        std::thread pubThread3([&]()
+        {
+            YomkRpc::MString msg;
+            uint32_t seq = 0;
+            while (!pubStop3.load())
+            {
+                msg.data("bag-record-outputdir-" + std::to_string(seq++));
+                writerOut->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPubIntervalMs));
+            }
+        });
+
+        std::vector<FastDDSBagNode::BagTopicStat> statsCustom;
+        std::string errorCustom;
+        std::atomic<bool> recDone3{false};
+        bool okCustom = false;
+        std::thread recThread3([&]()
+        {
+            okCustom = node3.record({"rt/bag_rec_out"}, statsCustom, &errorCustom, 0, 0, "bag_custom");
+            recDone3.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPatternRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone3.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread3.join();
+        pubStop3.store(true);
+        pubThread3.join();
+
+        CHECK(okCustom, "R10 指定目录名 record → true");
+        if (okCustom)
+        {
+            CHECK(node3.bagDir() == "bag_custom",
+                  "R10 bagDir() == 指定名 bag_custom（非时间戳名）");
+            CHECK(std::filesystem::is_regular_file("bag_custom/bag_0.mcap"),
+                  "R10 指定目录下 bag_0.mcap 落盘");
+            std::ifstream meta3("bag_custom/metadata.json");
+            std::stringstream buf3;
+            buf3 << meta3.rdbuf();
+            const std::string text3 = buf3.str();
+            CHECK(text3.find("\"name\": \"rt/bag_rec_out\"") != std::string::npos,
+                  "R10 metadata 列出录制主题");
+            CHECK(!statsCustom.empty() && statsCustom[0].count >= 1, "R10 stats 有录制条数");
+        }
+        else
+        {
+            std::cerr << "record outputDir error: " << errorCustom << std::endl;
+        }
     }
 
     // 远端发布端清理（先于 bag 节点析构亦可，二者独立参与者）

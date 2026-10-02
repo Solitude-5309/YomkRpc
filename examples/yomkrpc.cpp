@@ -17,7 +17,8 @@
  *           [-o <dir> | --output <dir>] <topic-name>
  *   yomkrpc node list
  *   yomkrpc node info <node-name>
- *   yomkrpc bag record <topic-name|pattern> [<topic-name|pattern> ...]
+ *   yomkrpc bag record [-o <dir> | --output <dir>] <topic-name|pattern>
+ *           [<topic-name|pattern> ...]
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -159,7 +160,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] <topic-name> -f <file> | --file <file>\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info <node-name>\n"
-          "  yomkrpc bag record <topic-name|pattern> [<topic-name|pattern> ...]\n"
+          "  yomkrpc bag record [-o <dir> | --output <dir>] <topic-name|pattern>\n"
+          "          [<topic-name|pattern> ...]\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -173,8 +175,10 @@ static void printUsage(std::ostream &os)
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
-          "  -o, --output <dir>  输出目录（仅 topic pub -ef 生效）：消息描述文件生成位置，相对/\n"
-          "                      绝对路径均可，缺省当前目录；目录不存在报错退出，不自动创建\n"
+          "  -o, --output <dir>  输出目录（topic pub -ef 生效：消息描述文件生成位置，相对/\n"
+          "                      绝对路径均可，缺省当前目录，目录不存在报错退出，不自动创建；\n"
+          "                      bag record 生效：bag 目录名/路径，缺省按时间戳命名，目录已\n"
+          "                      存在报错退出，父目录自动创建）\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -346,8 +350,9 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
 
 // bag record 子命令：录制主题列表（透传原始 CDR 字节直写 mcap），服务端长驻阻塞至
 // Ctrl+C 触发收尾，返回后逐行打印统计（首行 bag 目录，其后每主题 "topic: N 条 / M 字节"），
-// 退出前删除 bag 节点
-static int runRecord(uint32_t domainId, const std::vector<std::string> &topics)
+// 退出前删除 bag 节点；outputDir 非空时指定 bag 目录名/路径（相对/绝对均可），空则缺省时间戳名
+static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
+                     const std::string &outputDir)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -363,11 +368,22 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics)
 
     // 2. 监听 Ctrl+C：处理函数经 yomk::bagRecordStop 无锁置位，节点层录制循环读它收尾
     std::signal(SIGINT, onSignal);
-    YOMK_INFO_TAG("yomkrpc", "recording topics from ", std::to_string(topics.size()),
-                  " list item(s) on domain ", std::to_string(domainId), ", press Ctrl+C to stop");
+    if (outputDir.empty())
+    {
+        YOMK_INFO_TAG("yomkrpc", "recording topics from ", std::to_string(topics.size()),
+                      " list item(s) on domain ", std::to_string(domainId),
+                      ", press Ctrl+C to stop");
+    }
+    else
+    {
+        // 回显 output dir（目录此时尚未创建，启动校验通过后落盘）：防 "-o 被忽略" 疑虑
+        YOMK_INFO_TAG("yomkrpc", "recording topics from ", std::to_string(topics.size()),
+                      " list item(s) on domain ", std::to_string(domainId),
+                      ", output dir=", outputDir, ", press Ctrl+C to stop");
+    }
 
     // 3. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
-    resp = YOMKRPC_BAG_RECORD(topics);
+    resp = YOMKRPC_BAG_RECORD(topics, outputDir);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag record failed: ", resp.m_msg);
@@ -1278,7 +1294,7 @@ int main(int argc, char *argv[])
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
-    std::string msgOutDir;   // 输出目录（-o/--output；仅 topic pub -ef 生效，缺省当前目录）
+    std::string msgOutDir;   // 输出目录（-o/--output；topic pub -ef=消息描述文件位置，bag record=bag 目录名/路径）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     double pubRateHz = 1.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，缺省 1Hz 持续发送，Ctrl+C 停止）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
@@ -1505,7 +1521,7 @@ int main(int argc, char *argv[])
     if (pos.size() >= 3 && pos[0] == "bag" && pos[1] == "record")
     {
         std::vector<std::string> topics(pos.begin() + 2, pos.end());
-        return runRecord(domainId, topics);
+        return runRecord(domainId, topics, msgOutDir);
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node"))
     {

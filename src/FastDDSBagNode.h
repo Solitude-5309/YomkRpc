@@ -74,7 +74,9 @@ public:
     //   判定，任一精确主题既无发布者也无订阅者、或任一模式未命中任何主题即整体报错返回
     //   false（error 逐项列出，不建 bag 目录，不产生任何文件）；仅有订阅者的主题同样通过
     //   （类型名取自订阅端点公告，建 reader 等发布者匹配后自动开始录流）。
-    // ②建 bag 目录（缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，毫秒精度防同秒重名）+ mcap writer（bag_0.mcap）。
+    // ②建 bag 目录（outputDir 非空用指定目录名/路径——相对/绝对均可、父目录自动多级创建、
+    //   已存在即报错；为空缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，毫秒精度防同秒重名）
+    //   + mcap writer（bag_0.mcap）。
     // ③逐主题注册透传类型并建立订阅（reader QoS 的 Reliability/Durability 跟随远端 writer
     //   offered 值——requested ≤ offered 恒成立；仅有订阅者的主题无 offered 可跟随，用默认
     //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
@@ -88,7 +90,8 @@ public:
     bool record(const std::vector<std::string>& topics, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr,
             uint32_t stableRounds = kDefaultStableRounds,
-            uint32_t intervalMs = kDefaultIntervalMs);
+            uint32_t intervalMs = kDefaultIntervalMs,
+            const std::string& outputDir = "");
     // 最近一次成功录制的 bag 目录名（当前路径相对名，如 bag_2026-01-01_12-00-00_000）；未录制过为空。
     const std::string& bagDir() const
     {

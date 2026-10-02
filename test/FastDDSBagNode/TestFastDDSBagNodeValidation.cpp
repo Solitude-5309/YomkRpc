@@ -11,7 +11,8 @@
  *   V2 setDomainId(201) 成功 → 重复 setDomainId 拒绝（仅成功一次）；
  *   V3 清单快速校验（收敛等待之前）：空清单 → "no topics given"、含空名 →
  *      "empty topic name in topic list"、重复主题 → "duplicate topic [..] in topic list"、
- *      多通配（≥2 个 '*'）→ "仅支持单个通配"；
+ *      多通配（≥2 个 '*'）→ "仅支持单个通配"、outputDir 已存在 →
+ *      "bag directory [..] already exists"（不落盘）；
  *   V4 无端点主题（域 201 无 rt/bag_val_miss 端点，慢路径等满收敛窗）→ false +
  *      error 含 "主题 [rt/bag_val_miss] 既无发布者也无订阅者" 与域号、等待时长；bagDir() 为空；
  *   V5 混合清单 {"rt/bag_val_hit"（远端 MString 发布者在线）, "rt/bag_val_miss2"} → 整体报错
@@ -110,6 +111,20 @@ int main()
         CHECK(!node.record({"a*b*c"}, stats, &error), "V3 多通配（≥2 个 '*'）→ false");
         CHECK(error.find("仅支持单个通配") != std::string::npos,
               "V3 多通配 → 仅支持单个通配");
+
+        // outputDir 已存在：fail-fast 于发现校验前（纯输入错误，不等待不落盘）
+        // 用例目录名避开 bag_ 前缀，防泄漏快照断言（bagDirCreated）误报
+        std::error_code mkEc;
+        std::filesystem::create_directory("taken_dir", mkEc);
+        CHECK(!mkEc, "V3 前置：taken_dir 创建成功");
+        CHECK(!node.record({"rt/bag_val_noend"}, stats, &error, 0, 0, "taken_dir"),
+              "V3 outputDir 已存在 → false");
+        CHECK(error.find("bag directory [taken_dir] already exists") != std::string::npos,
+              "V3 outputDir 已存在 → already exists 文案");
+        std::error_code emptyEc;
+        CHECK(std::filesystem::is_empty("taken_dir", emptyEc),
+              "V3 outputDir 已存在拒绝后目录内无新文件（不落盘）");
+        std::filesystem::remove("taken_dir", mkEc);
     }
 
     // ---- V4：无端点主题（慢路径等满收敛窗）→ 整体报错 + error 文本契约 ----

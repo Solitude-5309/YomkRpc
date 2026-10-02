@@ -60,6 +60,8 @@ struct DDSBagNode
 struct DDSBagRecord
 {
     std::vector<std::string> topics;  // 待录制主题清单（至少 1 个，清单内重复/空名拒绝）
+    std::string outputDir;            // bag 目录名/路径（相对/绝对均可，父目录自动创建，
+                                      // 已存在报错）；空 = 缺省时间戳名 bag_<YYYY-MM-DD_HH-MM-SS_mmm>
 };
 
 // clang-format off
