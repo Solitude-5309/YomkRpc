@@ -12,7 +12,8 @@
  *   V3 清单快速校验（收敛等待之前）：空清单 → "no topics given"、含空名 →
  *      "empty topic name in topic list"、重复主题 → "duplicate topic [..] in topic list"、
  *      多通配（≥2 个 '*'）→ "仅支持单个通配"、outputDir 已存在 →
- *      "bag directory [..] already exists"（不落盘）；
+ *      "bag directory [..] already exists"（不落盘）、-b 分片上限过小（999 与下限前边界
+ *      1023）→ "too small, minimum split file size is 1024"（不等待不落盘）；
  *   V4 无端点主题（域 201 无 rt/bag_val_miss 端点，慢路径等满收敛窗）→ false +
  *      error 含 "主题 [rt/bag_val_miss] 既无发布者也无订阅者" 与域号、等待时长；bagDir() 为空；
  *   V5 混合清单 {"rt/bag_val_hit"（远端 MString 发布者在线）, "rt/bag_val_miss2"} → 整体报错
@@ -49,6 +50,8 @@
 namespace
 {
     constexpr uint32_t TEST_DOMAIN = 201; // 独立域，避开其他测试用例
+    constexpr uint64_t kTooSmallSplit = 999;  // -b 分片上限过小（低于下限 1024）
+    constexpr uint64_t kBoundarySplit = 1023; // 分片下限前一边界值（仍拒绝）
 
     // 工作目录下已存在的 bag_ 前缀目录集合（用例前快照，用例后比对零新增）
     std::vector<std::string> snapshotBagDirs()
@@ -125,6 +128,14 @@ int main()
         CHECK(std::filesystem::is_empty("taken_dir", emptyEc),
               "V3 outputDir 已存在拒绝后目录内无新文件（不落盘）");
         std::filesystem::remove("taken_dir", mkEc);
+
+        // -b 分片上限过小：fail-fast 于发现校验前（纯输入错误，不等待不落盘；下限 1024）
+        CHECK(!node.record({"rt/bag_val_small"}, stats, &error, 0, 0, "", kTooSmallSplit) &&
+                  error.find("too small") != std::string::npos,
+              "V3 maxBagSize=999 → false + too small 文案");
+        CHECK(!node.record({"rt/bag_val_small"}, stats, &error, 0, 0, "", kBoundarySplit) &&
+                  error.find("minimum split file size is 1024") != std::string::npos,
+              "V3 maxBagSize=1023 边界 → false + 下限 1024 文案");
     }
 
     // ---- V4：无端点主题（慢路径等满收敛窗）→ 整体报错 + error 文本契约 ----

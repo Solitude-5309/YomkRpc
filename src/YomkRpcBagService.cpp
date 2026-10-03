@@ -99,7 +99,7 @@ YomkResponse YomkRpcBagService::bagRecord(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, "bag node not created");
     }
 
-    // 兕底复位残留停止标志（上次会话 Ctrl+C 残留置位会导致录制秒退，对齐 debugPubReset 约定）；
+    // 兜底复位残留停止标志（上次会话 Ctrl+C 残留置位会导致录制秒退，对齐 debugPubReset 约定）；
     // 只复位 stop 不动 paused——暂停标志是调用方启动意图（CLI --start-paused / 库用户
     // bagRecordPause 置位后发起录制），handler 清除会使暂停态静默失效
     yomk::g_bagRecordStop.store(false);
@@ -108,7 +108,7 @@ YomkResponse YomkRpcBagService::bagRecord(YomkPkgPtr pkg)
     // 启动校验失败（无端点主题）快速返回 eNo，m_msg 逐主题列出输入有误项
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
-    if (!node_->record(p->msg.topics, stats, &error, 0, 0, p->msg.outputDir))
+    if (!node_->record(p->msg.topics, stats, &error, 0, 0, p->msg.outputDir, p->msg.maxBagSize))
     {
         if (error.empty())
         {

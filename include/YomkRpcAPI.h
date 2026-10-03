@@ -237,11 +237,13 @@
 // 也无订阅者的精确主题同样整体报错（m_msg 逐项列出，不建 bag）；通过校验的主题以透传方式订阅并将
 // 原始 CDR 字节直写 mcap（bag 目录由 outputDir 指定——目录名/路径相对/绝对均可，父目录自动
 // 多级创建，已存在报错；为空缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，含 bag_0.mcap
-// 与 metadata.json）。须先创建 bag 节点；清单内重复/空名主题返回错误。
+// 与 metadata.json）。maxBagSize 单分片最大字节数（>0 时写满即滚动 bag_N.mcap 分片录制，
+// 下限 1024 字节过小报错；0=不分片）。
+// 须先创建 bag 节点；清单内重复/空名主题返回错误。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_RECORD(topics, outputDir) \
-    YOMK_REQUEST("/YomkRpcBagService/bag_record", YomkMkPtr(DDSBagRecord, DDSBagRecord{(topics), (outputDir)}))
+#define YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize) \
+    YOMK_REQUEST("/YomkRpcBagService/bag_record", YomkMkPtr(DDSBagRecord, DDSBagRecord{(topics), (outputDir), (maxBagSize)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

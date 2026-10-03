@@ -302,7 +302,7 @@ ExampleYomkRpcPub
 | `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省 1Hz 持续发送，`-w N` 等待订阅者匹配、`-r N` 持续发布、`-t N` 条数上限，语义同直发） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
-| `yomkrpc bag record [-o <目录>\|--output <目录>] [--start-paused] <主题名\|模式> [<主题名\|模式> ...]` | 录制主题列表为 mcap bag（启动校验后透传订阅直写原始 CDR 字节，长驻阻塞至 Ctrl+C 收尾；清单项支持通配——恰好一个 `*` 的前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre*suf` 模式，单独 `*` 匹配全部，按发现缓存展开为实际主题集合去重升序，未命中报错；bag 目录名经 `-o` 指定，缺省按时间戳命名，目录已存在报错退出；`--start-paused` 暂停态启动——订阅与发现照常、收到的消息丢弃不写入；交互键（tty 下）：SPACE 开始录制、p 暂停、r 继续，Ctrl+C 停止；校验失败不建目录不产生文件，详见 6.7） |
+| `yomkrpc bag record [-o <目录>\|--output <目录>] [-b <字节>\|--max-bag-size <字节>] [--start-paused] <主题名\|模式> [<主题名\|模式> ...]` | 录制主题列表为 mcap bag（启动校验后透传订阅直写原始 CDR 字节，长驻阻塞至 Ctrl+C 收尾；清单项支持通配——恰好一个 `*` 的前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre*suf` 模式，单独 `*` 匹配全部，按发现缓存展开为实际主题集合去重升序，未命中报错；bag 目录名经 `-o` 指定，缺省按时间戳命名，目录已存在报错退出；`-b <字节>` 单分片最大字节数——写满即滚动 `bag_N.mcap` 分片（0=不分片缺省，下限 1024 字节过小报错，实际分片粒度不小于 chunk 落盘边界）；`--start-paused` 暂停态启动——订阅与发现照常、收到的消息丢弃不写入；交互键（tty 下）：SPACE 开始录制、p 暂停、r 继续，Ctrl+C 停止；校验失败不建目录不产生文件，详见 6.7） |
 
 公共参数（各命令通用）：
 
@@ -805,13 +805,14 @@ resp = YOMKRPC_DEBUG_QUIT();                            // 3. 退出前显式清
 
 ### 6.7 录制主题到 bag（yomkrpc bag record）
 
-`yomkrpc bag record [-o <目录>|--output <目录>] [--start-paused] <主题名|模式> [<主题名|模式> ...]` 将主题列表录制为 mcap bag（类型无关，无需 IDL 生成代码——发现匹配远端 DataWriter 自动解析类型，透传订阅将原始 CDR 字节直写 mcap；命令形态对齐 `ros2 bag record`：显式主题清单 + 可选 `-o` 指定 bag 目录名 + 可选 `--start-paused` 暂停态启动 + 交互键 SPACE/p/r + Ctrl+C 停止）。域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择（同其他命令）。经 `YomkRpcBagService` bag 服务实现（等价宏 `YOMKRPC_BAG_*` 定义于 `YomkRpcAPI.h`，见本节末尾）：
+`yomkrpc bag record [-o <目录>|--output <目录>] [-b <字节>|--max-bag-size <字节>] [--start-paused] <主题名|模式> [<主题名|模式> ...]` 将主题列表录制为 mcap bag（类型无关，无需 IDL 生成代码——发现匹配远端 DataWriter 自动解析类型，透传订阅将原始 CDR 字节直写 mcap；命令形态对齐 `ros2 bag record`：显式主题清单 + 可选 `-o` 指定 bag 目录名 + 可选 `-b` 单分片最大字节数 + 可选 `--start-paused` 暂停态启动 + 交互键 SPACE/p/r + Ctrl+C 停止）。域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择（同其他命令）。经 `YomkRpcBagService` bag 服务实现（等价宏 `YOMKRPC_BAG_*` 定义于 `YomkRpcAPI.h`，见本节末尾）：
 
 ```bash
 yomkrpc bag record hello_world           # 录制单主题（默认域 0）
 yomkrpc bag record rt/chatter rt/tf      # 多主题清单
 yomkrpc bag record 'hello_*' '*_world'   # 通配模式（清单项恰好含一个 *，引号防 shell glob 展开）
 yomkrpc bag record -o my_session hello_world   # 指定 bag 目录名（相对/绝对路径均可）
+yomkrpc bag record -b 1048576 hello_world      # 单分片最大 1MB（写满滚动 bag_N.mcap 分片，0=不分片缺省）
 yomkrpc bag record --start-paused hello_world  # 暂停态启动（订阅照常、消息丢弃不写入，按 SPACE 开始录制）
 ```
 
@@ -824,7 +825,7 @@ ExampleYomkRpcPub
 yomkrpc bag record hello_world
 ```
 
-输出示例（CLI 启动行显示清单项数与交互键提示——指定 `-o` 时追加 `output dir=<目录>` 回显；节点层逐主题输出实际录制清单——通配展开结果以此为准；交互键回显：p 暂停→`recording paused`、r 继续→`recording resumed`、SPACE 开始→`recording started`；Ctrl+C 触发收尾后输出统计——首行 bag 目录名，其后每主题一行统计，随后进程退出）：
+输出示例（CLI 启动行显示清单项数与交互键提示——指定 `-o` 时追加 `output dir=<目录>` 回显，指定 `-b` 非零值时追加 `max bag size=<字节>` 回显；节点层逐主题输出实际录制清单——通配展开结果以此为准；交互键回显：p 暂停→`recording paused`、r 继续→`recording resumed`、SPACE 开始→`recording started`；Ctrl+C 触发收尾后输出统计——首行 bag 目录名，其后每主题一行统计，随后进程退出）：
 
 ```
 [19:37:30.123456] recording topics from 1 list item(s) on domain 0, press p to pause, r to resume, Ctrl+C to stop
@@ -839,7 +840,7 @@ hello_world: 12 条 / 288 字节
 录制流程（调用长驻阻塞，收尾完成后返回）：
 
 1. **启动校验**：清单快速校验（空清单/空名/重复/多通配/`-o` 目录已存在即报错）先于发现轮询瞬间返回；随后轮询发现缓存快照（每 200ms 一轮，连续 15 轮不变或全部清单项确认有端点即提前收敛；总窗不足 6s 自动提升轮数，防 SPDP 公告期误判；校验参数固定，不经 `YOMKRPC_DDS_DISCOVER_ROUNDS` 调整）；**模式项逐轮展开**——按发现缓存全表匹配合并进录制清单（去重升序）。收敛后逐项判定，任一精确主题既无发布者也无订阅者、或任一模式未命中任何主题即整体报错退出（逐项列出；**校验失败发生在建目录之前，不产生任何文件**）。仅有订阅者的主题同样通过（类型名取自订阅端点公告，先建订阅，发布者上线匹配后自动开始录流）；
-2. **建目录与 writer**：bag 目录名经 `-o` 指定（相对/绝对路径均可，父目录自动多级创建）或缺省当前路径下 `bag_<YYYY-MM-DD_HH-MM-SS_mmm>`（毫秒精度防同秒重名），内建 `bag_0.mcap`；
+2. **建目录与 writer**：bag 目录名经 `-o` 指定（相对/绝对路径均可，父目录自动多级创建）或缺省当前路径下 `bag_<YYYY-MM-DD_HH-MM-SS_mmm>`（毫秒精度防同秒重名），内建 `bag_0.mcap`；`-b` 非零（下限 1024 字节，过小在启动校验报错）时启用分片录制——每条消息写盘后检查本分片已落盘字节，达到上限即滚动下一分片 `bag_N.mcap`（写后检查对齐 ros2：写满才切、下一条落新文件，单分片可略超一条消息量，不产生空片；close→open 切换后各主题 Channel 由 mcap 首见 channelId 自动补写，channelId 跨分片一致；受存储层 chunk 缓冲影响，实际分片粒度不小于 chunk 落盘边界——默认 786432 字节，小于该值的 `-b` 实际每 chunk 一片；IO 由 chunk 批量化，分片检查零额外开销）；
 3. **透传订阅**：每主题一个 reader（QoS 的 Reliability/Durability 跟随远端 writer offered 值，requested ≤ offered 恒成立）与一个 mcap Channel（`messageEncoding="cdr"`、`schemaId=0`），消息以 CDR 全量字节（含 encapsulation header）逐条直写，sequence 从 0 单调递增；每主题建订成功即输出一行 `recording topic=<名> type=<类型>`（stdout）——实际录制清单以此为准；
 4. **等待停止与交互键**：SIGINT 经无锁原子置位停止标志（录制循环 100ms 轮询），进程内自收尾，无外部命令依赖；CLI 键盘监听线程（始终启动，tty 下生效）经 termios 非规范模式 + `poll()` 100ms 轮询 stdin 实现运行态/暂停态状态机——SPACE 暂停态→运行态（输出 `recording started`）、p 运行态→暂停态（输出 `recording paused`）、r 暂停态→运行态（输出 `recording resumed`），按键仅在状态实际变化时生效（防重复按键冗余输出），Ctrl+C 后线程最多 100ms 内还原终端干净退出，stdin 非 tty（管道/重定向）时跳过键盘处理（Ctrl+C 退出不受影响）；暂停态期间暂停标志置位——订阅与发现照常，回调照常 take 排空（防恢复后旧数据涌入）但丢弃不写不计数；暂停期不计入 starting_time/duration（首条写入消息方置位起始时间，sequence 恢复后仍从 0 起）；
 5. **收尾**：删全部 reader（杜绝并发回调）→ `writer.close()` 补写 mcap summary 三层索引 → 写 `metadata.json` → 输出统计退出（exit 0）。
@@ -861,7 +862,7 @@ hello_world: 12 条 / 288 字节
 
 #### 落盘产物（bag 目录两文件）
 
-- **`bag_0.mcap`**：标准 mcap 容器，逐主题 Channel（encoding=cdr、无 schema——schemaless 对齐透传语义），消息 record 保存原始 CDR 字节；收尾 close 补写 summary 三层索引，可用任意 mcap 标准读库读回
+- **`bag_0.mcap`**：标准 mcap 容器，逐主题 Channel（encoding=cdr、无 schema——schemaless 对齐透传语义），消息 record 保存原始 CDR 字节；收尾 close 补写 summary 三层索引，可用任意 mcap 标准读库读回；指定 `-b` 时滚动产生同格式分片 `bag_1.mcap`、`bag_2.mcap`、...（各分片独立完整可读回，消息按写入顺序连续切分——不重复不空洞，同主题 channelId 跨分片一致）
 - **`metadata.json`**：顶层平铺 bag 元信息（`version` 为 yomkrpc 自有格式版本，1 起步）：
 
 ```json
@@ -890,7 +891,7 @@ hello_world: 12 条 / 288 字节
 }
 ```
 
-  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。
+  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；`-b` 分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。
 
 失败报错退出（录制阶段失败 exit=2），错误文本按卡点归类（校验类逐项列出）：
 
@@ -901,6 +902,7 @@ hello_world: 12 条 / 288 字节
 | `empty topic name in topic list` | 清单含空名主题 |
 | `duplicate topic [x] in topic list` | 清单内精确主题名重复 |
 | `bag directory [x] already exists, remove it or choose another name` | `-o` 指定的目录已存在（fail-fast 于发现校验前，不落盘） |
+| `max bag size [x] too small, minimum split file size is 1024 bytes (0 to disable splitting)` | `-b` 分片上限过小（非 0 且低于 1024 字节；fail-fast 于发现校验前，不落盘） |
 | `主题 [x] 既无发布者也无订阅者，请检查主题名输入（域 N，已等待 M ms）` | 校验收敛后该精确主题仍无任何端点（主题名拼错 / 对端未上线 / 域号不一致） |
 | `模式 [x] 未匹配到任何主题，请检查通配输入（域 N，已等待 M ms）` | 校验收敛后该模式命中 0 主题（模式拼错或域内确无匹配主题） |
 
@@ -938,7 +940,8 @@ int main()
 
     // 3. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
     std::vector<std::string> topics{"hello_world", "hello_*"};
-    resp = YOMKRPC_BAG_RECORD(topics, "my_bag");  // 第二参为 bag 目录名，空串 = 缺省时间戳名
+    resp = YOMKRPC_BAG_RECORD(topics, "my_bag", 0);  // 第二参 bag 目录名（空串=缺省时间戳名），
+    //                                                  第三参单分片最大字节数（0=不分片，>0 写满滚动 bag_N.mcap）
     if (resp.m_status != YomkResponse::eOk)
     {
         // m_msg 为逐项原因（校验类多行）；失败路径同样须删除已建 bag 节点

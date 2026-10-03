@@ -78,6 +78,7 @@ struct DDSBagRecord
     std::vector<std::string> topics;  // 待录制主题清单（至少 1 个，清单内重复/空名拒绝）
     std::string outputDir;            // bag 目录名/路径（相对/绝对均可，父目录自动创建，
                                       // 已存在报错）；空 = 缺省时间戳名 bag_<YYYY-MM-DD_HH-MM-SS_mmm>
+    uint64_t maxBagSize = 0;          // 单分片最大字节数；0=不分片（尾部缺省字段，旧调用方零改动）
 };
 
 // clang-format off

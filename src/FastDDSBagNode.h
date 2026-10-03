@@ -76,7 +76,8 @@ public:
     //   （类型名取自订阅端点公告，建 reader 等发布者匹配后自动开始录流）。
     // ②建 bag 目录（outputDir 非空用指定目录名/路径——相对/绝对均可、父目录自动多级创建、
     //   已存在即报错；为空缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，毫秒精度防同秒重名）
-    //   + mcap writer（bag_0.mcap）。
+    //   + mcap writer（bag_0.mcap）；maxBagSize > 0 时单分片写满即滚动 bag_N.mcap 分片录制
+    //   （0=不分片；下限 1024 字节，过小输入有误报错）。
     // ③逐主题注册透传类型并建立订阅（reader QoS 的 Reliability/Durability 跟随远端 writer
     //   offered 值——requested ≤ offered 恒成立；仅有订阅者的主题无 offered 可跟随，用默认
     //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
@@ -86,14 +87,16 @@ public:
     //   g_bagRecordPaused 置位期间（--start-paused / bagRecordPause）回调照常 take 但丢弃，
     //   bagRecordResume 后开始写入（订阅与落盘路径照常，暂停期不计入 starting_time/duration）。
     // ⑤停止序列：delete 全部 reader（杜绝并发回调）→ writer.close()（补写 summary 索引）→
-    //   写 metadata.json（storage_identifier=mcap，起始时间/时长附 _format 可读键）→ 回填 stats。
+    //   写 metadata.json（storage_identifier=mcap，relative_file_paths 列全部分片，起始时间/
+    //   时长/条数统计保持全局累计）→ 回填 stats。
     // 成功返回 true 且节点定格（再次 record 报错须重建）；失败（未入域/重复/输入有误/资源创建
     // 失败）返回 false 并经 error 出参回填原因，未定格可修正输入后重试。
     bool record(const std::vector<std::string>& topics, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr,
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs,
-            const std::string& outputDir = "");
+            const std::string& outputDir = "",
+            uint64_t maxBagSize = 0);
     // 最近一次成功录制的 bag 目录名（当前路径相对名，如 bag_2026-01-01_12-00-00_000）；未录制过为空。
     const std::string& bagDir() const
     {

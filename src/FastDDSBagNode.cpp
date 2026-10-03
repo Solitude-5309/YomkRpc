@@ -53,6 +53,7 @@ constexpr uint32_t kRecordPollMs = 100;       // 录制循环停止标志轮询�
 constexpr int kMsDigits = 3;                  // 定宽 3 位段位数（毫秒/微秒/纳秒）
 constexpr int kClockDigits = 2;               // 定宽 2 位段位数（时/分/秒）
 constexpr uint32_t kBagMetadataVersion = 1;   // yomkrpc 元信息格式自有版本号（1 起步，与参考来源 rosbag2 的 v5 无关）
+constexpr uint64_t kMinSplitFileSize = 1024;  // -b 分片下限（对齐 rosbag2 mcap 插件 kMinimumSplitFileSize）
 constexpr uint64_t kNsPerUs = 1000;                     // 纳秒每微秒
 constexpr uint64_t kNsPerMs = kNsPerUs * kNsPerUs;      // 纳秒每毫秒
 constexpr uint64_t kNsPerSecond = kNsPerMs * kNsPerUs;  // 纳秒每秒
@@ -198,6 +199,14 @@ struct McapWriteCtx
     mcap::ChannelId channelId = 0;
     std::atomic<uint64_t>* firstNs = nullptr;  // 全局首条消息时间戳（metadata starting_time，0=未录到）
     std::atomic<uint64_t>* lastNs = nullptr;   // 全局末条消息时间戳（metadata duration）
+    // -b 分片滚动共享状态（滚动仅在 payloadMtx 锁内串行执行，fileIndex/filePaths 无需原子），
+    // 全部指向 record 局部对象；maxBagSize 按值持入（只读，0=不分片）
+    const mcap::McapWriterOptions* options = nullptr;  // 滚动重开新分片沿用同一 options（compression 等）
+    const std::string* dirPath = nullptr;              // bag 目录路径（滚动 open 完整路径前缀）
+    std::vector<std::string>* filePaths = nullptr;     // 全部分片相对名（metadata relative_file_paths）
+    uint64_t* fileIndex = nullptr;                     // 当前分片序号（bag_<N>.mcap 命名）
+    std::atomic<bool>* splitBroken = nullptr;          // 滚动失败置位：提示一次且不再重试（防多主题刷屏）
+    uint64_t maxBagSize = 0;
 };
 
 mcap::Timestamp steadyToSystemNs()
@@ -245,6 +254,39 @@ public:
                 {
                     ++count_;
                     bytes_ += msg.dataSize;
+                    // -b 分片检查点（ros2 同款写后检查）：write 成功后查已落盘字节，达到上限
+                    // 即滚动新分片。size 仅在 chunk 落盘时增长（mcap 默认 chunk 缓冲批量 IO，
+                    // 与 ros2 mcap 插件同款语义），分片触发点落在 chunk 落盘边界；0=不分片，
+                    // 条件不满足时仅读 size 零开销。close→open 后 channelId 跨分片稳定
+                    // （mcap write 首见 channelId 自动补写 Channel 记录），ctx 零改动
+                    if (ctx_.maxBagSize > 0 && !ctx_.splitBroken->load(std::memory_order_relaxed))
+                    {
+                        mcap::IWritable* sink = ctx_.writer->dataSink();
+                        if (sink != nullptr && sink->size() >= ctx_.maxBagSize)
+                        {
+                            ctx_.writer->close();  // 补写上一分片 summary（内部含残留 chunk flush）
+                            const uint64_t nextIndex = *ctx_.fileIndex + 1;
+                            const std::string nextName =
+                                "bag_" + std::to_string(nextIndex) + ".mcap";
+                            const mcap::Status splitStatus =
+                                ctx_.writer->open(*ctx_.dirPath + "/" + nextName, *ctx_.options);
+                            if (!splitStatus.ok())
+                            {
+                                // 滚动失败（磁盘满/权限等）：writer 已 closed，后续 write 全部
+                                // 失败丢弃；提示一次且不再重试（splitBroken 跨 listener 共享）
+                                if (!ctx_.splitBroken->exchange(true, std::memory_order_relaxed))
+                                {
+                                    std::cout << "bag split failed: " << splitStatus.message
+                                              << ", further messages dropped" << std::endl;
+                                }
+                            }
+                            else
+                            {
+                                ctx_.filePaths->push_back(nextName);
+                                *ctx_.fileIndex = nextIndex;
+                            }
+                        }
+                    }
                 }
             }
             // 首末时间戳 CAS 维护（metadata 起始时间与时长）
@@ -402,7 +444,8 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         std::string* error,
         uint32_t stableRounds,
         uint32_t intervalMs,
-        const std::string& outputDir)
+        const std::string& outputDir,
+        uint64_t maxBagSize)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -455,6 +498,13 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     if (!outputDir.empty() && std::filesystem::exists(outputDir))
     {
         return fail("bag directory [" + outputDir + "] already exists, remove it or choose another name");
+    }
+    // -b 分片上限校验 fail-fast 于发现校验前（纯输入错误，不等待不落盘）：非 0 须不低于
+    // 最小分片文件大小（ros2 同款启动校验，mcap 存储层下限 1024 字节）；0=不分片不校验
+    if (maxBagSize != 0 && maxBagSize < kMinSplitFileSize)
+    {
+        return fail("max bag size [" + std::to_string(maxBagSize) +
+                    "] too small, minimum split file size is 1024 bytes (0 to disable splitting)");
     }
 
     // ---- ①启动校验：轮询发现缓存，精确主题全部有端点即收敛；清单含通配模式（单个
@@ -653,6 +703,12 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         return fail("open mcap file failed: " + status.message);
     }
 
+    // -b 分片滚动共享状态（bag_0 已打开即首分片；滚动仅在 payloadMtx 锁内串行执行，
+    // 无需原子；生命周期覆盖全部 listener，经 McapWriteCtx 指针共享）
+    std::vector<std::string> filePaths{"bag_0.mcap"};
+    uint64_t fileIndex = 0;
+    std::atomic<bool> splitBroken{false};
+
     // ---- ③逐主题建订阅（类型注册按类型名共享；失败回滚已建订阅与 writer）
     std::map<std::string, TypeSupport> types;   // typeName → 已注册透传类型（同名主题共享）
     std::map<std::string, mcap::ChannelId> channels;  // topic → mcap channel
@@ -735,6 +791,12 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         ctx.payloadMtx = &payloadMtx;
         ctx.firstNs = &firstNs;
         ctx.lastNs = &lastNs;
+        ctx.options = &options;
+        ctx.dirPath = &bagDirName;
+        ctx.filePaths = &filePaths;
+        ctx.fileIndex = &fileIndex;
+        ctx.splitBroken = &splitBroken;
+        ctx.maxBagSize = maxBagSize;
         // 首见主题注册 mcap Channel：schema_id=0 无 schema 通道，encoding 记 "cdr"
         // （原始 CDR 字节透传落盘的直接落点）
         auto channelIt = channels.find(topic);
@@ -805,7 +867,7 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     nlohmann::json info;
     info["version"] = kBagMetadataVersion;
     info["storage_identifier"] = "mcap";
-    info["relative_file_paths"] = nlohmann::json::array({"bag_0.mcap"});
+    info["relative_file_paths"] = filePaths;  // 全部分片相对名（bag_0.mcap, bag_1.mcap, ...）
     info["starting_time"]["nanoseconds_since_epoch"] = startNs;
     info["starting_time"]["nanoseconds_since_epoch_format"] = formatEpochNs(startNs);
     info["duration"]["nanoseconds"] = durationNs;
