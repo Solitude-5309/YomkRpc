@@ -19,6 +19,7 @@
  *   yomkrpc node info <node-name>
  *   yomkrpc bag record [-o <dir> | --output <dir>] [--start-paused]
  *           <topic-name|pattern> [<topic-name|pattern> ...]
+ *           交互键（tty 下生效）：SPACE 从暂停态开始录制，p 暂停，r 继续，Ctrl+C 停止
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -128,9 +129,10 @@
 #include <numeric>
 #include <sstream>
 #include <string>
-#include <termios.h> // --start-paused 空格启动录制：非规范模式单字符读
+#include <poll.h>   // bag record 键盘监听线程：poll() 带超时轮询 stdin（响应 Ctrl+C）
+#include <termios.h> // bag record 键盘监听：非规范模式单字符读（SPACE/p/r）
 #include <thread>
-#include <unistd.h> // STDIN_FILENO
+#include <unistd.h> // STDIN_FILENO, read()
 #include <vector>
 
 using namespace yomk;
@@ -182,7 +184,8 @@ static void printUsage(std::ostream &os)
           "                      bag record 生效：bag 目录名/路径，缺省按时间戳命名，目录已\n"
           "                      存在报错退出，父目录自动创建）\n"
           "  --start-paused      暂停态启动（仅 bag record 生效）：订阅与发现照常、收到的\n"
-          "                      消息丢弃不写入，按空格后启动录制\n"
+          "                      消息丢弃不写入；交互键（tty 下）：SPACE 开始录制，p 暂停，\n"
+          "                      r 继续，Ctrl+C 停止\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -385,39 +388,68 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     }
     if (startPaused)
     {
-        startSuffix += ", started paused, press SPACE to start recording";
+        startSuffix += ", started paused, press SPACE to start, p/r to pause/resume, Ctrl+C to stop";
+    }
+    else
+    {
+        startSuffix += ", press p to pause, r to resume, Ctrl+C to stop";
     }
     YOMK_INFO_TAG("yomkrpc", "recording topics from ", std::to_string(topics.size()),
-                  " list item(s) on domain ", std::to_string(domainId), startSuffix,
-                  ", press Ctrl+C to stop");
+                  " list item(s) on domain ", std::to_string(domainId), startSuffix);
 
-    // 3. 暂停态等空格启动录制（对齐 ros2 --start-paused）：termios 非规范模式单字符读
-    //（关行缓冲与回显，按空格立即生效），非空格键忽略；stdin 非 tty（管道/重定向）时
-    // tcgetattr 失败保持暂停，Ctrl+C 退出路径不受影响
-    if (startPaused)
+    // 3. 键盘监听线程（始终启动，tty 下生效）：SPACE=start，p=pause，r=resume，Ctrl+C 退出
+    //    poll() 100ms 超时轮询：每次超时后检查 g_bagRecordStop，Ctrl+C 后最多 100ms 内干净退出
+    //    并还原终端；非 tty（管道/重定向）时 tcgetattr 失败直接 return，Ctrl+C 退出路径不受影响
+    std::thread([]()
     {
-        std::thread([]()
+        termios oldt {};
+        if (tcgetattr(STDIN_FILENO, &oldt) != 0)
         {
-            termios oldt {};
-            if (tcgetattr(STDIN_FILENO, &oldt) != 0)
+            return; // 非 tty：跳过键盘处理
+        }
+        termios raw = oldt;
+        raw.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        while (!yomk::g_bagRecordStop.load(std::memory_order_relaxed))
+        {
+            struct pollfd pfd {STDIN_FILENO, POLLIN, 0};
+            if (poll(&pfd, 1, 100) <= 0)
             {
-                return;
+                continue; // 超时或错误：继续轮询（同时检查停止标志）
             }
-            termios raw = oldt;
-            raw.c_lflag &= ~(ICANON | ECHO);
-            tcsetattr(STDIN_FILENO, TCSANOW, &raw);
             char ch = 0;
-            while (std::cin.get(ch) && ch != ' ')
+            if (read(STDIN_FILENO, &ch, 1) != 1)
             {
+                break;
             }
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // 先还原终端再置恢复标志
             if (ch == ' ')
             {
-                yomk::bagRecordResume();
-                std::cout << "recording started" << std::endl;
+                if (yomk::g_bagRecordPaused.load(std::memory_order_relaxed))
+                {
+                    yomk::bagRecordResume();
+                    std::cout << "recording started" << std::endl;
+                }
             }
-        }).detach();
-    }
+            else if (ch == 'r')
+            {
+                if (yomk::g_bagRecordPaused.load(std::memory_order_relaxed))
+                {
+                    yomk::bagRecordResume();
+                    std::cout << "recording resumed" << std::endl;
+                }
+            }
+            else if (ch == 'p')
+            {
+                if (!yomk::g_bagRecordPaused.load(std::memory_order_relaxed))
+                {
+                    yomk::bagRecordPause();
+                    std::cout << "recording paused" << std::endl;
+                }
+            }
+            // 其他键忽略
+        }
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // 还原终端（Ctrl+C 后干净退出）
+    }).detach();
 
     // 4. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
     resp = YOMKRPC_BAG_RECORD(topics, outputDir);
