@@ -79,6 +79,7 @@ struct DDSBagRecord
     std::string outputDir;            // bag 目录名/路径（相对/绝对均可，父目录自动创建，
                                       // 已存在报错）；空 = 缺省时间戳名 bag_<YYYY-MM-DD_HH-MM-SS_mmm>
     uint64_t maxBagSize = 0;          // 单分片最大字节数；0=不分片（尾部缺省字段，旧调用方零改动）
+    uint64_t maxBagDurationSec = 0;   // 单分片最大时长秒；0=不分片（尾部缺省字段，同用先到先分）
 };
 
 // clang-format off

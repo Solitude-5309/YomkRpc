@@ -199,14 +199,17 @@ struct McapWriteCtx
     mcap::ChannelId channelId = 0;
     std::atomic<uint64_t>* firstNs = nullptr;  // 全局首条消息时间戳（metadata starting_time，0=未录到）
     std::atomic<uint64_t>* lastNs = nullptr;   // 全局末条消息时间戳（metadata duration）
-    // -b 分片滚动共享状态（滚动仅在 payloadMtx 锁内串行执行，fileIndex/filePaths 无需原子），
-    // 全部指向 record 局部对象；maxBagSize 按值持入（只读，0=不分片）
+    // -b/-d 分片滚动共享状态（滚动仅在 payloadMtx 锁内串行执行，fileIndex/filePaths/
+    // shardStartNs 无需原子），全部指向 record 局部对象；maxBagSize/maxBagDurationSec 按值
+    // 持入（只读，0=该条件禁用）
     const mcap::McapWriterOptions* options = nullptr;  // 滚动重开新分片沿用同一 options（compression 等）
     const std::string* dirPath = nullptr;              // bag 目录路径（滚动 open 完整路径前缀）
     std::vector<std::string>* filePaths = nullptr;     // 全部分片相对名（metadata relative_file_paths）
     uint64_t* fileIndex = nullptr;                     // 当前分片序号（bag_<N>.mcap 命名）
+    uint64_t* shardStartNs = nullptr;                  // 当前分片首条消息时间戳（0=尚无首条）
     std::atomic<bool>* splitBroken = nullptr;          // 滚动失败置位：提示一次且不再重试（防多主题刷屏）
     uint64_t maxBagSize = 0;
+    uint64_t maxBagDurationSec = 0;
 };
 
 mcap::Timestamp steadyToSystemNs()
@@ -250,42 +253,41 @@ public:
             msg.dataSize = blob->bytes.size();
             {
                 std::lock_guard<std::mutex> lock(*ctx_.payloadMtx);
+                // 分片检查（参考实现同款写前检查点，在写本条之前）：size 与时长双条件先到
+                // 先分（任一满足即滚动）——size 条件读上一条写后的落盘量（写前/写后逐条
+                // 等价，达上限本条落新分片），时长条件用本条接收时间戳判断（超时本条落
+                // 新分片）；新分片起始由其首条消息时间戳确定（0=尚无首条不判定）。size
+                // 仅在 chunk 落盘时增长（mcap 默认 chunk 缓冲批量 IO），size 分片触发点
+                // 落在 chunk 落盘边界；0 值任一=该条件禁用；暂停期消息已在此之上 continue，
+                // 不计入分片时长
+                if (!ctx_.splitBroken->load(std::memory_order_relaxed))
+                {
+                    bool shouldSplit = false;
+                    if (ctx_.maxBagSize > 0)
+                    {
+                        mcap::IWritable* sink = ctx_.writer->dataSink();
+                        shouldSplit = sink != nullptr && sink->size() >= ctx_.maxBagSize;
+                    }
+                    if (!shouldSplit && ctx_.maxBagDurationSec > 0 && *ctx_.shardStartNs != 0)
+                    {
+                        // 严格大于（参考实现同款）：距本分片首条消息超过上限即滚动
+                        shouldSplit = nowNs - *ctx_.shardStartNs >
+                                      kNsPerSecond * ctx_.maxBagDurationSec;
+                    }
+                    // close→open 后 channelId 跨分片稳定（mcap write 首见 channelId 自动
+                    // 补写 Channel 记录），ctx 零改动
+                    if (shouldSplit && tryRollShard())
+                    {
+                        *ctx_.shardStartNs = 0;
+                    }
+                }
                 if (ctx_.writer->write(msg).ok())
                 {
                     ++count_;
                     bytes_ += msg.dataSize;
-                    // -b 分片检查点（ros2 同款写后检查）：write 成功后查已落盘字节，达到上限
-                    // 即滚动新分片。size 仅在 chunk 落盘时增长（mcap 默认 chunk 缓冲批量 IO，
-                    // 与 ros2 mcap 插件同款语义），分片触发点落在 chunk 落盘边界；0=不分片，
-                    // 条件不满足时仅读 size 零开销。close→open 后 channelId 跨分片稳定
-                    // （mcap write 首见 channelId 自动补写 Channel 记录），ctx 零改动
-                    if (ctx_.maxBagSize > 0 && !ctx_.splitBroken->load(std::memory_order_relaxed))
+                    if (*ctx_.shardStartNs == 0)
                     {
-                        mcap::IWritable* sink = ctx_.writer->dataSink();
-                        if (sink != nullptr && sink->size() >= ctx_.maxBagSize)
-                        {
-                            ctx_.writer->close();  // 补写上一分片 summary（内部含残留 chunk flush）
-                            const uint64_t nextIndex = *ctx_.fileIndex + 1;
-                            const std::string nextName =
-                                "bag_" + std::to_string(nextIndex) + ".mcap";
-                            const mcap::Status splitStatus =
-                                ctx_.writer->open(*ctx_.dirPath + "/" + nextName, *ctx_.options);
-                            if (!splitStatus.ok())
-                            {
-                                // 滚动失败（磁盘满/权限等）：writer 已 closed，后续 write 全部
-                                // 失败丢弃；提示一次且不再重试（splitBroken 跨 listener 共享）
-                                if (!ctx_.splitBroken->exchange(true, std::memory_order_relaxed))
-                                {
-                                    std::cout << "bag split failed: " << splitStatus.message
-                                              << ", further messages dropped" << std::endl;
-                                }
-                            }
-                            else
-                            {
-                                ctx_.filePaths->push_back(nextName);
-                                *ctx_.fileIndex = nextIndex;
-                            }
-                        }
+                        *ctx_.shardStartNs = nowNs;  // 分片首条：确定本分片时长起点
                     }
                 }
             }
@@ -318,6 +320,32 @@ private:
     uint64_t count_ = 0;  // 录制条数（payloadMtx_ 锁内累加，收尾时 reader 已删可直读）
     uint64_t bytes_ = 0;  // 录制字节数
     uint32_t sequence_ = 0;  // per-topic 递增序号
+
+    // 滚动新分片：close 旧文件（补写 summary，内部含残留 chunk flush）→ open bag_<N+1>.mcap。
+    // 成功返回 true 且 filePaths/fileIndex 已推进；失败置 splitBroken（提示一次不再重试），
+    // 后续 write 全部失败丢弃。仅限 payloadMtx 锁内调用（McapWriter 非线程安全）
+    bool tryRollShard()
+    {
+        ctx_.writer->close();
+        const uint64_t nextIndex = *ctx_.fileIndex + 1;
+        const std::string nextName = "bag_" + std::to_string(nextIndex) + ".mcap";
+        const mcap::Status splitStatus =
+            ctx_.writer->open(*ctx_.dirPath + "/" + nextName, *ctx_.options);
+        if (!splitStatus.ok())
+        {
+            // 滚动失败（磁盘满/权限等）：writer 已 closed，后续 write 全部失败丢弃；
+            // 提示一次且不再重试（splitBroken 跨 listener 共享）
+            if (!ctx_.splitBroken->exchange(true, std::memory_order_relaxed))
+            {
+                std::cout << "bag split failed: " << splitStatus.message
+                          << ", further messages dropped" << std::endl;
+            }
+            return false;
+        }
+        ctx_.filePaths->push_back(nextName);
+        *ctx_.fileIndex = nextIndex;
+        return true;
+    }
 };
 
 // 参与者监听器：writer/reader 发现回调仅缓存发现信息（不建订阅——订阅统一在 record 校验
@@ -445,7 +473,8 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         uint32_t stableRounds,
         uint32_t intervalMs,
         const std::string& outputDir,
-        uint64_t maxBagSize)
+        uint64_t maxBagSize,
+        uint64_t maxBagDurationSec)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -703,11 +732,12 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         return fail("open mcap file failed: " + status.message);
     }
 
-    // -b 分片滚动共享状态（bag_0 已打开即首分片；滚动仅在 payloadMtx 锁内串行执行，
+    // -b/-d 分片滚动共享状态（bag_0 已打开即首分片；滚动仅在 payloadMtx 锁内串行执行，
     // 无需原子；生命周期覆盖全部 listener，经 McapWriteCtx 指针共享）
     std::vector<std::string> filePaths{"bag_0.mcap"};
     uint64_t fileIndex = 0;
     std::atomic<bool> splitBroken{false};
+    uint64_t shardStartNs = 0;  // 当前分片首条消息时间戳（0=尚无首条；新分片由其首条重新确定）
 
     // ---- ③逐主题建订阅（类型注册按类型名共享；失败回滚已建订阅与 writer）
     std::map<std::string, TypeSupport> types;   // typeName → 已注册透传类型（同名主题共享）
@@ -796,7 +826,9 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         ctx.filePaths = &filePaths;
         ctx.fileIndex = &fileIndex;
         ctx.splitBroken = &splitBroken;
+        ctx.shardStartNs = &shardStartNs;
         ctx.maxBagSize = maxBagSize;
+        ctx.maxBagDurationSec = maxBagDurationSec;
         // 首见主题注册 mcap Channel：schema_id=0 无 schema 通道，encoding 记 "cdr"
         // （原始 CDR 字节透传落盘的直接落点）
         auto channelIt = channels.find(topic);

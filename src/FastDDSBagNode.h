@@ -77,7 +77,9 @@ public:
     // ②建 bag 目录（outputDir 非空用指定目录名/路径——相对/绝对均可、父目录自动多级创建、
     //   已存在即报错；为空缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，毫秒精度防同秒重名）
     //   + mcap writer（bag_0.mcap）；maxBagSize > 0 时单分片写满即滚动 bag_N.mcap 分片录制
-    //   （0=不分片；下限 1024 字节，过小输入有误报错）。
+    //   （0=不分片；下限 1024 字节，过小输入有误报错）；maxBagDurationSec > 0 时单分片
+    //   时长达限即滚动 bag_N.mcap（0=不分片，无下限校验；与 maxBagSize 同用先到先分；
+    //   暂停期消息不计入分片时长）。
     // ③逐主题注册透传类型并建立订阅（reader QoS 的 Reliability/Durability 跟随远端 writer
     //   offered 值——requested ≤ offered 恒成立；仅有订阅者的主题无 offered 可跟随，用默认
     //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
@@ -96,7 +98,8 @@ public:
             uint32_t stableRounds = kDefaultStableRounds,
             uint32_t intervalMs = kDefaultIntervalMs,
             const std::string& outputDir = "",
-            uint64_t maxBagSize = 0);
+            uint64_t maxBagSize = 0,
+            uint64_t maxBagDurationSec = 0);
     // 最近一次成功录制的 bag 目录名（当前路径相对名，如 bag_2026-01-01_12-00-00_000）；未录制过为空。
     const std::string& bagDir() const
     {

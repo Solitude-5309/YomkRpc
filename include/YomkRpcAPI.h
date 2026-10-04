@@ -239,11 +239,12 @@
 // 多级创建，已存在报错；为空缺省当前路径下 bag_<YYYY-MM-DD_HH-MM-SS_mmm>，含 bag_0.mcap
 // 与 metadata.json）。maxBagSize 单分片最大字节数（>0 时写满即滚动 bag_N.mcap 分片录制，
 // 下限 1024 字节过小报错；0=不分片）。
-// 须先创建 bag 节点；清单内重复/空名主题返回错误。
+// 须先创建 bag 节点；清单内重复/空名主题返回错误。maxBagDurationSec 单分片最大时长秒
+// （0=不分片，无下限校验，与 maxBagSize 同用先到先分）。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize) \
-    YOMK_REQUEST("/YomkRpcBagService/bag_record", YomkMkPtr(DDSBagRecord, DDSBagRecord{(topics), (outputDir), (maxBagSize)}))
+#define YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize, maxBagDurationSec) \
+    YOMK_REQUEST("/YomkRpcBagService/bag_record", YomkMkPtr(DDSBagRecord, DDSBagRecord{(topics), (outputDir), (maxBagSize), (maxBagDurationSec)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

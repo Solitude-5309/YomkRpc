@@ -108,7 +108,8 @@ YomkResponse YomkRpcBagService::bagRecord(YomkPkgPtr pkg)
     // 启动校验失败（无端点主题）快速返回 eNo，m_msg 逐主题列出输入有误项
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
-    if (!node_->record(p->msg.topics, stats, &error, 0, 0, p->msg.outputDir, p->msg.maxBagSize))
+    if (!node_->record(p->msg.topics, stats, &error, 0, 0, p->msg.outputDir, p->msg.maxBagSize,
+                       p->msg.maxBagDurationSec))
     {
         if (error.empty())
         {

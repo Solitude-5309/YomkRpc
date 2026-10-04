@@ -27,7 +27,11 @@
  *      暂停后恢复开始写入（metadata starting_time 非零——暂停期不计入）；
  *   R12 -b/--max-bag-size 分片录制（新节点）：大 payload 驱动 chunk flush 触发滚动，
  *      bag_0/bag_1 分片落盘非空、metadata relative_file_paths 列全部分片、分片不丢消息
- *      （count 与跨分片读回总条数 == 发布条数）、各分片自含 Channel 声明。
+ *      （count 与跨分片读回总条数 == 发布条数）、各分片自含 Channel 声明；
+ *   R13 -d/--max-bag-duration 时长分片录制（新节点）：普通 payload 25 条 @200ms（4.8s
+ *      跨度）驱动时长滚动（距分片首条严格大于 2s 即切），bag_0/bag_1/bag_2 分片落盘
+ *      非空、metadata relative_file_paths 列出分片、分片不丢消息（count 与跨分片读回
+ *      总条数 == 发布条数）、各分片自含 Channel 声明。
  *
  * 域号 202：与 TestYomkRpcBagServiceLifecycle(200)/TestFastDDSBagNodeValidation(201) 错开，
  * ctest 串行执行互不残留。
@@ -67,6 +71,7 @@ namespace
     constexpr uint32_t TEST_DOMAIN = 202;    // 独立域，避开其他测试用例
     constexpr const char *REC_TOPIC = "rt/bag_rec_hit";
     constexpr const char *REC_SPLIT_TOPIC = "rt/bag_rec_split_a";
+    constexpr const char *REC_TIME_TOPIC = "rt/bag_rec_time_a";
     // 录制时长：校验窗（SPDP 发现发布者约 1~3s + 全端点在线即收敛）+ ~5s 录制期（150ms/条）
     constexpr int kRecordMs = 12000;
     constexpr int kPubIntervalMs = 150;
@@ -84,6 +89,13 @@ namespace
     constexpr uint64_t kSplitMaxBagSize = 1024; // 分片下限（与节点层校验下限同值）
     // 录制窗：校验窗（~3~6s）+ 发布端等订阅匹配后 20 条 @150ms（3s）+ 余量
     constexpr int kSplitRecordMs = 12000;
+    // R13 时长分片用例：普通小 payload（不触发 size 条件），25 条 @200ms（4.8s 跨度）
+    // 驱动 -d 时长滚动（距分片首条严格大于 2s 即切）；预期 3 分片（~0-2s / ~2-4s / ~4s+ 尾片）
+    constexpr int kTimeMessages = 25;
+    constexpr int kTimePubIntervalMs = 200;
+    constexpr uint64_t kTimeMaxBagDurationSec = 2;
+    // 录制窗：校验窗（~1~3s，同 R2 口径）+ 发布端等订阅匹配（<1s）+ 25 条 @200ms（5s）+ 余量
+    constexpr int kTimeRecordMs = 13000;
 } // namespace
 
 int main()
@@ -668,6 +680,135 @@ int main()
         else
         {
             std::cerr << "record split error: " << errorSplit << std::endl;
+        }
+    }
+
+    // ---- R13：-d/--max-bag-duration 时长分片录制（普通 payload 驱动时长滚动） ----
+    {
+        yomk::bagRecordReset();
+        FastDDSBagNode node7;
+        CHECK(node7.setDomainId(TEST_DOMAIN), "R13 新节点 setDomainId(202) 成功");
+
+        // 远端新增发布者（复用 peer participant 与 MString 类型）
+        auto *topicTime = peerParticipant->create_topic(
+            REC_TIME_TOPIC, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        auto *writerTime = (pub != nullptr && topicTime != nullptr)
+                               ? pub->create_datawriter(topicTime, dds::DATAWRITER_QOS_DEFAULT)
+                               : nullptr;
+        CHECK(writerTime != nullptr, "R13 远端 DataWriter 创建成功（rt/bag_rec_time_a）");
+
+        // 发布端：先等订阅匹配（同 R12，VOLATILE QoS 下匹配前的消息必丢），再发
+        // 固定 25 条小 payload @200ms（4.8s 跨度）；-d 2 下距分片首条严格大于 2s 即滚动
+        // ——预期 bag_0/bag_1/bag_2 三分片（~0-2s / ~2-4s / ~4s+ 尾片）
+        std::atomic<bool> pubStop7{false};
+        std::thread pubThread7([&]()
+        {
+            YomkRpc::MString msg;
+            dds::PublicationMatchedStatus matched{};
+            for (int i = 0; i < 100; ++i) // 100×100ms=10s 上限；未匹配照发（用例必失败不掩盖）
+            {
+                if (dds::RETCODE_OK == writerTime->get_publication_matched_status(matched) &&
+                    matched.current_count > 0)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            for (int i = 0; i < kTimeMessages; ++i)
+            {
+                msg.data("bag-record-time-" + std::to_string(i));
+                writerTime->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kTimePubIntervalMs));
+            }
+        });
+
+        std::vector<FastDDSBagNode::BagTopicStat> statsTime;
+        std::string errorTime;
+        std::atomic<bool> recDone7{false};
+        bool okTime = false;
+        std::thread recThread7([&]()
+        {
+            okTime = node7.record({REC_TIME_TOPIC}, statsTime, &errorTime, 0, 0, "", 0,
+                                  kTimeMaxBagDurationSec);
+            recDone7.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(kTimeRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone7.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread7.join();
+        pubStop7.store(true);
+        pubThread7.join();
+
+        CHECK(okTime, "R13 时长分片 record → true");
+        if (okTime)
+        {
+            CHECK(!statsTime.empty() && statsTime[0].count == kTimeMessages,
+                  "R13 分片不丢消息（stats.count == 发布条数 25）");
+            const std::string &bagDir7 = node7.bagDir();
+            CHECK(std::filesystem::exists(bagDir7 + "/bag_0.mcap"), "R13 bag_0.mcap 存在");
+            CHECK(std::filesystem::exists(bagDir7 + "/bag_1.mcap"),
+                  "R13 bag_1.mcap 存在（时长达限已滚动分片）");
+            CHECK(std::filesystem::exists(bagDir7 + "/bag_2.mcap"),
+                  "R13 bag_2.mcap 存在（4.8s 跨度超出两片 2s 上限）");
+            CHECK(std::filesystem::file_size(bagDir7 + "/bag_0.mcap") > 0 &&
+                      std::filesystem::file_size(bagDir7 + "/bag_1.mcap") > 0 &&
+                      std::filesystem::file_size(bagDir7 + "/bag_2.mcap") > 0,
+                  "R13 分片文件非空");
+
+            // metadata：relative_file_paths 列出全部分片，message_count 全局累计
+            std::ifstream meta7(bagDir7 + "/metadata.json");
+            std::stringstream buf7;
+            buf7 << meta7.rdbuf();
+            const std::string text7 = buf7.str();
+            CHECK(text7.find("\"bag_0.mcap\"") != std::string::npos &&
+                      text7.find("\"bag_1.mcap\"") != std::string::npos &&
+                      text7.find("\"bag_2.mcap\"") != std::string::npos,
+                  "R13 metadata relative_file_paths 列出 bag_0/bag_1/bag_2 分片");
+            CHECK(text7.find("\"message_count\": " + std::to_string(kTimeMessages)) != std::string::npos,
+                  "R13 metadata message_count 全局累计 == 25");
+
+            // 跨分片读回：各分片条数总和 == 发布条数（分片连续拼接不重复不空洞），
+            // 且每片自含 Channel 声明（读回的 channel topic 一致）
+            uint64_t timeTotal = 0;
+            bool timeChannelOk = true;
+            for (const char *shard :
+                 {"bag_0.mcap", "bag_1.mcap", "bag_2.mcap", "bag_3.mcap", "bag_4.mcap"})
+            {
+                const std::string shardPath = bagDir7 + "/" + shard;
+                if (!std::filesystem::exists(shardPath))
+                {
+                    continue;
+                }
+                std::ifstream in(shardPath, std::ios::binary);
+                mcap::FileStreamReader dataSource{in};
+                mcap::McapReader reader;
+                if (!reader.open(dataSource).ok())
+                {
+                    CHECK(false, "R13 分片 mcap open 成功（每片 summary 完整可读回）");
+                    continue;
+                }
+                for (const auto &msgView :
+                     reader.readMessages([](const mcap::Status &) {}))
+                {
+                    if (msgView.channel->topic != REC_TIME_TOPIC)
+                    {
+                        timeChannelOk = false;
+                    }
+                    ++timeTotal;
+                }
+                reader.close();
+            }
+            CHECK(timeTotal == kTimeMessages,
+                  "R13 跨分片读回总条数 == 25（各分片连续拼接不丢消息）");
+            CHECK(timeChannelOk,
+                  "R13 各分片 Channel topic 一致（每片自含通道声明）");
+        }
+        else
+        {
+            std::cerr << "record time error: " << errorTime << std::endl;
         }
     }
 

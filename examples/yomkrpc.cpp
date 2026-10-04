@@ -18,7 +18,7 @@
  *   yomkrpc node list
  *   yomkrpc node info <node-name>
  *   yomkrpc bag record [-o <dir> | --output <dir>] [-b <bytes> | --max-bag-size <bytes>]
-*           [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]
+ *           [-d <sec> | --max-bag-duration <sec>] [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]
  *           交互键（tty 下生效）：SPACE 从暂停态开始录制，p 暂停，r 继续，Ctrl+C 停止
  *   yomkrpc -h | --help
  *
@@ -165,7 +165,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc node list\n"
           "  yomkrpc node info <node-name>\n"
           "  yomkrpc bag record [-o <dir> | --output <dir>] [-b <bytes> | --max-bag-size <bytes>]\n"
-          "          [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]\n"
+          "          [-d <sec> | --max-bag-duration <sec>] [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -204,6 +204,10 @@ static void printUsage(std::ostream &os)
           "                      单分片最大字节数（仅 bag record 生效）：写满即滚动 bag_N.mcap 分片，\n"
           "                      0=不分片（缺省）；下限 1024 字节，过小报错退出；实际分片粒度受\n"
           "                      存储层 chunk 缓冲影响不小于 chunk 落盘边界（默认 786432 字节）\n"
+          "  -d, --max-bag-duration <sec>\n"
+          "                      单分片最大时长秒（仅 bag record 生效）：时长达限即滚动 bag_N.mcap\n"
+          "                      分片，0=不分片（缺省），无下限校验；与 -b 同用先到先分；暂停期\n"
+          "                      不计入分片时长\n"
           "  topic-name|pattern  录制清单项（仅 bag record 生效）：支持通配模式——恰好一个 '*'，\n"
           "                      前缀 hello_* / 后缀 *_hello / 中间 pre*suf，单独 '*' 匹配全部主题，\n"
           "                      ≥2 个 '*' 报错；模式按发现缓存匹配展开为实际主题集合（去重升序），\n"
@@ -363,9 +367,11 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
 // Ctrl+C 触发收尾，返回后逐行打印统计（首行 bag 目录，其后每主题 "topic: N 条 / M 字节"），
 // 退出前删除 bag 节点；outputDir 非空时指定 bag 目录名/路径（相对/绝对均可），空则缺省
 // 时间戳名；startPaused 暂停态启动（订阅照常、消息丢弃不写入，等空格后启动录制）；
-// maxBagSize 单分片最大字节数（0=不分片，>0 写满滚动 bag_N.mcap）
+// maxBagSize 单分片最大字节数（0=不分片，>0 写满滚动 bag_N.mcap）；maxBagDurationSec
+// 单分片最大时长秒（0=不分片，无下限，与 maxBagSize 同用先到先分）
 static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
-                     const std::string &outputDir, bool startPaused, uint64_t maxBagSize)
+                     const std::string &outputDir, bool startPaused, uint64_t maxBagSize,
+                     uint64_t maxBagDurationSec)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -394,6 +400,10 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     if (maxBagSize > 0)
     {
         startSuffix += ", max bag size=" + std::to_string(maxBagSize);
+    }
+    if (maxBagDurationSec > 0)
+    {
+        startSuffix += ", max bag duration=" + std::to_string(maxBagDurationSec) + "s";
     }
     if (startPaused)
     {
@@ -461,7 +471,7 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     }).detach();
 
     // 4. 长驻阻塞：启动校验、订阅与录制、收尾落盘都在服务端完成，返回即录制结束
-    resp = YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize);
+    resp = YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize, maxBagDurationSec);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag record failed: ", resp.m_msg);
@@ -1373,6 +1383,7 @@ int main(int argc, char *argv[])
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     bool startPaused = false; // 暂停态启动（--start-paused；仅 bag record 生效）
     uint64_t maxBagSize = 0;  // 单分片最大字节数（-b/--max-bag-size；仅 bag record 生效，0=不分片）
+    uint64_t maxBagDurationSec = 0;  // 单分片最大时长秒（--max-bag-duration；仅 bag record，0=不分片）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
     std::string msgOutDir;   // 输出目录（-o/--output；topic pub -ef=消息描述文件位置，bag record=bag 目录名/路径）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
@@ -1529,6 +1540,24 @@ int main(int argc, char *argv[])
             maxBagSize = value;
             continue;
         }
+        if (arg == "-d" || arg == "--max-bag-duration")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少分片时长参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            char *end = nullptr;
+            const unsigned long long value = std::strtoull(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || argv[i][0] == '-')
+            {
+                std::cerr << "yomkrpc: 非法分片时长 \"" << argv[i] << "\"（须为 >=0 的整数秒，0=不分片）\n";
+                return 2;
+            }
+            maxBagDurationSec = value;
+            continue;
+        }
         pos.push_back(arg);
     }
 
@@ -1624,7 +1653,7 @@ int main(int argc, char *argv[])
     if (pos.size() >= 3 && pos[0] == "bag" && pos[1] == "record")
     {
         std::vector<std::string> topics(pos.begin() + 2, pos.end());
-        return runRecord(domainId, topics, msgOutDir, startPaused, maxBagSize);
+        return runRecord(domainId, topics, msgOutDir, startPaused, maxBagSize, maxBagDurationSec);
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node"))
     {
