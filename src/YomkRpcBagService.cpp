@@ -109,7 +109,7 @@ YomkResponse YomkRpcBagService::bagRecord(YomkPkgPtr pkg)
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
     if (!node_->record(p->msg.topics, stats, &error, 0, 0, p->msg.outputDir, p->msg.maxBagSize,
-                       p->msg.maxBagDurationSec))
+                       p->msg.maxBagDurationSec, p->msg.maxCacheSize))
     {
         if (error.empty())
         {

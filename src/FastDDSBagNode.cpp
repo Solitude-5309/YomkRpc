@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -30,6 +31,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include <fastdds/dds/core/policy/QosPolicies.hpp>
@@ -191,6 +193,134 @@ public:
     }
 };
 
+// 写缓存条目：双缓冲模式下回调深拷贝的透传消息（Blob 为复用接收缓冲，入队须拷出独立
+// 副本供消费线程写盘）。
+struct CachedMsg
+{
+    mcap::ChannelId channelId = 0;
+    uint32_t sequence = 0;
+    mcap::Timestamp logTime = 0;  // 回调内采样的接收时刻（与直写模式同口径）
+    std::vector<uint8_t> data;
+
+    // 组装 mcap 写入消息（uint8_t 与 std::byte 同为单字节原始存储，别名转换安全）
+    mcap::Message toMessage() const
+    {
+        mcap::Message msg;
+        msg.channelId = channelId;
+        msg.sequence = sequence;
+        msg.logTime = logTime;
+        msg.publishTime = logTime;
+        msg.data = reinterpret_cast<const std::byte*>(data.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+        msg.dataSize = data.size();
+        return msg;
+    }
+};
+
+// 写缓存双缓冲（参考实现 MessageCache/CacheConsumer 同构最小自建）：producer（DDS 接收
+// 回调，多 reader 并发）push 深拷贝消息；consumer（record 内独立消费线程）wait→swap→
+// 逐条写盘→clear 贪婪轮转。单侧 buffer 字节上限 maxBytes：超限置丢弃标志（本条仍入队，
+// 超限至多一条的量），标志置位期间后续新消息丢弃并按 channelId 计数（收尾统一告警），
+// swap 后复位——满载丢弃不阻塞：阻塞仅把丢弃点转移到 DDS 接收队列，样本仍会丢。
+class BagMessageCache
+{
+public:
+    explicit BagMessageCache(uint64_t maxBytes) : maxBytes_(maxBytes)
+    {
+    }
+
+    // producer API：入队一条；返回 false 表示缓存满被丢弃（内部已按 channelId 计数）
+    bool push(CachedMsg&& msg, mcap::ChannelId channelId)
+    {
+        const std::size_t bytes = msg.data.size();
+        bool pushed = false;
+        {
+            std::lock_guard<std::mutex> lock(producerMtx_);
+            if (dropNew_)
+            {
+                ++dropped_[channelId];
+            }
+            else
+            {
+                if (bufferBytes_ + bytes > maxBytes_)
+                {
+                    dropNew_ = true;  // 本条仍入队（超限至多一条量），后续新消息丢弃直至 swap 复位
+                }
+                producer_.push_back(std::move(msg));
+                bufferBytes_ += bytes;
+                pushed = true;
+            }
+        }
+        notifyDataReady();  // 每条 push 都唤醒（参考实现同款，含丢弃路径）
+        return pushed;
+    }
+
+    // consumer API：阻塞至有数据或进入排空态，然后 swap 双缓冲（贪婪轮转：有数据即换）
+    void waitAndSwap()
+    {
+        std::unique_lock<std::mutex> lock(producerMtx_);
+        if (!flushing_.load(std::memory_order_relaxed))
+        {
+            dataCv_.wait(lock, [this] { return dataReady_ || flushing_.load(std::memory_order_relaxed); });
+            dataReady_ = false;
+        }
+        consumer_.swap(producer_);  // 原 producer 成为空 buffer，字节量归零
+        bufferBytes_ = 0;
+        dropNew_ = false;  // 丢弃标志随 swap 复位（参考实现同款）
+    }
+
+    std::vector<CachedMsg>& consumerBuffer()
+    {
+        return consumer_;  // 仅消费线程访问（swap 后独占）
+    }
+
+    void clearConsumerBuffer()
+    {
+        consumer_.clear();
+    }
+
+    // 停止排空：置排空态并唤醒消费线程做最后一轮（残余全部落盘后退出）
+    void beginFlush()
+    {
+        {
+            std::lock_guard<std::mutex> lock(producerMtx_);
+            flushing_.store(true, std::memory_order_relaxed);
+        }
+        dataCv_.notify_one();
+    }
+
+    bool flushing() const
+    {
+        return flushing_.load(std::memory_order_relaxed);
+    }
+
+    // 丢条统计（channelId → 条数；收尾消费线程已 join 后直读）
+    const std::unordered_map<mcap::ChannelId, uint64_t>& dropped() const
+    {
+        return dropped_;
+    }
+
+private:
+    void notifyDataReady()
+    {
+        {
+            std::lock_guard<std::mutex> lock(producerMtx_);
+            dataReady_ = true;
+        }
+        dataCv_.notify_one();
+    }
+
+    const uint64_t maxBytes_;                                // 单侧 buffer 字节上限
+    std::vector<CachedMsg> producer_;                        // producerMtx_ 保护
+    std::vector<CachedMsg> consumer_;                        // 仅消费线程访问
+    std::unordered_map<mcap::ChannelId, uint64_t> dropped_;  // producerMtx_ 保护（多回调并发）
+    std::mutex producerMtx_;
+    std::condition_variable dataCv_;
+    bool dataReady_ = false;        // producerMtx_ 保护
+    std::atomic<bool> flushing_{false};  // 置位后不再接受新数据（仅停止序列置位一次）
+    std::size_t bufferBytes_ = 0;   // producer 侧当前字节量（producerMtx_ 保护）
+    bool dropNew_ = false;          // producerMtx_ 保护（满载丢弃标志，swap 复位）
+};
+
 // 数据监听器共享的写盘上下文（record 局部对象所有，生命周期覆盖全部 listener）。
 struct McapWriteCtx
 {
@@ -210,6 +340,7 @@ struct McapWriteCtx
     std::atomic<bool>* splitBroken = nullptr;          // 滚动失败置位：提示一次且不再重试（防多主题刷屏）
     uint64_t maxBagSize = 0;
     uint64_t maxBagDurationSec = 0;
+    BagMessageCache* cache = nullptr;  // 非空=双缓冲模式（回调入队/消费线程写盘）；空=同步直写
 };
 
 mcap::Timestamp steadyToSystemNs()
@@ -218,11 +349,48 @@ mcap::Timestamp steadyToSystemNs()
                                std::chrono::system_clock::now().time_since_epoch())
                                .count());
 }
+
+// 写缓存丢条收尾告警（参考实现 MessageCache::log_dropped 同款语义）：仅在有丢条时一次性
+// 打印，按主题名升序逐行列出（channelId 经 channels 表反查主题名）
+void logCacheDropped(const BagMessageCache& cache,
+                     const std::map<std::string, mcap::ChannelId>& channels)
+{
+    uint64_t total = 0;
+    for (const auto& kv : cache.dropped())
+    {
+        total += kv.second;
+    }
+    if (total == 0)
+    {
+        return;
+    }
+    std::map<std::string, uint64_t> byTopic;
+    for (const auto& kv : cache.dropped())
+    {
+        for (const auto& channel : channels)
+        {
+            if (channel.second == kv.first)
+            {
+                byTopic[channel.first] = kv.second;
+                break;
+            }
+        }
+    }
+    std::cout << "bag cache dropped messages per topic:";
+    for (const auto& kv : byTopic)
+    {
+        std::cout << "\n\t" << kv.first << ": " << kv.second;
+    }
+    std::cout << "\nTotal dropped: " << total << std::endl;
+}
 }  // namespace
 
-// 数据监听器：take_next_sample 取透传 Blob → mcap write（同步直写，录制发生在 DDS 接收线程）。
+// 数据监听器：take_next_sample 取透传 Blob → mcap write。同步直写模式录制发生在 DDS
+// 接收线程；双缓冲模式回调仅拷贝入队，写盘由独立消费线程完成（见 record 消费线程）。
 class FastDDSBagNode::BagSubListener : public DataReaderListener
 {
+    friend class FastDDSBagNode;  // record 内消费线程调用 shardCheckAndWrite 落盘
+
 public:
     BagSubListener(void* data, const McapWriteCtx& ctx) : data_(data), ctx_(ctx) {}
 
@@ -251,57 +419,27 @@ public:
             // uint8_t 与 std::byte 同为单字节原始存储，别名转换安全（mcap 接口要求数据指针）
             msg.data = reinterpret_cast<const std::byte*>(blob->bytes.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
             msg.dataSize = blob->bytes.size();
+            if (ctx_.cache != nullptr)
+            {
+                // 双缓冲模式：深拷贝入队（Blob 为复用接收缓冲，须拷出独立副本供消费线程
+                // 写盘）；满载丢弃不入统计——首末时间戳只反映实际进入写路径的消息
+                CachedMsg cached;
+                cached.channelId = ctx_.channelId;
+                cached.sequence = msg.sequence;
+                cached.logTime = nowNs;
+                cached.data = blob->bytes;
+                if (ctx_.cache->push(std::move(cached), ctx_.channelId))
+                {
+                    recordRecvTs(nowNs);
+                }
+                continue;
+            }
+            // 同步直写模式：接收线程锁内写前分片检查 + 落盘
             {
                 std::lock_guard<std::mutex> lock(*ctx_.payloadMtx);
-                // 分片检查（参考实现同款写前检查点，在写本条之前）：size 与时长双条件先到
-                // 先分（任一满足即滚动）——size 条件读上一条写后的落盘量（写前/写后逐条
-                // 等价，达上限本条落新分片），时长条件用本条接收时间戳判断（超时本条落
-                // 新分片）；新分片起始由其首条消息时间戳确定（0=尚无首条不判定）。size
-                // 仅在 chunk 落盘时增长（mcap 默认 chunk 缓冲批量 IO），size 分片触发点
-                // 落在 chunk 落盘边界；0 值任一=该条件禁用；暂停期消息已在此之上 continue，
-                // 不计入分片时长
-                if (!ctx_.splitBroken->load(std::memory_order_relaxed))
-                {
-                    bool shouldSplit = false;
-                    if (ctx_.maxBagSize > 0)
-                    {
-                        mcap::IWritable* sink = ctx_.writer->dataSink();
-                        shouldSplit = sink != nullptr && sink->size() >= ctx_.maxBagSize;
-                    }
-                    if (!shouldSplit && ctx_.maxBagDurationSec > 0 && *ctx_.shardStartNs != 0)
-                    {
-                        // 严格大于（参考实现同款）：距本分片首条消息超过上限即滚动
-                        shouldSplit = nowNs - *ctx_.shardStartNs >
-                                      kNsPerSecond * ctx_.maxBagDurationSec;
-                    }
-                    // close→open 后 channelId 跨分片稳定（mcap write 首见 channelId 自动
-                    // 补写 Channel 记录），ctx 零改动
-                    if (shouldSplit && tryRollShard())
-                    {
-                        *ctx_.shardStartNs = 0;
-                    }
-                }
-                if (ctx_.writer->write(msg).ok())
-                {
-                    ++count_;
-                    bytes_ += msg.dataSize;
-                    if (*ctx_.shardStartNs == 0)
-                    {
-                        *ctx_.shardStartNs = nowNs;  // 分片首条：确定本分片时长起点
-                    }
-                }
+                shardCheckAndWrite(msg, nowNs);
             }
-            // 首末时间戳 CAS 维护（metadata 起始时间与时长）
-            uint64_t expected = ctx_.firstNs->load(std::memory_order_relaxed);
-            while ((expected == 0 || nowNs < expected) &&
-                   !ctx_.firstNs->compare_exchange_weak(expected, nowNs, std::memory_order_relaxed))
-            {
-            }
-            expected = ctx_.lastNs->load(std::memory_order_relaxed);
-            while (nowNs > expected &&
-                   !ctx_.lastNs->compare_exchange_weak(expected, nowNs, std::memory_order_relaxed))
-            {
-            }
+            recordRecvTs(nowNs);
         }
     }
 
@@ -315,10 +453,68 @@ public:
     }
 
 private:
+    // 分片检查（参考实现同款写前检查点，在写本条之前）+ 落盘 + 统计。仅限持有
+    // payloadMtx 调用：直写路径在回调线程，双缓冲路径在消费线程（两路各自串行）。
+    void shardCheckAndWrite(const mcap::Message& msg, mcap::Timestamp nowNs)
+    {
+        // size 与时长双条件先到先分（任一满足即滚动）——size 条件读上一条写后的落盘量
+        // （写前/写后逐条等价，达上限本条落新分片），时长条件用本条接收时间戳判断
+        // （超时本条落新分片）；新分片起始由其首条消息时间戳确定（0=尚无首条不判定）。
+        // size 仅在 chunk 落盘时增长（mcap 默认 chunk 缓冲批量 IO），size 分片触发点
+        // 落在 chunk 落盘边界；0 值任一=该条件禁用；暂停期消息不入写路径不计入分片时长
+        if (!ctx_.splitBroken->load(std::memory_order_relaxed))
+        {
+            bool shouldSplit = false;
+            if (ctx_.maxBagSize > 0)
+            {
+                mcap::IWritable* sink = ctx_.writer->dataSink();
+                shouldSplit = sink != nullptr && sink->size() >= ctx_.maxBagSize;
+            }
+            if (!shouldSplit && ctx_.maxBagDurationSec > 0 && *ctx_.shardStartNs != 0)
+            {
+                // 严格大于（参考实现同款）：距本分片首条消息超过上限即滚动
+                shouldSplit = nowNs - *ctx_.shardStartNs >
+                              kNsPerSecond * ctx_.maxBagDurationSec;
+            }
+            // close→open 后 channelId 跨分片稳定（mcap write 首见 channelId 自动
+            // 补写 Channel 记录），ctx 零改动
+            if (shouldSplit && tryRollShard())
+            {
+                *ctx_.shardStartNs = 0;
+            }
+        }
+        if (ctx_.writer->write(msg).ok())
+        {
+            ++count_;
+            bytes_ += msg.dataSize;
+            if (*ctx_.shardStartNs == 0)
+            {
+                *ctx_.shardStartNs = nowNs;  // 分片首条：确定本分片时长起点
+            }
+        }
+    }
+
+    // 首末时间戳 CAS 维护（metadata 起始时间与时长）；双缓冲模式在 push 成功后调用
+    // （丢弃消息不维护），直写模式无条件调用（对齐现状）
+    void recordRecvTs(mcap::Timestamp nowNs)
+    {
+        uint64_t expected = ctx_.firstNs->load(std::memory_order_relaxed);
+        while ((expected == 0 || nowNs < expected) &&
+               !ctx_.firstNs->compare_exchange_weak(expected, nowNs, std::memory_order_relaxed))
+        {
+        }
+        expected = ctx_.lastNs->load(std::memory_order_relaxed);
+        while (nowNs > expected &&
+               !ctx_.lastNs->compare_exchange_weak(expected, nowNs, std::memory_order_relaxed))
+        {
+        }
+    }
+
     void* data_;          // create_data() 创建的 Blob 接收缓冲（BagSub 持有所有权）
     McapWriteCtx ctx_;
-    uint64_t count_ = 0;  // 录制条数（payloadMtx_ 锁内累加，收尾时 reader 已删可直读）
-    uint64_t bytes_ = 0;  // 录制字节数
+    uint64_t count_ = 0;  // 录制条数（持 payloadMtx 累加：直写=回调线程/双缓冲=消费线程，
+                          // 收尾 reader 已删且消费线程已 join，可直读）
+    uint64_t bytes_ = 0;  // 录制字节数（同步口径同 count_）
     uint32_t sequence_ = 0;  // per-topic 递增序号
 
     // 滚动新分片：close 旧文件（补写 summary，内部含残留 chunk flush）→ open bag_<N+1>.mcap。
@@ -474,7 +670,8 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         uint32_t intervalMs,
         const std::string& outputDir,
         uint64_t maxBagSize,
-        uint64_t maxBagDurationSec)
+        uint64_t maxBagDurationSec,
+        uint64_t maxCacheSize)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -739,9 +936,18 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     std::atomic<bool> splitBroken{false};
     uint64_t shardStartNs = 0;  // 当前分片首条消息时间戳（0=尚无首条；新分片由其首条重新确定）
 
+    // 写缓存双缓冲（maxCacheSize>0 启用）：回调深拷贝入队、独立消费线程逐条落盘；
+    // 空 = 同步直写（回调线程逐条写盘）
+    std::unique_ptr<BagMessageCache> cache;
+    if (maxCacheSize > 0)
+    {
+        cache = std::make_unique<BagMessageCache>(maxCacheSize);
+    }
+
     // ---- ③逐主题建订阅（类型注册按类型名共享；失败回滚已建订阅与 writer）
     std::map<std::string, TypeSupport> types;   // typeName → 已注册透传类型（同名主题共享）
     std::map<std::string, mcap::ChannelId> channels;  // topic → mcap channel
+    std::map<mcap::ChannelId, BagSubListener*> byChannel;  // channel → listener（消费线程按 channelId 定位写盘入口）
     std::mutex payloadMtx;
     std::atomic<uint64_t> firstNs{0};
     std::atomic<uint64_t> lastNs{0};
@@ -829,6 +1035,7 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         ctx.shardStartNs = &shardStartNs;
         ctx.maxBagSize = maxBagSize;
         ctx.maxBagDurationSec = maxBagDurationSec;
+        ctx.cache = cache.get();
         // 首见主题注册 mcap Channel：schema_id=0 无 schema 通道，encoding 记 "cdr"
         // （原始 CDR 字节透传落盘的直接落点）
         auto channelIt = channels.find(topic);
@@ -861,9 +1068,41 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
             return fail("create datareader for [" + topic + "] failed");
         }
         subs_[topic] = std::move(sub);
+        byChannel[ctx.channelId] = subs_[topic].listener.get();
         // 逐主题启动回执（裸 cout 对齐 FastDDSDebugNode 的 subscribed 提示惯例）：CLI 启动行
         // 只显示清单项数，通配展开后的实际录制清单由此逐条可见
         std::cout << "recording topic=" << topic << " type=" << typeName << std::endl;
+    }
+
+    // ---- ③.5 双缓冲消费线程（maxCacheSize>0 时启动）：wait→swap→锁内逐条落盘→清空
+    // 贪婪轮转；停止序列 beginFlush 后最后一轮排空残余退出（先删 reader 保证此后无新消息）
+    std::thread consumerThread;
+    if (cache != nullptr)
+    {
+        consumerThread = std::thread([&cache, &payloadMtx, &byChannel]()
+        {
+            while (true)
+            {
+                cache->waitAndSwap();
+                if (!cache->consumerBuffer().empty())
+                {
+                    std::lock_guard<std::mutex> lock(payloadMtx);
+                    for (const auto& cached : cache->consumerBuffer())
+                    {
+                        const auto it = byChannel.find(cached.channelId);
+                        if (it != byChannel.end())
+                        {
+                            it->second->shardCheckAndWrite(cached.toMessage(), cached.logTime);
+                        }
+                    }
+                }
+                cache->clearConsumerBuffer();
+                if (cache->flushing())
+                {
+                    break;
+                }
+            }
+        });
     }
 
     // ---- ④录制循环：每 100ms 轮询停止标志（SIGINT 经 yomk::bagRecordStop 置位，
@@ -873,11 +1112,20 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         std::this_thread::sleep_for(std::chrono::milliseconds(kRecordPollMs));
     }
 
-    // ---- ⑤停止序列：先删全部 reader 杜绝并发回调 → close 补写 summary 索引 → metadata → 统计
+    // ---- ⑤停止序列：先删全部 reader 杜绝并发回调 → [双缓冲模式：排空写缓存] →
+    //      close 补写 summary 索引 → metadata → 统计
     for (auto& kv : subs_)
     {
         subscriber_->delete_datareader(kv.second.reader);
         kv.second.reader = nullptr;
+    }
+    if (cache != nullptr)
+    {
+        // 排空写缓存（reader 已删保证此后无新消息）：置排空态唤醒消费线程，残余全部
+        // 落盘后线程退出；随后一次性打印丢条统计（参考实现 log_dropped 同款收尾告警）
+        cache->beginFlush();
+        consumerThread.join();
+        logCacheDropped(*cache, channels);
     }
     writer.close();  // 收尾写 summary（三层索引 + 统计）；close() 无返回值，索引异常经后续读回路径暴露
 

@@ -17,14 +17,16 @@
 
 // bag 录制节点：加入域后经 DDS 发现机制校验待录制主题（既无发布者也无订阅者视为输入有误
 // 整体报错），通过校验的主题以透传 TopicDataType（不解析数据，原始 CDR 字节含 encapsulation
-// header 原样取出）建立订阅，同步直写 mcap 文件（schema_id=0 无 schema 通道，encoding="cdr"，
+// header 原样取出）建立订阅，落盘 mcap 文件（schema_id=0 无 schema 通道，encoding="cdr"，
 // 存储层 thirdparty/mcap v2.1.3，实现仅在本节点 .cpp 单译元编译）；Ctrl+C 停止标志由
 // YomkRpcBagService 提供（yomk::g_bagRecordStop），收尾删除全部 reader 后关闭 writer 补写
 // summary 并生成 metadata.json（顶层平铺元信息 + _format 可读时间伴生键）。
 // 线程模型：发现回调仅缓存发现信息（seenMtx_ 叶子锁，锁序倒置防护同 FastDDSDebugNode）；
-// 数据回调在 DDS 接收线程逐条写盘（payloadMtx_ 串行多 reader 并发写同一 McapWriter）；
-// 公开方法以 mtx_ 串行化；record 为长驻阻塞调用（调用线程阻塞至录制收尾完成），成功返回后
-// 节点定格（再次 record 报错，须重建节点）。
+// 数据回调两路：maxCacheSize=0 同步直写（DDS 接收线程逐条写盘，payloadMtx_ 串行多 reader
+// 并发写同一 McapWriter）；>0 写缓存双缓冲（回调深拷贝入队后即返回，缓存满丢弃新消息并
+// 按主题计数、独立消费线程逐条写盘——仅把写盘 IO 挪出接收线程，不改变消息内容与时间戳
+// 口径；停止先排空缓存再关 writer）。公开方法以 mtx_ 串行化；record 为长驻阻塞调用（调用
+// 线程阻塞至录制收尾完成），成功返回后节点定格（再次 record 报错，须重建节点）。
 class FastDDSBagNode
 {
     class BagParticipantListener;  // 参与者监听器：writer/reader 发现回调 → onWriterDiscovered/onReaderDiscovered
@@ -79,7 +81,8 @@ public:
     //   + mcap writer（bag_0.mcap）；maxBagSize > 0 时单分片写满即滚动 bag_N.mcap 分片录制
     //   （0=不分片；下限 1024 字节，过小输入有误报错）；maxBagDurationSec > 0 时单分片
     //   时长达限即滚动 bag_N.mcap（0=不分片，无下限校验；与 maxBagSize 同用先到先分；
-    //   暂停期消息不计入分片时长）。
+    //   暂停期消息不计入分片时长）；maxCacheSize > 0 时写缓存双缓冲（回调拷贝入队、独立
+    //   消费线程写盘、缓存满丢弃新消息并按主题计数、停止先排空缓存再关闭；0=每条直写）。
     // ③逐主题注册透传类型并建立订阅（reader QoS 的 Reliability/Durability 跟随远端 writer
     //   offered 值——requested ≤ offered 恒成立；仅有订阅者的主题无 offered 可跟随，用默认
     //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
@@ -99,7 +102,8 @@ public:
             uint32_t intervalMs = kDefaultIntervalMs,
             const std::string& outputDir = "",
             uint64_t maxBagSize = 0,
-            uint64_t maxBagDurationSec = 0);
+            uint64_t maxBagDurationSec = 0,
+            uint64_t maxCacheSize = 0);
     // 最近一次成功录制的 bag 目录名（当前路径相对名，如 bag_2026-01-01_12-00-00_000）；未录制过为空。
     const std::string& bagDir() const
     {
