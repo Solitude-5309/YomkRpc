@@ -103,6 +103,66 @@ std::string formatEpochNs(uint64_t epochNs)
     return out.str();
 }
 
+// ---- bag info 输出格式化（bagInfoText 用，对齐参考实现 ros2 bag info 输出形态）----
+constexpr int kNsDigits = 9;             // 时间小数定宽位数（纳秒）
+constexpr double kBytesPerUnit = 1024.0; // 人类可读大小换算进制
+constexpr int kSizeUnitCount = 5;        // B/KiB/MiB/GiB/TiB 单位数（索引上限 4）
+constexpr int kInfoLabelWidth = 19;      // info 标签列宽（"Topic information: " 宽度）
+
+// 字节数 → 人类可读大小：1024 进制逐级换算，B 零小数、其余 1 位小数
+std::string formatBagFileSize(uint64_t bytes)
+{
+    double size = static_cast<double>(bytes);
+    static const std::array<const char*, kSizeUnitCount> kSizeUnits = {"B", "KiB", "MiB", "GiB", "TiB"};
+    int index = 0;
+    while (size >= kBytesPerUnit && index < kSizeUnitCount - 1)
+    {
+        size /= kBytesPerUnit;
+        ++index;
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(index == 0 ? 0 : 1) << size << " "
+        << kSizeUnits.at(static_cast<std::size_t>(index));
+    return out.str();
+}
+
+// epoch 纳秒 → "Sep 30 2026 19:06:10.123456789 (1789652770.123456789)"（本地时区；
+// 人类可读段 %b %e %Y %H:%M:%S + 9 位纳秒，括号内 epoch 秒同小数位）
+std::string formatBagTimePoint(uint64_t epochNs)
+{
+    const uint64_t secs = epochNs / kNsPerSecond;
+    const uint64_t subNs = epochNs % kNsPerSecond;
+    const std::time_t timeVal = static_cast<std::time_t>(secs);
+    std::tm localTime{};
+    localtime_r(&timeVal, &localTime);
+    std::array<char, kTimeBufBytes> timeBuf{};
+    std::strftime(timeBuf.data(), timeBuf.size(), "%b %e %Y %H:%M:%S", &localTime);
+    std::ostringstream out;
+    out << timeBuf.data() << "." << std::setw(kNsDigits) << std::setfill('0') << subNs
+        << " (" << secs << "." << std::setw(kNsDigits) << std::setfill('0') << subNs << ")";
+    return out.str();
+}
+
+// 纳秒时长 → "12.000000000s"（秒 + 9 位纳秒小数）
+std::string formatBagDurationSec(uint64_t durationNs)
+{
+    std::ostringstream out;
+    out << durationNs / kNsPerSecond << "." << std::setw(kNsDigits) << std::setfill('0')
+        << durationNs % kNsPerSecond << "s";
+    return out.str();
+}
+
+// info 行组装：标签补齐 19 列后接内容（多主题/多分片续行由调用方再前缀同宽空格）
+std::string bagInfoLabeledLine(const std::string& label, const std::string& content)
+{
+    std::string line = label;
+    if (line.size() < static_cast<size_t>(kInfoLabelWidth))
+    {
+        line.append(static_cast<size_t>(kInfoLabelWidth) - line.size(), ' ');
+    }
+    return line + content;
+}
+
 // 通配模式匹配：'*' 拆前缀/后缀夹逼（* 匹配任意主题名片段，不与首尾共享字符，对齐
 // fnmatch 语义）；pattern 已由输入校验保证恰好含一个 '*'——"pre*" 前缀、"*suf" 后缀、
 // "pre*suf" 中间，"*"（前后均空）即匹配全部主题。
@@ -1188,5 +1248,114 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     subs_.clear();
 
     recorded_ = true;
+    return true;
+}
+
+// 读 bag 目录 metadata.json 组装 info 文本行（实现见头注释）。纯文件读：不触任何 DDS 实体
+// 与节点状态，静态调用；JSON 字段缺失/类型不符经 nlohmann 异常统一转报错回填。
+bool FastDDSBagNode::bagInfoText(const std::string& bagDir, std::vector<std::string>& outLines,
+    std::string* error)
+{
+    outLines.clear();
+    auto fail = [&error](const std::string& reason) {
+        if (error != nullptr)
+        {
+            *error = reason;
+        }
+        return false;
+    };
+
+    const std::filesystem::path dirPath(bagDir);
+    std::error_code ec;
+    if (!std::filesystem::exists(dirPath, ec))
+    {
+        return fail("bag path [" + bagDir + "] does not exist");
+    }
+    std::ifstream metaFile(dirPath / "metadata.json");
+    if (!metaFile)
+    {
+        return fail("could not find metadata.json in bag directory [" + bagDir + "]");
+    }
+    // 目录递归总大小（对齐参考实现语义：bag 目录全部文件字节数累加，含 metadata.json 自身）
+    uint64_t dirBytes = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dirPath, ec))
+    {
+        if (entry.is_regular_file(ec))
+        {
+            const std::uintmax_t fileSize = entry.file_size(ec);
+            if (!ec)
+            {
+                dirBytes += static_cast<uint64_t>(fileSize);
+            }
+        }
+    }
+
+    nlohmann::json info;
+    try
+    {
+        metaFile >> info;
+        const uint64_t startNs =
+            info.at("starting_time").at("nanoseconds_since_epoch").get<uint64_t>();
+        const uint64_t durationNs = info.at("duration").at("nanoseconds").get<uint64_t>();
+        const uint64_t messages = info.at("message_count").get<uint64_t>();
+        const std::string storageId = info.at("storage_identifier").get<std::string>();
+        const auto files = info.at("relative_file_paths").get<std::vector<std::string>>();
+        const auto topics = info.at("topics_with_message_count");
+
+        outLines.emplace_back("");  // 首行空行（对齐参考实现输出形态）
+        // Files：首文件跟标签，多分片续行缩进 19 空格
+        if (files.empty())
+        {
+            outLines.emplace_back(bagInfoLabeledLine("Files:", ""));
+        }
+        else
+        {
+            outLines.emplace_back(bagInfoLabeledLine("Files:", files.front()));
+            for (std::size_t i = 1; i < files.size(); ++i)
+            {
+                outLines.emplace_back(
+                    std::string(static_cast<size_t>(kInfoLabelWidth), ' ') + files[i]);
+            }
+        }
+        outLines.emplace_back(bagInfoLabeledLine("Bag size:", formatBagFileSize(dirBytes)));
+        outLines.emplace_back(bagInfoLabeledLine("Storage id:", storageId));
+        outLines.emplace_back(bagInfoLabeledLine("Duration:", formatBagDurationSec(durationNs)));
+        outLines.emplace_back(bagInfoLabeledLine("Start:", formatBagTimePoint(startNs)));
+        outLines.emplace_back(
+            bagInfoLabeledLine("End:", formatBagTimePoint(startNs + durationNs)));
+        outLines.emplace_back(bagInfoLabeledLine("Messages:", std::to_string(messages)));
+        // Topic information：每主题一行（首行跟标签、续行缩进 19 空格）；元信息不含
+        // serialization_format 字段——录制链路单格式 CDR，写死（中性技术标识同
+        // storage_identifier: mcap，不改元信息结构保旧 bag 兼容）
+        bool firstTopic = true;
+        for (const auto& topic : topics)
+        {
+            const auto& meta = topic.at("topic_metadata");
+            std::ostringstream line;
+            line << "Topic: " << meta.at("name").get<std::string>()
+                 << " | Type: " << meta.at("type").get<std::string>()
+                 << " | Count: " << topic.at("message_count").get<uint64_t>()
+                 << " | Serialization Format: cdr";
+            if (firstTopic)
+            {
+                outLines.emplace_back(bagInfoLabeledLine("Topic information:", line.str()));
+                firstTopic = false;
+            }
+            else
+            {
+                outLines.emplace_back(
+                    std::string(static_cast<size_t>(kInfoLabelWidth), ' ') + line.str());
+            }
+        }
+        if (firstTopic)
+        {
+            outLines.emplace_back(bagInfoLabeledLine("Topic information:", ""));
+        }
+    }
+    catch (const nlohmann::json::exception& e)
+    {
+        outLines.clear();
+        return fail(std::string("parse metadata.json failed: ") + e.what());
+    }
     return true;
 }

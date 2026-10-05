@@ -25,6 +25,7 @@ private:
     YomkResponse createNode(YomkPkgPtr pkg);
     YomkResponse bagRecord(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
+    YomkResponse bagInfo(YomkPkgPtr pkg);
 
 private:
     // 单 bag 节点：一个进程至多一个实例，重复 create 须先 delete；服务析构时自动销毁节点
@@ -83,8 +84,15 @@ struct DDSBagRecord
     uint64_t maxCacheSize = 0;        // 写缓存双缓冲字节数；0=直写（尾部缺省字段，CLI 默认传 100MiB）
 };
 
+// bag_info 请求负载。
+struct DDSBagInfo
+{
+    std::string bagDir;  // bag 目录名/路径（相对/绝对均可，须含 metadata.json）
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
 YomkMsg(DDSBagNode, DDSBagNode, msg)
 YomkMsg(DDSBagRecord, DDSBagRecord, msg)
+YomkMsg(DDSBagInfo, DDSBagInfo, msg)

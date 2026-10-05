@@ -247,5 +247,13 @@
 #define YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize, maxBagDurationSec, maxCacheSize) \
     YOMK_REQUEST("/YomkRpcBagService/bag_record", YomkMkPtr(DDSBagRecord, DDSBagRecord{(topics), (outputDir), (maxBagSize), (maxBagDurationSec), (maxCacheSize)}))
 
+// 查看 bag 元信息：读 bag 目录 metadata.json 与目录递归总大小，输出对齐参考实现 ros2 bag
+// info 形态的元信息文本（首行空行；Files/Bag size/Storage id/Duration/Start/End/Messages/
+// Topic information 各一行，多主题/多分片续行缩进对齐；Serialization Format 固定 cdr）。
+// bagDir 相对/绝对路径均可；纯文件读不经 bag 节点（无须 create_node）。成功返回 StringArray
+// 包（每项一行，首项为空行）；路径不存在/无 metadata.json/解析失败返回错误。返回 YomkResponse。
+#define YOMKRPC_BAG_INFO(bagDir) \
+    YOMK_REQUEST("/YomkRpcBagService/bag_info", YomkMkPtr(DDSBagInfo, DDSBagInfo{(bagDir)}))
+
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

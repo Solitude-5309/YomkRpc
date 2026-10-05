@@ -893,7 +893,7 @@ hello_world: 12 条 / 288 字节
 }
 ```
 
-  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。
+  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）。
 
 失败报错退出（录制阶段失败 exit=2），错误文本按卡点归类（校验类逐项列出）：
 
@@ -966,6 +966,74 @@ int main()
 }
 ```
 
+### 6.8 查看 bag 元信息（yomkrpc bag info）
+
+`yomkrpc bag info <bag目录>` 读取 bag 目录下 `metadata.json` 与目录递归总大小，输出与 `ros2 bag info`（humble）逐行一致的元信息文本（纯本地文件读——不经 bag 节点、不创建任何 DDS 实体、不依赖域内状态，未建 bag 节点亦可调用；输出为多行文本逐行直出 stdout）。
+
+```bash
+yomkrpc bag info bag_2026-10-02_19-37-33_726   # 查看 6.7 录制产物
+```
+
+输出示例（首行为空行，对齐参考实现输出形态；数据对应 6.7 的 metadata.json 样例）：
+
+```
+
+Files:             bag_0.mcap
+Bag size:          2.6 KiB
+Storage id:        mcap
+Duration:          4.012345678s
+Start:             Oct  2 2026 19:37:33.726412000 (1791953853.726412000)
+End:               Oct  2 2026 19:37:37.738757678 (1791953857.738757678)
+Messages:          12
+Topic information: Topic: hello_world | Type: YomkRpc::MString | Count: 12 | Serialization Format: cdr
+```
+
+逐行对照 `metadata.json`（字段见 6.7 落盘产物段）：
+
+| 输出行 | 来源 | 说明 |
+|---|---|---|
+| `Files:` | `relative_file_paths[]` | 数据分片文件名；多分片时首文件跟标签、续行缩进 19 空格对齐 |
+| `Bag size:` | 目录递归总大小 | bag 目录全部文件字节数累加（含 metadata.json 自身）；1024 进制换算 B/KiB/MiB/GiB/TiB——B 零小数、其余 1 位小数 |
+| `Storage id:` | `storage_identifier` | 存储标识（mcap） |
+| `Duration:` | `duration.nanoseconds` | 录制时长，`秒.9位纳秒s` |
+| `Start:` / `End:` | `starting_time.nanoseconds_since_epoch` / Start+duration | 本地时区人类可读时刻 + 括号内 epoch 秒（小数各 9 位） |
+| `Messages:` | `message_count` | 全局累计消息条数（跨分片） |
+| `Topic information:` | `topics_with_message_count[]` | 每主题一行 `Topic: <名> \| Type: <类型> \| Count: <条数> \| Serialization Format: cdr`；首主题跟标签、**续行缩进 19 空格对齐** |
+
+- `Serialization Format` 固定输出 `cdr`：metadata.json 不含 serialization_format 字段，录制链路单格式 CDR（透传原始 CDR 字节），该值与 `storage_identifier: mcap` 同为中性技术标识，不改元信息结构保旧 bag 兼容
+- 空主题清单（一条都未录到）防御输出：`Topic information:` 标签后为空内容
+- 多主题输出示例（续行 19 空格缩进对齐）：
+
+```
+Topic information: Topic: hello_t1 | Type: YomkRpc::MString | Count: 5 | Serialization Format: cdr
+                   Topic: hello_t2 | Type: YomkRpc::MString | Count: 8 | Serialization Format: cdr
+```
+
+失败报错退出（exit 1）：
+
+| 错误文本 | 卡点 |
+|---|---|
+| `bag path [x] does not exist` | 路径不存在 |
+| `could not find metadata.json in bag directory [x]` | 目录存在但无 metadata.json（非 bag 目录） |
+| `parse metadata.json failed: ...` | metadata.json 非法 JSON |
+
+工具经 `YomkRpcBagService` bag 服务 `/bag_info` 端点实现，等价的用户代码（`YOMKRPC_BAG_INFO` 宏定义于 `YomkRpcAPI.h`）：
+
+```cpp
+YOMK_INIT();
+YOMK_NEW_SERVICE(YomkRpcBagService);  // 进程内自托管，无需预建 bag 节点
+auto resp = YOMKRPC_BAG_INFO("bag_2026-10-02_19-37-33_726");
+if (resp.m_status == YomkResponse::eOk)
+{
+    // StringArray 逐行文本（首项为空行），逐行打印即对齐 CLI 输出
+    YomkUnPackPkg(resp.m_data, StringArray, lines);
+    if (lines != nullptr)
+    {
+        for (const auto &line : lines->d) { std::cout << line << "\n"; }
+    }
+}
+```
+
 ## 7 测试
 
 ### 7.1 编译测试
@@ -977,7 +1045,7 @@ cmake -S test -B test/build -DCMAKE_PREFIX_PATH="${YOMK_PREFIX_PATH:-/opt/yomk}"
 cmake --build test/build -j
 ```
 
-构建产物为 16 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`、`test/build/FastDDSDebugNode/`、`test/build/YomkRpcDebugService/`、`test/build/YomkRpcBagService/`、`test/build/FastDDSBagNode/`）：
+构建产物为 17 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`、`test/build/FastDDSDebugNode/`、`test/build/YomkRpcDebugService/`、`test/build/YomkRpcBagService/`、`test/build/FastDDSBagNode/`）：
 
 | 模块 | 测试目标 |
 |---|---|
@@ -986,7 +1054,7 @@ cmake --build test/build -j
 | FastDDSDebugNode (1) | TestFastDDSDebugNode（节点层守卫 + 发现→动态类型→订阅→JSON 输出端到端） |
 | YomkRpcDebugService (2) | TestYomkRpcDebugServiceContract（DDS-free 契约）、TestYomkRpcDebugServiceLifecycle（真实 DDS 生命周期） |
 | YomkRpcBagService (2) | TestYomkRpcBagServiceContract（DDS-free 契约）、TestYomkRpcBagServiceLifecycle（真实 DDS 录制生命周期） |
-| FastDDSBagNode (2) | TestFastDDSBagNodeValidation（启动校验与输入校验分支，含通配展开判定）、TestFastDDSBagNodeRecord（发布→录制→Ctrl+C 收尾→落盘断言端到端，含通配模式录制） |
+| FastDDSBagNode (3) | TestFastDDSBagNodeValidation（启动校验与输入校验分支，含通配展开判定）、TestFastDDSBagNodeRecord（发布→录制→Ctrl+C 收尾→落盘断言端到端，含通配模式录制）、TestFastDDSBagNodeInfo（bag info 静态函数直测：输出全行断言 + 失败路径契约，DDS-free） |
 
 可选构建开关（CMake cache 变量）：
 

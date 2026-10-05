@@ -11,7 +11,11 @@
  *      含主题名，校验失败不落盘）→ 完整录制（远端 MString 发布者 + 停止线程模拟 Ctrl+C →
  *      eOk + StringArray 首行 bag 目录 + 统计行）→ 定格后重复 record 拒绝 → 删除 →
  *      重复删除拒绝 → 删除后 record 拒绝 → 重建 → 重复创建拒绝 → delete 收尾；
- *   L2 停止标志契约：录制经 yomk::bagRecordStop 置位收尾（模拟 SIGINT 处理函数行为）。
+ *   L2 停止标志契约：录制经 yomk::bagRecordStop 置位收尾（模拟 SIGINT 处理函数行为）；
+ *   L0 解耦契约：/bag_info 纯文件读与节点生命周期无关（未建/已建节点均可调，路径不存在
+ *      报文件层错误而非 bag node not created）。
+ *   L0 解耦契约：/bag_info 纯文件读与节点生命周期无关（未建/已建节点均可调，路径不存在
+ *      报文件层错误而非 bag node not created）。
  *
  * 关键不变式：每个 eOk 创建的 bag 节点必须在 main 返回前经 /delete_node 显式删除，以规避
  *   YOMK 框架 atexit 服务析构晚于 FastDDS DomainParticipantFactory 单例销毁导致的静态析构
@@ -58,10 +62,21 @@ int main()
     auto *svc = new YomkRpcBagService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcBagService 注册成功（所有权移交框架，init() 已内部调用）");
 
+    // ---- L0：/bag_info 与节点生命周期解耦（纯文件读，节点状态无关） ----
+    auto infoBefore = svc->invoke("/bag_info", YomkMkPtr(DDSBagInfo, DDSBagInfo{"info_svc_l0_miss"}));
+    CHECK(infoBefore.m_status == YomkResponse::eNo &&
+              infoBefore.m_msg.find("bag path [info_svc_l0_miss] does not exist") != std::string::npos &&
+              infoBefore.m_msg.find("bag node not created") == std::string::npos,
+          "未建节点时 /bag_info 可达：报文件层错误（非 bag node not created）");
+
     // ---- L1：创建 / 重复创建拒绝 ----
     CHECK(svc->invoke("/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{TEST_DOMAIN})).m_status ==
               YomkResponse::eOk,
           "创建 bag 节点(domain 200) → eOk（真实创建 participant）");
+    auto infoAfter = svc->invoke("/bag_info", YomkMkPtr(DDSBagInfo, DDSBagInfo{"info_svc_l0_miss"}));
+    CHECK(infoAfter.m_status == YomkResponse::eNo &&
+              infoAfter.m_msg.find("does not exist") != std::string::npos,
+          "已建节点时 /bag_info 同样可达（行为与节点状态无关）");
     auto dupCreate = svc->invoke("/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{TEST_DOMAIN}));
     CHECK(dupCreate.m_status == YomkResponse::eNo &&
               dupCreate.m_msg.find("bag node already exists") != std::string::npos,

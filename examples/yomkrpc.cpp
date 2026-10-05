@@ -21,6 +21,7 @@
  *           [-d <sec> | --max-bag-duration <sec>] [-c <bytes> | --max-cache-size <bytes>]
  *           [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]
  *           交互键（tty 下生效）：SPACE 从暂停态开始录制，p 暂停，r 继续，Ctrl+C 停止
+ *   yomkrpc bag info <bag-path>
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -41,6 +42,7 @@
  *   yomkrpc bag record hello_world
  *   yomkrpc bag record rt/chatter rt/tf
  *   yomkrpc bag record 'hello_*' '*_world'   # 通配模式（单个 *，引号防 shell 展开）
+ *   yomkrpc bag info bag_2026-01-01_12-00-00_000
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -168,6 +170,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag record [-o <dir> | --output <dir>] [-b <bytes> | --max-bag-size <bytes>]\n"
           "          [-d <sec> | --max-bag-duration <sec>] [-c <bytes> | --max-cache-size <bytes>]\n"
           "          [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]\n"
+          "  yomkrpc bag info <bag-path>\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -247,6 +250,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag record hello_world\n"
           "  yomkrpc bag record rt/chatter rt/tf\n"
           "  yomkrpc bag record 'hello_*' '*_world'   # 通配模式（引号防 shell 展开）\n"
+          "  yomkrpc bag info bag_2026-01-01_12-00-00_000\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -506,6 +510,34 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     {
         YOMK_ERROR_TAG("yomkrpc", "delete bag node failed: ", resp.m_msg);
         return 1;
+    }
+    return 0;
+}
+
+// bag info 子命令：读 bag 目录下 metadata.json + 目录递归总大小，输出对齐 ros2 bag info
+// 的元信息文本（首行空行、Files/Bag size/Storage id/Duration/Start/End/Messages 与每主题
+// 一行 Topic information，续行 19 空格缩进对齐）；纯查询不建 bag 节点，服务端返回多行
+// 文本逐行打印，成功返回 0，失败（路径不存在/无 metadata/JSON 损坏）打印原因返回 1
+static int runBagInfo(const std::string &bagDir)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcBagService);
+
+    auto resp = YOMKRPC_BAG_INFO(bagDir);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "bag info failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 逐行输出（首项为 ros2 对齐的空行，自然保留）
+    YomkUnPackPkg(resp.m_data, StringArray, lines);
+    if (lines != nullptr)
+    {
+        for (const auto &line : lines->d)
+        {
+            std::cout << line << std::endl;
+        }
     }
     return 0;
 }
@@ -1687,7 +1719,11 @@ int main(int argc, char *argv[])
         return runRecord(domainId, topics, msgOutDir, startPaused, maxBagSize, maxBagDurationSec,
                 maxCacheSize);
     }
-    if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node"))
+    if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "info" && !pos[2].empty())
+    {
+        return runBagInfo(pos[2]);
+    }
+    if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node" || pos[0] == "bag"))
     {
         std::cerr << "yomkrpc: 未知子命令 \"" << pos[1] << "\"\n";
     }

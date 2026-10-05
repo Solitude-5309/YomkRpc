@@ -32,6 +32,7 @@ int YomkRpcBagService::init()
     YomkInstallFunc("/version", YomkRpcBagService::getVersion);
     YomkInstallFunc("/create_node", YomkRpcBagService::createNode);
     YomkInstallFunc("/bag_record", YomkRpcBagService::bagRecord);
+    YomkInstallFunc("/bag_info", YomkRpcBagService::bagInfo);
     YomkInstallFunc("/delete_node", YomkRpcBagService::deleteNode);
     return 0;
 }
@@ -128,6 +129,32 @@ YomkResponse YomkRpcBagService::bagRecord(YomkPkgPtr pkg)
     {
         lines.emplace_back(stat.topic + ": " + std::to_string(stat.count) + " 条 / " +
                            std::to_string(stat.bytes) + " 字节");
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
+}
+
+YomkResponse YomkRpcBagService::bagInfo(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSBagInfo, p);
+
+    // bagDir 空校验锁外前置（对齐 bagRecord 的纯输入校验先例：不触节点状态）
+    if (p->msg.bagDir.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcBagService::bagInfo", "no bag dir given");
+        return YomkResponse(YomkResponse::eNo, "no bag dir given");
+    }
+
+    // 纯文件读：bagInfoText 为静态函数不依赖 node_，不取 mtx_（无共享状态可保护）
+    std::vector<std::string> lines;
+    std::string error;
+    if (!FastDDSBagNode::bagInfoText(p->msg.bagDir, lines, &error))
+    {
+        if (error.empty())
+        {
+            error = "bag info failed";  // 兑底，避免空 m_msg
+        }
+        YOMK_ERROR_TAG("YomkRpcBagService::bagInfo", "bag info failed: ", error);
+        return YomkResponse(YomkResponse::eNo, error);
     }
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }

@@ -109,6 +109,13 @@ public:
     {
         return bagDir_;
     }
+    // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
+    // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
+    // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。outLines 每项一行
+    // （不含换行符，首项为空行）；失败返回 false 并经 error 出参回填原因（路径不存在/
+    // 无 metadata.json/解析失败）。bagDir 相对/绝对路径均可。
+    static bool bagInfoText(const std::string& bagDir, std::vector<std::string>& outLines,
+            std::string* error = nullptr);
 
 private:
     // 发现线程回调入口（BagParticipantListener 转发）：新见 writer/reader 追加进发现缓存。
