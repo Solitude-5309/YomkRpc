@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -161,6 +162,40 @@ std::string bagInfoLabeledLine(const std::string& label, const std::string& cont
         line.append(static_cast<size_t>(kInfoLabelWidth) - line.size(), ' ');
     }
     return line + content;
+}
+
+// ---- bag reindex 分片文件名收集（bagReindex 用）----
+// 文件名 → 分片编号：去掉 .mcap 后缀后尾部 '_' 之后须全为数字（"bag_0.mcap" → 0，
+// 前导零按十进制折算），对齐参考实现 <前缀>_<编号>.<扩展名> 命名约定；
+// 无 .mcap 后缀/无尾段/尾段含非数字返回 false（调用方跳过该条目）
+bool parseBagFileNumber(const std::string& fileName, uint64_t& outNumber)
+{
+    constexpr const char* kMcapSuffix = ".mcap";
+    constexpr std::size_t kMcapSuffixLen = 5;
+    if (fileName.size() <= kMcapSuffixLen ||
+        fileName.compare(fileName.size() - kMcapSuffixLen, kMcapSuffixLen, kMcapSuffix) != 0)
+    {
+        return false;
+    }
+    const std::string stem = fileName.substr(0, fileName.size() - kMcapSuffixLen);
+    const auto underscore = stem.rfind('_');
+    if (underscore == std::string::npos || underscore + 1 >= stem.size())
+    {
+        return false;
+    }
+    const std::string digits = stem.substr(underscore + 1);
+    uint64_t number = 0;
+    // from_chars 仅提供指针区间接口：尾指针经一次显式指针算术构造（NOLINT 豁免，同透传
+    // deserialize 的 payload.data + length 先例），后续比较复用尾指针不再算术
+    const char* const digitsEnd = digits.data() + digits.size(); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const auto [endPtr, errc] = std::from_chars(digits.data(), digitsEnd, number);
+    // 全数字才合法：endPtr 未达尾说明含非数字字符；errc 覆盖溢出
+    if (errc != std::errc() || endPtr != digitsEnd)
+    {
+        return false;
+    }
+    outNumber = number;
+    return true;
 }
 
 // 通配模式匹配：'*' 拆前缀/后缀夹逼（* 匹配任意主题名片段，不与首尾共享字符，对齐
@@ -1097,11 +1132,13 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         ctx.maxBagDurationSec = maxBagDurationSec;
         ctx.cache = cache.get();
         // 首见主题注册 mcap Channel：schema_id=0 无 schema 通道，encoding 记 "cdr"
-        // （原始 CDR 字节透传落盘的直接落点）
+        // （原始 CDR 字节透传落盘的直接落点）；metadata 记类型名——schemaless 无 schema
+        // 可承载，bag reindex 据此重建 metadata.json 的 topics type（分片滚动后 mcap
+        // write 首见 channelId 自动补写 Channel 记录时一并携带）
         auto channelIt = channels.find(topic);
         if (channelIt == channels.end())
         {
-            mcap::Channel channel(topic, "cdr", 0);
+            mcap::Channel channel(topic, "cdr", 0, mcap::KeyValueMap{{"type", typeName}});
             writer.addChannel(channel);
             channels[topic] = channel.id;
             ctx.channelId = channel.id;
@@ -1356,6 +1393,165 @@ bool FastDDSBagNode::bagInfoText(const std::string& bagDir, std::vector<std::str
     {
         outLines.clear();
         return fail(std::string("parse metadata.json failed: ") + e.what());
+    }
+    return true;
+}
+
+// 从 bag 目录内 mcap 分片重建 metadata.json（实现见头注释）。纯文件操作：不触任何 DDS
+// 实体与节点状态，静态调用；统计取自 mcap summary（Statistics 记录含 per-channel 条数
+// 与全局起止时间），无 summary/损坏时 readSummary 回退线性扫描重建（覆盖中断录制的 bag）。
+bool FastDDSBagNode::bagReindex(const std::string& bagDir, std::string* error)
+{
+    auto fail = [&error](const std::string& reason) {
+        if (error != nullptr)
+        {
+            *error = reason;
+        }
+        return false;
+    };
+
+    const std::filesystem::path dirPath(bagDir);
+    std::error_code ec;
+    if (!std::filesystem::exists(dirPath, ec))
+    {
+        return fail("bag path [" + bagDir + "] does not exist");
+    }
+    if (!std::filesystem::is_directory(dirPath, ec))
+    {
+        return fail("must specify a bag directory");
+    }
+
+    // 收集 <前缀>_<编号>.mcap 数据文件（其余条目跳过——限定存储格式，避免误开无关文件）；
+    // 目录无任何条目与有文件无匹配分列报错（对齐参考实现两分支）
+    std::vector<std::pair<uint64_t, std::string>> bagFiles;  // (编号, 文件名)
+    std::size_t entryCount = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dirPath, ec))
+    {
+        ++entryCount;
+        uint64_t fileNumber = 0;
+        if (entry.is_regular_file(ec) &&
+            parseBagFileNumber(entry.path().filename().string(), fileNumber))
+        {
+            bagFiles.emplace_back(fileNumber, entry.path().filename().string());
+        }
+    }
+    if (entryCount == 0)
+    {
+        return fail("empty directory");
+    }
+    if (bagFiles.empty())
+    {
+        return fail("no bag files found for reindexing");
+    }
+    // 编号升序（bag_10 排 bag_2 之后）：分片序列与录制侧滚动次序一致（非字典序）
+    std::sort(bagFiles.begin(), bagFiles.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // 逐分片读 mcap 统计：per-channel 条数经 channels() 映射主题名累加（std::map 迭代
+    // 升序即主题名升序，对齐参考实现输出序）；起止时间取全局 min/max，无消息分片不参与
+    std::map<std::string, uint64_t> topicCounts;
+    std::map<std::string, std::string> topicTypes;  // 主题名 → 类型名（来自 Channel.metadata）
+    uint64_t startNs = 0;
+    uint64_t endNs = 0;
+    bool hasMessage = false;
+    for (const auto& bagFile : bagFiles)
+    {
+        const std::string& fileName = bagFile.second;
+        mcap::McapReader reader;
+        const mcap::Status openStatus = reader.open((dirPath / fileName).string());
+        if (!openStatus.ok())
+        {
+            return fail("open " + fileName + " failed: " + openStatus.message);
+        }
+        const auto& stats = reader.statistics();
+        if (!stats.has_value())
+        {
+            // open 时的 summary 自动解析缺失/失败（中断录制等）：回退线性扫描重建统计
+            const mcap::Status scanStatus =
+                reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan);
+            if (!scanStatus.ok() || !reader.statistics().has_value())
+            {
+                return fail("read summary of " + fileName + " failed: " + scanStatus.message);
+            }
+        }
+        const auto& fileStats = reader.statistics().value();
+        const auto channels = reader.channels();
+        for (const auto& channelCount : fileStats.channelMessageCounts)
+        {
+            const auto channelIt = channels.find(channelCount.first);
+            if (channelIt == channels.end())
+            {
+                return fail("channel " + std::to_string(channelCount.first) + " not found in " +
+                            fileName);
+            }
+            const auto& topic = channelIt->second->topic;
+            topicCounts[topic] += channelCount.second;
+            // 类型名恢复：录制侧经 Channel.metadata 落盘（{"type", 类型名}）；旧格式 bag
+            // 无该元数据时不覆盖保持空串回退（同主题跨分片 channel 声明一致，覆盖等值）
+            const auto typeIt = channelIt->second->metadata.find("type");
+            if (typeIt != channelIt->second->metadata.end() && !typeIt->second.empty())
+            {
+                topicTypes[topic] = typeIt->second;
+            }
+        }
+        if (fileStats.messageCount > 0)
+        {
+            if (!hasMessage || fileStats.messageStartTime < startNs)
+            {
+                startNs = fileStats.messageStartTime;
+            }
+            if (fileStats.messageEndTime > endNs)
+            {
+                endNs = fileStats.messageEndTime;
+            }
+            hasMessage = true;
+        }
+        reader.close();
+    }
+
+    // 全局跨度（end - start）：与录制侧 metadata 写出口径一致（参考实现为逐分片时长
+    // 累加的近似——分片间隙不计入，不照抄）
+    const uint64_t durationNs = (hasMessage && endNs > startNs) ? endNs - startNs : 0;
+
+    // 组装与写侧同构的 metadata.json（无条件覆盖：reindex 语义即从数据文件重建元信息）；
+    // type 取 Channel.metadata 恢复，旧格式 bag（无该元数据）回退空串——文件里没有就不虚构
+    uint64_t totalMessages = 0;
+    nlohmann::json topicsWithCount = nlohmann::json::array();
+    for (const auto& topicCount : topicCounts)
+    {
+        totalMessages += topicCount.second;
+        std::string topicType;
+        if (const auto typeIt = topicTypes.find(topicCount.first); typeIt != topicTypes.end())
+        {
+            topicType = typeIt->second;
+        }
+        topicsWithCount.push_back(
+            {{"topic_metadata", {{"name", topicCount.first}, {"type", topicType}}},
+             {"message_count", topicCount.second}});
+    }
+    std::vector<std::string> filePaths;
+    filePaths.reserve(bagFiles.size());
+    for (const auto& bagFile : bagFiles)
+    {
+        filePaths.push_back(bagFile.second);
+    }
+    nlohmann::json info;
+    info["version"] = kBagMetadataVersion;
+    info["storage_identifier"] = "mcap";
+    info["relative_file_paths"] = filePaths;
+    info["starting_time"]["nanoseconds_since_epoch"] = startNs;
+    info["starting_time"]["nanoseconds_since_epoch_format"] = formatEpochNs(startNs);
+    info["duration"]["nanoseconds"] = durationNs;
+    info["duration"]["nanoseconds_format"] = formatDurationNs(durationNs);
+    info["message_count"] = totalMessages;
+    info["topics_with_message_count"] = topicsWithCount;
+    {
+        std::ofstream meta(dirPath / "metadata.json");
+        if (!meta)
+        {
+            return fail("write metadata.json failed");
+        }
+        meta << info.dump(4) << "\n";
     }
     return true;
 }

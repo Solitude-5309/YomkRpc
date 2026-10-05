@@ -30,3 +30,14 @@ add_test(NAME TestFastDDSBagNodeInfo COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_F
 set_tests_properties(TestFastDDSBagNodeInfo PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
+
+# bag reindex 用例：McapWriter 造真实分片临时目录直测静态函数 bagReindex（编号序收集/
+# 多分片合并/全字段断言/覆盖重建/无 summary 回退扫描 + 失败路径契约，DDS-free 无需域号），
+# 循 Info 先例；MCAP_IMPLEMENTATION 单译元在被测库内，测试仅声明头链接实现
+add_executable(TestFastDDSBagNodeReindex TestFastDDSBagNodeReindex.cpp)
+target_link_libraries(TestFastDDSBagNodeReindex PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestFastDDSBagNodeReindex COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestFastDDSBagNodeReindex>)
+set_tests_properties(TestFastDDSBagNodeReindex PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)

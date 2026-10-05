@@ -12,10 +12,8 @@
  *      eOk + StringArray 首行 bag 目录 + 统计行）→ 定格后重复 record 拒绝 → 删除 →
  *      重复删除拒绝 → 删除后 record 拒绝 → 重建 → 重复创建拒绝 → delete 收尾；
  *   L2 停止标志契约：录制经 yomk::bagRecordStop 置位收尾（模拟 SIGINT 处理函数行为）；
- *   L0 解耦契约：/bag_info 纯文件读与节点生命周期无关（未建/已建节点均可调，路径不存在
- *      报文件层错误而非 bag node not created）。
- *   L0 解耦契约：/bag_info 纯文件读与节点生命周期无关（未建/已建节点均可调，路径不存在
- *      报文件层错误而非 bag node not created）。
+ *   L0 解耦契约：/bag_info 纯文件读、/bag_reindex 纯文件操作与节点生命周期无关（未建/
+ *      已建节点均可调，路径不存在报文件层错误而非 bag node not created）。
  *
  * 关键不变式：每个 eOk 创建的 bag 节点必须在 main 返回前经 /delete_node 显式删除，以规避
  *   YOMK 框架 atexit 服务析构晚于 FastDDS DomainParticipantFactory 单例销毁导致的静态析构
@@ -27,7 +25,7 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcBagService.h" // 服务/DDSBagNode/DDSBagRecord/yomk::bagRecordStop
+#include "YomkRpcBagService.h" // 服务/DDSBagNode/DDSBagRecord/DDSBagReindex/yomk::bagRecordStop
 
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（完整录制用例的远端发布端）
 
@@ -69,6 +67,14 @@ int main()
               infoBefore.m_msg.find("bag node not created") == std::string::npos,
           "未建节点时 /bag_info 可达：报文件层错误（非 bag node not created）");
 
+    // ---- L0：/bag_reindex 与节点生命周期解耦（纯文件操作，节点状态无关） ----
+    auto reindexBefore =
+        svc->invoke("/bag_reindex", YomkMkPtr(DDSBagReindex, DDSBagReindex{"reindex_l0_miss"}));
+    CHECK(reindexBefore.m_status == YomkResponse::eNo &&
+              reindexBefore.m_msg.find("bag path [reindex_l0_miss] does not exist") != std::string::npos &&
+              reindexBefore.m_msg.find("bag node not created") == std::string::npos,
+          "未建节点时 /bag_reindex 可达：报文件层错误（非 bag node not created）");
+
     // ---- L1：创建 / 重复创建拒绝 ----
     CHECK(svc->invoke("/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{TEST_DOMAIN})).m_status ==
               YomkResponse::eOk,
@@ -77,6 +83,11 @@ int main()
     CHECK(infoAfter.m_status == YomkResponse::eNo &&
               infoAfter.m_msg.find("does not exist") != std::string::npos,
           "已建节点时 /bag_info 同样可达（行为与节点状态无关）");
+    auto reindexAfter =
+        svc->invoke("/bag_reindex", YomkMkPtr(DDSBagReindex, DDSBagReindex{"reindex_l0_miss"}));
+    CHECK(reindexAfter.m_status == YomkResponse::eNo &&
+              reindexAfter.m_msg.find("does not exist") != std::string::npos,
+          "已建节点时 /bag_reindex 同样可达（行为与节点状态无关）");
     auto dupCreate = svc->invoke("/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{TEST_DOMAIN}));
     CHECK(dupCreate.m_status == YomkResponse::eNo &&
               dupCreate.m_msg.find("bag node already exists") != std::string::npos,

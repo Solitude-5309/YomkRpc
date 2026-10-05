@@ -116,6 +116,11 @@ public:
     // 无 metadata.json/解析失败）。bagDir 相对/绝对路径均可。
     static bool bagInfoText(const std::string& bagDir, std::vector<std::string>& outLines,
             std::string* error = nullptr);
+    // 从 bag 目录内 mcap 分片文件重建 metadata.json（纯文件操作 DDS-free，不经节点实例；
+    // 对齐参考实现 ros2 bag reindex 行为语义：收集 <前缀>_<编号>.mcap 按编号升序、逐文件
+    // 读 mcap summary 统计、主题名升序合并、无条件覆盖写出）。metadata.json 缺失/损坏均可
+    // 重建；bagDir 相对/绝对路径均可。失败返回 false 并经 error 出参回填原因。
+    static bool bagReindex(const std::string& bagDir, std::string* error = nullptr);
 
 private:
     // 发现线程回调入口（BagParticipantListener 转发）：新见 writer/reader 追加进发现缓存。

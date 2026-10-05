@@ -1,6 +1,7 @@
 #pragma once
 // YomkRpcBagService 对外头：定义 YOMKRPC_BAG_* 宏（见 YomkRpcAPI.h）所打包的请求结构
-// （DDSBagNode/DDSBagRecord），以及服务类 YomkRpcBagService 的声明。录制能力由内部的
+// （DDSBagNode/DDSBagRecord/DDSBagInfo/DDSBagReindex），以及服务类 YomkRpcBagService 的声明。
+// 录制能力由内部的
 // FastDDSBagNode 提供（类型无关：透传原始 CDR 字节直写 mcap，schema_id=0 无 schema 通道，
 // 零消息类型依赖）。
 #include <YomkServer/YomkAPI.h>
@@ -26,6 +27,7 @@ private:
     YomkResponse bagRecord(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
     YomkResponse bagInfo(YomkPkgPtr pkg);
+    YomkResponse bagReindex(YomkPkgPtr pkg);
 
 private:
     // 单 bag 节点：一个进程至多一个实例，重复 create 须先 delete；服务析构时自动销毁节点
@@ -90,9 +92,16 @@ struct DDSBagInfo
     std::string bagDir;  // bag 目录名/路径（相对/绝对均可，须含 metadata.json）
 };
 
+// bag_reindex 请求负载。
+struct DDSBagReindex
+{
+    std::string bagDir;  // bag 目录名/路径（相对/绝对均可；metadata.json 缺失/损坏均可重建）
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
 YomkMsg(DDSBagNode, DDSBagNode, msg)
 YomkMsg(DDSBagRecord, DDSBagRecord, msg)
 YomkMsg(DDSBagInfo, DDSBagInfo, msg)
+YomkMsg(DDSBagReindex, DDSBagReindex, msg)

@@ -255,5 +255,13 @@
 #define YOMKRPC_BAG_INFO(bagDir) \
     YOMK_REQUEST("/YomkRpcBagService/bag_info", YomkMkPtr(DDSBagInfo, DDSBagInfo{(bagDir)}))
 
+// 重建 bag 元信息：读 bag 目录内全部 mcap 分片（<前缀>_<编号>.mcap 按编号升序）重建
+// metadata.json 并无条件覆盖写出（元信息文件缺失/损坏均可重建；对齐参考实现 ros2 bag
+// reindex 行为语义）。bagDir 相对/绝对路径均可；纯文件操作不经 bag 节点（无须
+// create_node）。schemaless 透传录制无类型名可恢复，重建的 type 字段为空串。
+// 成功返回 YomkResponse(eOk)；路径不存在/非目录/无 mcap 分片/读取失败返回错误。
+#define YOMKRPC_BAG_REINDEX(bagDir) \
+    YOMK_REQUEST("/YomkRpcBagService/bag_reindex", YomkMkPtr(DDSBagReindex, DDSBagReindex{(bagDir)}))
+
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

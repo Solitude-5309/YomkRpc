@@ -22,6 +22,7 @@
  *           [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]
  *           交互键（tty 下生效）：SPACE 从暂停态开始录制，p 暂停，r 继续，Ctrl+C 停止
  *   yomkrpc bag info <bag-path>
+ *   yomkrpc bag reindex <bag-path>
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -43,6 +44,7 @@
  *   yomkrpc bag record rt/chatter rt/tf
  *   yomkrpc bag record 'hello_*' '*_world'   # 通配模式（单个 *，引号防 shell 展开）
  *   yomkrpc bag info bag_2026-01-01_12-00-00_000
+ *   yomkrpc bag reindex bag_2026-01-01_12-00-00_000
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -171,6 +173,7 @@ static void printUsage(std::ostream &os)
           "          [-d <sec> | --max-bag-duration <sec>] [-c <bytes> | --max-cache-size <bytes>]\n"
           "          [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]\n"
           "  yomkrpc bag info <bag-path>\n"
+          "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -251,6 +254,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag record rt/chatter rt/tf\n"
           "  yomkrpc bag record 'hello_*' '*_world'   # 通配模式（引号防 shell 展开）\n"
           "  yomkrpc bag info bag_2026-01-01_12-00-00_000\n"
+"  yomkrpc bag reindex bag_2026-01-01_12-00-00_000\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -539,6 +543,27 @@ static int runBagInfo(const std::string &bagDir)
             std::cout << line << std::endl;
         }
     }
+    return 0;
+}
+
+// bag reindex 子命令：从 bag 目录内 mcap 分片文件重建被删除/损坏的 metadata.json（对齐
+// 参考实现 ros2 bag reindex 行为语义：收集 <前缀>_<编号>.mcap 按编号升序、逐文件读 mcap
+// summary 统计、主题名升序合并、无条件覆盖写出）；纯文件操作不建 bag 节点，成功打印
+// 一行 reindexing complete 返回 0，失败（路径不存在/非目录/无 mcap 分片/读取失败）
+// 打印原因返回 1
+static int runBagReindex(const std::string &bagDir)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcBagService);
+
+    auto resp = YOMKRPC_BAG_REINDEX(bagDir);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "bag reindex failed: ", resp.m_msg);
+        return 1;
+    }
+
+    std::cout << "reindexing complete" << std::endl;
     return 0;
 }
 
@@ -1722,6 +1747,10 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "info" && !pos[2].empty())
     {
         return runBagInfo(pos[2]);
+    }
+    if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "reindex" && !pos[2].empty())
+    {
+        return runBagReindex(pos[2]);
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node" || pos[0] == "bag"))
     {

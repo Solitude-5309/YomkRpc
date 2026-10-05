@@ -303,6 +303,8 @@ ExampleYomkRpcPub
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 | `yomkrpc bag record [-o <目录>\|--output <目录>] [-b <字节>\|--max-bag-size <字节>] [-d <秒>\|--max-bag-duration <秒>] [-c <字节>\|--max-cache-size <字节>] [--start-paused] <主题名\|模式> [<主题名\|模式> ...]` | 录制主题列表为 mcap bag（启动校验后透传订阅写入原始 CDR 字节，长驻阻塞至 Ctrl+C 收尾；清单项支持通配——恰好一个 `*` 的前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre*suf` 模式，单独 `*` 匹配全部，按发现缓存展开为实际主题集合去重升序，未命中报错；bag 目录名经 `-o` 指定，缺省按时间戳命名，目录已存在报错退出；`-b <字节>` 单分片最大字节数——写满即滚动 `bag_N.mcap` 分片（0=不分片缺省，下限 1024 字节过小报错，实际分片粒度不小于 chunk 落盘边界）；`-d <秒>`/`--max-bag-duration <秒>` 单分片最大时长秒——时长达限即滚动 `bag_N.mcap` 分片（0=不分片缺省，无下限校验；与 `-b` 同用时先到先分，暂停期不计入分片时长）；`-c <字节>`/`--max-cache-size <字节>` 写缓存双缓冲字节数——回调拷贝入队、独立线程写盘（默认 100 MiB，0=每条直写；最坏占 2 倍内存；缓存满丢弃新消息并按主题计数，停止时打印丢条统计）；`--start-paused` 暂停态启动——订阅与发现照常、收到的消息丢弃不写入；交互键（tty 下）：SPACE 开始录制、p 暂停、r 继续，Ctrl+C 停止；校验失败不建目录不产生文件，详见 6.7） |
+| `yomkrpc bag info <bag目录>` | 查看 bag 元信息（输出对齐 `ros2 bag info` 的多行文本，纯文件读不经 bag 节点，详见 6.8） |
+| `yomkrpc bag reindex <bag目录>` | 从 mcap 分片重建被删/损坏的 `metadata.json` 并无条件覆盖写出（行为对齐 `ros2 bag reindex`，纯文件操作不经 bag 节点，详见 6.9） |
 
 公共参数（各命令通用）：
 
@@ -864,7 +866,7 @@ hello_world: 12 条 / 288 字节
 
 #### 落盘产物（bag 目录两文件）
 
-- **`bag_0.mcap`**：标准 mcap 容器，逐主题 Channel（encoding=cdr、无 schema——schemaless 对齐透传语义），消息 record 保存原始 CDR 字节；收尾 close 补写 summary 三层索引，可用任意 mcap 标准读库读回；指定 `-b`/`-d` 时滚动产生同格式分片 `bag_1.mcap`、`bag_2.mcap`、...（各分片独立完整可读回，消息按写入顺序连续切分——不重复不空洞，同主题 channelId 跨分片一致）
+- **`bag_0.mcap`**：标准 mcap 容器，逐主题 Channel（encoding=cdr、无 schema——schemaless 对齐透传语义），Channel.metadata 记录该主题消息类型名（`type=<类型名>`，`bag reindex` 重建元信息的数据来源），消息 record 保存原始 CDR 字节；收尾 close 补写 summary 三层索引，可用任意 mcap 标准读库读回；指定 `-b`/`-d` 时滚动产生同格式分片 `bag_1.mcap`、`bag_2.mcap`、...（各分片独立完整可读回，消息按写入顺序连续切分——不重复不空洞，同主题 channelId 跨分片一致）
 - **`metadata.json`**：顶层平铺 bag 元信息（`version` 为 yomkrpc 自有格式版本，1 起步）：
 
 ```json
@@ -893,7 +895,7 @@ hello_world: 12 条 / 288 字节
 }
 ```
 
-  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）。
+  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）；元信息文件缺失或损坏时可经 `yomkrpc bag reindex` 从分片重建（见 6.9）。
 
 失败报错退出（录制阶段失败 exit=2），错误文本按卡点归类（校验类逐项列出）：
 
@@ -1034,6 +1036,57 @@ if (resp.m_status == YomkResponse::eOk)
 }
 ```
 
+### 6.9 重建 bag 元信息（yomkrpc bag reindex）
+
+`yomkrpc bag reindex <bag目录>` 从 bag 目录内的 mcap 分片文件重建 `metadata.json`（纯本地文件操作——不经 bag 节点、不创建任何 DDS 实体，未建 bag 节点亦可调用）。行为语义对齐 `ros2 bag reindex`（humble，"Reconstruct metadata file for a bag"）：元信息文件缺失（中断录制 / 手工删除）或损坏时均可重建，且**无条件覆盖写出**；成功打印一行 `reindexing complete`（对齐参考实现完成行语义）。
+
+```bash
+yomkrpc bag reindex bag_2026-10-02_19-37-33_726   # 重建 6.7 录制产物的 metadata.json
+yomkrpc bag info bag_2026-10-02_19-37-33_726      # 重建后可正常查看（见 6.8）
+```
+
+行为说明：
+
+- **文件收集**：仅收集目录内匹配 `<前缀>_<编号>.mcap` 命名约定的 regular file，按**编号升序**处理（`bag_10.mcap` 排 `bag_2.mcap` 之后，非字典序）；其余条目（含子目录、非 .mcap 文件）跳过。限定 `.mcap` 扩展名是 yomkrpc 与参考实现的差异——存储格式固定，避免误开无关文件
+- **统计合并**：逐分片读 mcap summary 的 Statistics（per-channel 条数 + 全局起止时间）——per-topic 条数跨分片累加、starting_time 取各分片最小、end 取最大、duration 为**全局跨度**（end − start，与录制侧 metadata 写出口径一致；参考实现为逐分片时长累加的近似——分片间隙不计入，不照抄）
+- **主题清单**：`topics_with_message_count` 按主题名升序排列（对齐参考实现合并输出序）；空消息分片的 channel 无统计条目，不产生主题行
+- **type 经 Channel.metadata 恢复**：录制侧把消息类型名写入各分片 Channel 的 metadata（`type=<类型名>`，与录制侧 type 同源自发现公告，区别在于落盘持久化），重建时读回填入 `topic_metadata.type`；旧格式 bag（无该元数据的既有分片）读不到则回退空串——文件里没有就不虚构
+- **无 summary 回退**：分片缺 summary（中断录制残片）或 summary 损坏时，走 mcap 库级 `AllowFallbackScan` 线性扫描重建统计——中断 bag 也能恢复元信息，非报错
+- **`_format` 伴生键**：重建产物的 starting_time/duration 与录制侧同构（含 `_format` 可读伴生键，格式见 6.7）
+
+重建字段来源对照（mcap summary ↔ metadata.json）：
+
+| metadata.json 字段 | 来源（mcap summary / 文件系统） |
+|---|---|
+| `version` | 固定 1（yomkrpc 自有格式版本，见 6.7） |
+| `storage_identifier` | 固定 `mcap` |
+| `relative_file_paths[]` | 目录内匹配命名的分片文件名（编号升序，纯文件名不含目录） |
+| `starting_time.nanoseconds_since_epoch` | 各分片 Statistics.messageStartTime 的最小值（无消息分片不参与） |
+| `starting_time.nanoseconds_since_epoch_format` | 上值格式化（`_format` 伴生键） |
+| `duration.nanoseconds` | 全局跨度：各分片 Statistics.messageEndTime 最大值 − starting_time（无消息为 0） |
+| `duration.nanoseconds_format` | 上值格式化（`_format` 伴生键） |
+| `message_count` | 各分片 Statistics.messageCount 累加 |
+| `topics_with_message_count[]` | 各分片 Statistics.channelMessageCounts 经 channels 表（channelId→主题名）映射后按主题名合并累加；`type` 取 Channel.metadata 的 `type` 键（旧格式 bag 无该键则为空串） |
+
+失败报错退出（exit 1）：
+
+| 错误文本 | 卡点 |
+|---|---|
+| `bag path [x] does not exist` | 路径不存在 |
+| `must specify a bag directory` | 路径存在但不是目录（传了文件） |
+| `empty directory` | 目录无任何条目 |
+| `no bag files found for reindexing` | 目录有文件但无一匹配 `<前缀>_<编号>.mcap` 命名约定 |
+| `open <名> failed: ...` / `read summary of <名> failed: ...` | 分片打开失败 / summary 读取且回退扫描失败 |
+
+工具经 `YomkRpcBagService` bag 服务 `/bag_reindex` 端点实现，等价的用户代码（`YOMKRPC_BAG_REINDEX` 宏定义于 `YomkRpcAPI.h`）：
+
+```cpp
+YOMK_INIT();
+YOMK_NEW_SERVICE(YomkRpcBagService);  // 进程内自托管，无需预建 bag 节点
+auto resp = YOMKRPC_BAG_REINDEX("bag_2026-10-02_19-37-33_726");
+// resp.m_status == eOk 即重建完成（m_msg == "ok"，无数据载荷）；eNo 时 m_msg 携带上表原因
+```
+
 ## 7 测试
 
 ### 7.1 编译测试
@@ -1045,7 +1098,7 @@ cmake -S test -B test/build -DCMAKE_PREFIX_PATH="${YOMK_PREFIX_PATH:-/opt/yomk}"
 cmake --build test/build -j
 ```
 
-构建产物为 17 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`、`test/build/FastDDSDebugNode/`、`test/build/YomkRpcDebugService/`、`test/build/YomkRpcBagService/`、`test/build/FastDDSBagNode/`）：
+构建产物为 18 个测试可执行（位于 `test/build/Harness/`、`test/build/YomkRpcService/`、`test/build/FastDDSDebugNode/`、`test/build/YomkRpcDebugService/`、`test/build/YomkRpcBagService/`、`test/build/FastDDSBagNode/`）：
 
 | 模块 | 测试目标 |
 |---|---|
@@ -1054,7 +1107,7 @@ cmake --build test/build -j
 | FastDDSDebugNode (1) | TestFastDDSDebugNode（节点层守卫 + 发现→动态类型→订阅→JSON 输出端到端） |
 | YomkRpcDebugService (2) | TestYomkRpcDebugServiceContract（DDS-free 契约）、TestYomkRpcDebugServiceLifecycle（真实 DDS 生命周期） |
 | YomkRpcBagService (2) | TestYomkRpcBagServiceContract（DDS-free 契约）、TestYomkRpcBagServiceLifecycle（真实 DDS 录制生命周期） |
-| FastDDSBagNode (3) | TestFastDDSBagNodeValidation（启动校验与输入校验分支，含通配展开判定）、TestFastDDSBagNodeRecord（发布→录制→Ctrl+C 收尾→落盘断言端到端，含通配模式录制）、TestFastDDSBagNodeInfo（bag info 静态函数直测：输出全行断言 + 失败路径契约，DDS-free） |
+| FastDDSBagNode (4) | TestFastDDSBagNodeValidation（启动校验与输入校验分支，含通配展开判定）、TestFastDDSBagNodeRecord（发布→录制→Ctrl+C 收尾→落盘断言端到端，含通配模式录制）、TestFastDDSBagNodeInfo（bag info 静态函数直测：输出全行断言 + 失败路径契约，DDS-free）、TestFastDDSBagNodeReindex（bag reindex 静态函数直测：编号序收集/多分片合并/全字段断言/覆盖重建/无 summary 回退扫描 + 失败路径契约，DDS-free） |
 
 可选构建开关（CMake cache 变量）：
 
