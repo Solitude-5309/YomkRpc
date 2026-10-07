@@ -121,6 +121,17 @@ public:
     // 读 mcap summary 统计、主题名升序合并、无条件覆盖写出）。metadata.json 缺失/损坏均可
     // 重建；bagDir 相对/绝对路径均可。失败返回 false 并经 error 出参回填原因。
     static bool bagReindex(const std::string& bagDir, std::string* error = nullptr);
+    // 将输入 bag 目录集按输出配置文件转换合并为新 bag（纯文件操作 DDS-free，不经节点实例；
+    // 对齐参考实现 ros2 bag convert 的输出配置语义：cfg 顶层 output_bags 键为对象序列，每
+    // 条目独立 uri/topics/start_time/end_time/max_bagfile_size/max_bagfile_duration，未知
+    // 字段宽容忽略）。逐输入收集分片预扫主题与类型名（同主题跨输入类型冲突报错；入选主题
+    // 无类型名的旧格式 bag 拒转），逐条目重建游标 k-way 归并（logTime 全局升序）过滤写盘，
+    // 写前分片检查同 record 口径（size/duration 先到先分），输出 metadata.json（reindex
+    // 同构组装）。inputs 至少 1 个（重复目录拒绝；多输入按 logTime 全局归并），cfgPath 为
+    // 配置文件路径。outLines 每条目一行 "converted <uri>: N messages / M bytes / K topics"；
+    // 任一条目失败返回 false 并经 error 回填原因（已产生的输出目录保留不回滚）。
+    static bool bagConvert(const std::vector<std::string>& inputs, const std::string& cfgPath,
+            std::vector<std::string>& outLines, std::string* error = nullptr);
 
 private:
     // 发现线程回调入口（BagParticipantListener 转发）：新见 writer/reader 追加进发现缓存。

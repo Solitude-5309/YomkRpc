@@ -34,6 +34,7 @@ int YomkRpcBagService::init()
     YomkInstallFunc("/bag_record", YomkRpcBagService::bagRecord);
     YomkInstallFunc("/bag_info", YomkRpcBagService::bagInfo);
     YomkInstallFunc("/bag_reindex", YomkRpcBagService::bagReindex);
+    YomkInstallFunc("/bag_convert", YomkRpcBagService::bagConvert);
     YomkInstallFunc("/delete_node", YomkRpcBagService::deleteNode);
     return 0;
 }
@@ -183,6 +184,37 @@ YomkResponse YomkRpcBagService::bagReindex(YomkPkgPtr pkg)
         return YomkResponse(YomkResponse::eNo, error);
     }
     return YomkResponse(YomkResponse::eOk, "ok");
+}
+
+YomkResponse YomkRpcBagService::bagConvert(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSBagConvert, p);
+
+    // inputs/cfgPath 空校验锁外前置（对齐 bagInfo 的纯输入校验先例：不触节点状态）
+    if (p->msg.inputs.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcBagService::bagConvert", "no input bag dir given");
+        return YomkResponse(YomkResponse::eNo, "no input bag dir given");
+    }
+    if (p->msg.cfgPath.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcBagService::bagConvert", "no config file given");
+        return YomkResponse(YomkResponse::eNo, "no config file given");
+    }
+
+    // 纯文件操作：bagConvert 为静态函数不依赖 node_，不取 mtx_（无共享状态可保护）
+    std::vector<std::string> lines;
+    std::string error;
+    if (!FastDDSBagNode::bagConvert(p->msg.inputs, p->msg.cfgPath, lines, &error))
+    {
+        if (error.empty())
+        {
+            error = "bag convert failed";  // 兜底，避免空 m_msg
+        }
+        YOMK_ERROR_TAG("YomkRpcBagService::bagConvert", "bag convert failed: ", error);
+        return YomkResponse(YomkResponse::eNo, error);
+    }
+    return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(StringArray, lines));
 }
 
 YomkResponse YomkRpcBagService::deleteNode(YomkPkgPtr pkg)

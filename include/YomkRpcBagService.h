@@ -28,6 +28,7 @@ private:
     YomkResponse deleteNode(YomkPkgPtr pkg);
     YomkResponse bagInfo(YomkPkgPtr pkg);
     YomkResponse bagReindex(YomkPkgPtr pkg);
+    YomkResponse bagConvert(YomkPkgPtr pkg);
 
 private:
     // 单 bag 节点：一个进程至多一个实例，重复 create 须先 delete；服务析构时自动销毁节点
@@ -98,6 +99,15 @@ struct DDSBagReindex
     std::string bagDir;  // bag 目录名/路径（相对/绝对均可；metadata.json 缺失/损坏均可重建）
 };
 
+// bag_convert 请求负载。
+struct DDSBagConvert
+{
+    std::vector<std::string> inputs;  // 输入 bag 目录清单（至少 1 个，相对/绝对均可，
+                                      // 重复目录拒绝；多输入按 logTime 全局归并）
+    std::string cfgPath;              // 输出配置文件路径（JSON，顶层 output_bags 键为
+                                      // 对象序列，每条目独立一组输出参数）
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
@@ -105,3 +115,4 @@ YomkMsg(DDSBagNode, DDSBagNode, msg)
 YomkMsg(DDSBagRecord, DDSBagRecord, msg)
 YomkMsg(DDSBagInfo, DDSBagInfo, msg)
 YomkMsg(DDSBagReindex, DDSBagReindex, msg)
+YomkMsg(DDSBagConvert, DDSBagConvert, msg)

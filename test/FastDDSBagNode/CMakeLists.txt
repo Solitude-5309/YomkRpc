@@ -41,3 +41,14 @@ add_test(NAME TestFastDDSBagNodeReindex COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGE
 set_tests_properties(TestFastDDSBagNodeReindex PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
+
+# bag convert 用例：McapWriter 造真实分片临时目录直测静态函数 bagConvert（配置解析/
+# 主题展开/时段裁剪/输出分片滚动/多输入归并/旧格式拒转 + 失败路径契约，DDS-free 无需
+# 域号），循 Reindex 先例；MCAP_IMPLEMENTATION 单译元在被测库内，测试仅声明头链接实现
+add_executable(TestFastDDSBagNodeConvert TestFastDDSBagNodeConvert.cpp)
+target_link_libraries(TestFastDDSBagNodeConvert PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestFastDDSBagNodeConvert COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestFastDDSBagNodeConvert>)
+set_tests_properties(TestFastDDSBagNodeConvert PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)

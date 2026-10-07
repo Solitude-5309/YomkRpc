@@ -23,6 +23,7 @@
  *           交互键（tty 下生效）：SPACE 从暂停态开始录制，p 暂停，r 继续，Ctrl+C 停止
  *   yomkrpc bag info <bag-path>
  *   yomkrpc bag reindex <bag-path>
+ *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -45,6 +46,7 @@
  *   yomkrpc bag record 'hello_*' '*_world'   # 通配模式（单个 *，引号防 shell 展开）
  *   yomkrpc bag info bag_2026-01-01_12-00-00_000
  *   yomkrpc bag reindex bag_2026-01-01_12-00-00_000
+ *   yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -174,6 +176,7 @@ static void printUsage(std::ostream &os)
           "          [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]\n"
           "  yomkrpc bag info <bag-path>\n"
           "  yomkrpc bag reindex <bag-path>\n"
+          "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -190,7 +193,12 @@ static void printUsage(std::ostream &os)
           "  -o, --output <dir>  输出目录（topic pub -ef 生效：消息描述文件生成位置，相对/\n"
           "                      绝对路径均可，缺省当前目录，目录不存在报错退出，不自动创建；\n"
           "                      bag record 生效：bag 目录名/路径，缺省按时间戳命名，目录已\n"
-          "                      存在报错退出，父目录自动创建）\n"
+          "                      存在报错退出，父目录自动创建；bag convert 生效：输出配置文件\n"
+          "                      路径，JSON 顶层 output_bags 键为对象序列，每条目独立 uri/\n"
+          "                      topics/start_time/end_time/max_bagfile_size/\n"
+          "                      max_bagfile_duration，未知字段忽略）\n"
+          "  -i, --input <dir>   输入 bag 目录（仅 bag convert 生效，可重复指定多个，按\n"
+          "                      logTime 全局归并；重复目录报错退出）\n"
           "  --start-paused      暂停态启动（仅 bag record 生效）：订阅与发现照常、收到的\n"
           "                      消息丢弃不写入；交互键（tty 下）：SPACE 开始录制，p 暂停，\n"
           "                      r 继续，Ctrl+C 停止\n"
@@ -254,7 +262,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag record rt/chatter rt/tf\n"
           "  yomkrpc bag record 'hello_*' '*_world'   # 通配模式（引号防 shell 展开）\n"
           "  yomkrpc bag info bag_2026-01-01_12-00-00_000\n"
-"  yomkrpc bag reindex bag_2026-01-01_12-00-00_000\n"
+          "  yomkrpc bag reindex bag_2026-01-01_12-00-00_000\n"
+          "  yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -564,6 +573,33 @@ static int runBagReindex(const std::string &bagDir)
     }
 
     std::cout << "reindexing complete" << std::endl;
+    return 0;
+}
+
+// bag convert 子命令：读输入 bag 目录集与输出配置文件（JSON，顶层 output_bags 键），把输入
+// 消息按配置过滤合并写为新 bag（对齐参考实现 ros2 bag convert 的输出配置语义）；纯文件操作
+// 不建 bag 节点，服务端返回逐条目统计行（converted <uri>: N messages / M bytes / K topics）
+// 逐行打印，成功返回 0，失败（配置错误/转换失败）打印原因返回 1
+static int runBagConvert(const std::vector<std::string> &inputs, const std::string &cfgPath)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcBagService);
+
+    auto resp = YOMKRPC_BAG_CONVERT(inputs, cfgPath);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "bag convert failed: ", resp.m_msg);
+        return 1;
+    }
+
+    YomkUnPackPkg(resp.m_data, StringArray, lines);
+    if (lines != nullptr)
+    {
+        for (const auto &line : lines->d)
+        {
+            std::cout << line << std::endl;
+        }
+    }
     return 0;
 }
 
@@ -1455,7 +1491,8 @@ int main(int argc, char *argv[])
     uint64_t maxCacheSize = 100 * 1024 * 1024;  // 写缓存双缓冲字节数（-c/--max-cache-size；仅
                                                 // bag record 生效，0=直写；默认 100 MiB 对齐参考实现）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
-    std::string msgOutDir;   // 输出目录（-o/--output；topic pub -ef=消息描述文件位置，bag record=bag 目录名/路径）
+    std::string msgOutDir;   // 输出目录（-o/--output；topic pub -ef=消息描述文件位置，bag record=bag 目录名/路径，bag convert=输出配置文件路径）
+    std::vector<std::string> convertInputs; // 输入 bag 目录清单（-i/--input；仅 bag convert 生效，可重复）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     double pubRateHz = 1.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，缺省 1Hz 持续发送，Ctrl+C 停止）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
@@ -1478,6 +1515,17 @@ int main(int argc, char *argv[])
                 return 2;
             }
             msgOutDir = argv[++i];
+            continue;
+        }
+        if (arg == "-i" || arg == "--input")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少输入 bag 目录参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            convertInputs.emplace_back(argv[++i]);
             continue;
         }
         if (arg == "--start-paused")
@@ -1751,6 +1799,16 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "reindex" && !pos[2].empty())
     {
         return runBagReindex(pos[2]);
+    }
+    if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
+    {
+        if (convertInputs.empty() || msgOutDir.empty())
+        {
+            std::cerr << "yomkrpc: bag convert 需要 -i <bag-dir>（至少 1 个，可重复）与 "
+                         "-o <cfg.json>（输出配置文件路径）\n";
+            return 2;
+        }
+        return runBagConvert(convertInputs, msgOutDir);
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node" || pos[0] == "bag"))
     {

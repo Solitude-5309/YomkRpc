@@ -2,11 +2,11 @@
  * @file TestYomkRpcBagServiceContract.cpp
  * @brief YomkRpcBagService 服务层契约测试（DDS-free，白盒经 invoke 直接分发）
  *
- * 范围：仅验证 bag 服务 6 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
+ * 范围：仅验证 bag 服务 7 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
  *       输入校验与错误码契约；真实 DDS 生命周期（创建/录制/删除）归
  *       TestYomkRpcBagServiceLifecycle，节点层校验与落盘归 TestFastDDSBagNode。
  * 覆盖：
- *   T1 funcInfos 内省 5 端点齐全 + 未知端点 eNo；
+ *   T1 funcInfos 内省 7 端点齐全 + 未知端点 eNo；
  *   T2 /version 正常路径（eOk + 版本串契约 + 忽略 pkg）；
  *   T3 /create_node、/bag_record 解包双守卫（nullptr / 异类包 / 改名伪造）；
  *   T4 /delete_node 特殊契约：单节点模型无参载荷，handler (void)pkg 不走解包守卫，未建节点时
@@ -21,8 +21,11 @@
  *   T8 /bag_reindex 纯文件操作契约：解包双守卫；bagDir 空校验锁外前置；路径不存在报
  *      文件层错误（不依赖节点生命周期）；真实最小 mcap 临时目录 → eOk ok 且重建产物
  *      metadata.json 落盘（回执无数据载荷）。
+ *   T9 /bag_convert 纯文件操作契约：inputs/cfgPath 空校验锁外前置；cfg 不存在/非法 JSON
+ *      报解析错误；真实带类型输入 bag + 最小 cfg → eOk + 统计行回执（converted <uri>:
+ *      N messages / ...）+ 输出 bag_0.mcap/metadata.json 落盘；输出目录已存在报错。
  * DDS-free 保证：T5 的越界校验在锁外返回；T6 的 topics 校验在锁外、node_ 空检查在触达节点层前返回；
- *   T7/T8 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
+ *   T7/T8/T9 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  */
@@ -43,9 +46,10 @@ namespace
     constexpr std::uint64_t kT8SecondNs = 1000000000; // 1 秒的纳秒数（T8 造文件时间戳基础单位）
 
     // T8 造最小 mcap 分片（写侧同款 open/McapChannel/addChannel/write/close；2 条消息
-    // logTime 1s/2s；MCAP_IMPLEMENTATION 单译元在被测库内，此处仅声明头链接实现）
+    // logTime 1s/2s；topicType 非空经 Channel.metadata 落类型名，供 T9 转换链路消费；
+    // MCAP_IMPLEMENTATION 单译元在被测库内，此处仅声明头链接实现）
     bool makeMcapFile(const std::string &path, const std::string &topic,
-                      std::size_t messageCount)
+                      std::size_t messageCount, const std::string &topicType = "")
     {
         mcap::McapWriter writer;
         mcap::McapWriterOptions options("");
@@ -54,7 +58,9 @@ namespace
         {
             return false;
         }
-        mcap::Channel channel(topic, "cdr", 0);
+        mcap::Channel channel(topic, "cdr", 0,
+                              topicType.empty() ? mcap::KeyValueMap{}
+                                                : mcap::KeyValueMap{{"type", topicType}});
         writer.addChannel(channel);
         const std::string payload = "hello";
         for (std::size_t i = 0; i < messageCount; ++i)
@@ -123,6 +129,7 @@ namespace
         checkGuards("/bag_record", "DDSBagRecord", YomkMkPtr(String, "wrong"));
         checkGuards("/bag_info", "DDSBagInfo", YomkMkPtr(String, "wrong"));
         checkGuards("/bag_reindex", "DDSBagReindex", YomkMkPtr(String, "wrong"));
+        checkGuards("/bag_convert", "DDSBagConvert", YomkMkPtr(String, "wrong"));
     }
 
     // T4：/delete_node 特殊契约——单节点模型无参载荷，(void)pkg 不走解包守卫
@@ -268,6 +275,84 @@ namespace
         CHECK(fs::exists(dir + "/metadata.json", ec), "T8 重建产物 metadata.json 落盘");
         fs::remove_all(dir, ec);
     }
+
+    // T9：/bag_convert 纯文件操作契约（不依赖节点生命周期；转换产物落盘 + 统计行回执）
+    void testBagConvertContract(YomkRpcBagService *svc)
+    {
+        // inputs 空校验锁外前置：未建节点也报输入错误（对齐 bagRecord topics 校验先例）
+        auto rNoInput = svc->invoke(
+            "/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{{}, "whatever.json"}));
+        CHECK(rNoInput.m_status == YomkResponse::eNo &&
+                  rNoInput.m_msg.find("no input bag dir given") != std::string::npos,
+              "/bag_convert 空清单+未建节点 → eNo no input bag dir given（输入校验先于一切）");
+
+        // cfgPath 空校验
+        auto rNoCfg = svc->invoke(
+            "/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{{"some_dir"}, ""}));
+        CHECK(rNoCfg.m_status == YomkResponse::eNo &&
+                  rNoCfg.m_msg.find("no config file given") != std::string::npos,
+              "/bag_convert 空 cfgPath → eNo no config file given");
+
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        // cfg 不存在 → 文件层错误（纯文件操作，未建节点亦可调）
+        auto rMissCfg = svc->invoke("/bag_convert",
+            YomkMkPtr(DDSBagConvert, DDSBagConvert{{"some_dir"}, "no_such_cfg.json"}));
+        CHECK(rMissCfg.m_status == YomkResponse::eNo &&
+                  rMissCfg.m_msg.find("open cfg [no_such_cfg.json] failed") != std::string::npos,
+              "/bag_convert cfg 不存在 → eNo open cfg failed（不依赖节点生命周期）");
+
+        // cfg 非法 JSON → 解析错误
+        const std::string badCfg = "convert_svc_bad.json";
+        {
+            std::ofstream out(badCfg);
+            out << "{ not json";
+        }
+        auto rBadJson = svc->invoke(
+            "/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{{"some_dir"}, badCfg}));
+        CHECK(rBadJson.m_status == YomkResponse::eNo &&
+                  rBadJson.m_msg.find("parse cfg [" + badCfg + "] failed") != std::string::npos,
+              "/bag_convert cfg 非法 JSON → eNo parse cfg failed");
+        fs::remove(badCfg, ec);
+
+        // 真实输入 bag + 最小 cfg → eOk + 统计行回执 + 输出产物落盘
+        const std::string inDir = "convert_svc_in";
+        const std::string outDir = "convert_svc_out";
+        fs::remove_all(inDir, ec);
+        fs::remove_all(outDir, ec);
+        CHECK(fs::create_directory(inDir, ec), "T9 前置：输入 bag 目录创建成功");
+        CHECK(makeMcapFile(inDir + "/bag_0.mcap", "/rt/t9", 2, "YomkRpc::MString"),
+              "T9 前置：带类型 mcap 分片造文件成功");
+        const std::string cfg = "convert_svc_t9.json";
+        {
+            std::ofstream out(cfg);
+            out << R"({"output_bags": [{"uri": ")" << outDir << R"("}]})";
+        }
+        auto rOk = svc->invoke(
+            "/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{{inDir}, cfg}));
+        CHECK(rOk.m_status == YomkResponse::eOk && rOk.m_msg == "ok",
+              "/bag_convert 真实输入+最小 cfg → eOk ok");
+        YomkUnPackPkg(rOk.m_data, StringArray, lines);
+        CHECK(lines != nullptr && lines->d.size() == 1 &&
+                  lines->d[0].rfind("converted " + outDir + ":", 0) == 0 &&
+                  lines->d[0].find("2 messages") != std::string::npos,
+              "回执统计行（converted <uri>: N messages / ...）内容透传");
+        CHECK(fs::exists(outDir + "/metadata.json", ec) &&
+                  fs::exists(outDir + "/bag_0.mcap", ec),
+              "T9 转换产物 bag_0.mcap + metadata.json 落盘");
+
+        // 输出目录已存在 → 冲突报错（防混入旧产物）
+        auto rDup = svc->invoke(
+            "/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{{inDir}, cfg}));
+        CHECK(rDup.m_status == YomkResponse::eNo &&
+                  rDup.m_msg.find("output dir [" + outDir + "] already exists") != std::string::npos,
+              "/bag_convert 输出目录已存在 → eNo already exists");
+
+        fs::remove_all(inDir, ec);
+        fs::remove_all(outDir, ec);
+        fs::remove(cfg, ec);
+    }
 } // namespace
 
 int main()
@@ -278,12 +363,13 @@ int main()
     auto *svc = new YomkRpcBagService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcBagService 注册成功（所有权移交框架，init() 已内部调用）");
 
-    // T1：内省——6 端点齐全
+    // T1：内省——7 端点齐全
     auto infos = svc->funcInfos();
-    CHECK(infos.size() == 6 && infos.count("/version") && infos.count("/create_node") &&
+    CHECK(infos.size() == 7 && infos.count("/version") && infos.count("/create_node") &&
               infos.count("/bag_record") && infos.count("/delete_node") &&
-              infos.count("/bag_info") && infos.count("/bag_reindex"),
-          "funcInfos 内省 6 端点齐全");
+              infos.count("/bag_info") && infos.count("/bag_reindex") &&
+              infos.count("/bag_convert"),
+          "funcInfos 内省 7 端点齐全");
 
     testVersion(svc);
     testUnpackGuards(svc);
@@ -292,6 +378,7 @@ int main()
     testBagRecordInputOrder(svc);
     testBagInfoContract(svc);
     testBagReindexContract(svc);
+    testBagConvertContract(svc);
 
     CHECK(svc->invoke("/no_such_endpoint").m_status == YomkResponse::eNo, "未知端点返回 eNo");
 
