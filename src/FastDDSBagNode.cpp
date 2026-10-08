@@ -105,6 +105,82 @@ std::string formatEpochNs(uint64_t epochNs)
     return out.str();
 }
 
+// "YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn"（formatEpochNs 产出形态，本地时区）→ epoch 纳秒。
+// 严格定宽解析：总长 31，数字位与分隔符位置固定；月 1-12、日 1-31、时 0-23、分秒 0-59。
+// mktime（tm_isdst=-1，本地时区，逆于 formatEpochNs 的 localtime_r）后 localtime_r 回读
+// 逐字段比对，拦截 Feb 30 等被 mktime 静默归一化的非法日期；结果早于 1970 纪元判非法
+// （epoch 纳秒为无符号承载）。成功才回填 epochNs。
+bool parseEpochFormatNs(const std::string& text, uint64_t& epochNs)
+{
+    // 各段取值上限（月内天数正确性交由 mktime 回读比对兜底，日上限放 31 即可）
+    constexpr int kDigitBase = 10;     // 定宽数字段逐位累加进制
+    constexpr int kMaxMonth = 12;      // 月上限（1-12）
+    constexpr int kMaxDay = 31;        // 日上限（1-31）
+    constexpr int kMaxHour = 23;       // 时上限（0-23）
+    constexpr int kMaxMinute = 59;     // 分上限（0-59）
+    constexpr int kMaxSecond = 59;     // 秒上限（0-59）
+    constexpr int kTmYearBase = 1900;  // struct tm 年份基准（tm_year = 年份 - 1900）
+    // 定宽掩码：'9' 为数字位，其余字符须逐一匹配
+    static const std::string kMask = "9999-99-99_99-99-99_999-999-999";
+    if (text.size() != kMask.size())
+    {
+        return false;
+    }
+    for (size_t i = 0; i < kMask.size(); ++i)
+    {
+        if (kMask[i] == '9' ? (text[i] < '0' || text[i] > '9') : text[i] != kMask[i])
+        {
+            return false;
+        }
+    }
+    const auto field = [&text](size_t pos, size_t width) {
+        int value = 0;
+        for (size_t i = 0; i < width; ++i)
+        {
+            value = value * kDigitBase + (text[pos + i] - '0');
+        }
+        return value;
+    };
+    const int year = field(0, 4);
+    const int month = field(5, 2);
+    const int day = field(8, 2);
+    const int hour = field(11, 2);
+    const int minute = field(14, 2);
+    const int second = field(17, 2);
+    const int ms = field(20, 3);
+    const int us = field(24, 3);
+    const int ns = field(28, 3);
+    if (month < 1 || month > kMaxMonth || day < 1 || day > kMaxDay || hour > kMaxHour ||
+        minute > kMaxMinute || second > kMaxSecond)
+    {
+        return false;  // 各段基础范围（毫秒/微秒/纳秒三位恒在 0-999）
+    }
+    std::tm parts{};
+    parts.tm_year = year - kTmYearBase;
+    parts.tm_mon = month - 1;
+    parts.tm_mday = day;
+    parts.tm_hour = hour;
+    parts.tm_min = minute;
+    parts.tm_sec = second;
+    parts.tm_isdst = -1;  // 夏令时未知交由 libc 判定（与 formatEpochNs 的 localtime_r 同区）
+    const std::time_t secs = mktime(&parts);
+    if (secs < 0)
+    {
+        return false;
+    }
+    std::tm roundTrip{};
+    localtime_r(&secs, &roundTrip);
+    if (roundTrip.tm_year != year - kTmYearBase || roundTrip.tm_mon != month - 1 ||
+        roundTrip.tm_mday != day || roundTrip.tm_hour != hour || roundTrip.tm_min != minute ||
+        roundTrip.tm_sec != second)
+    {
+        return false;  // 回读不一致（如 Feb 30 归一化为 Mar 2），判非法日期
+    }
+    epochNs = static_cast<uint64_t>(secs) * kNsPerSecond + static_cast<uint64_t>(ms) * kNsPerMs +
+              static_cast<uint64_t>(us) * kNsPerUs + static_cast<uint64_t>(ns);
+    return true;
+}
+
 // ---- bag info 输出格式化（bagInfoText 用，对齐参考实现 ros2 bag info 输出形态）----
 constexpr int kNsDigits = 9;             // 时间小数定宽位数（纳秒）
 constexpr double kBytesPerUnit = 1024.0; // 人类可读大小换算进制
@@ -1430,8 +1506,8 @@ struct BagConvertEntry
 {
     std::string uri;                 // 输出 bag 目录（必填非空，条目间重复拒绝）
     std::vector<std::string> topics; // 输出主题清单（空=全部输入主题；元素支持一个 '*'）
-    uint64_t startTimeNs = 0;        // 收纳区间下界纳秒（含；0=不限）
-    uint64_t endTimeNs = 0;          // 收纳区间上界纳秒（含；0=不限）
+    uint64_t startTimeNs = 0;        // 收纳区间下界纳秒（含；0=不限；cfg 可读时间串已换算）
+    uint64_t endTimeNs = 0;          // 收纳区间上界纳秒（含；0=不限；cfg 可读时间串已换算）
     uint64_t maxBagSize = 0;         // 单分片最大字节数（0=不分片）
     uint64_t maxBagDurationSec = 0;  // 单分片最大时长秒（0=不分片）
 };
@@ -1441,8 +1517,11 @@ struct BagConvertEntry
 // bag convert 输出配置的默认行为）：
 //   uri                  必填 string 非空   输出 bag 目录（条目间重复拒绝）
 //   topics               可选 string[]     输出主题清单（缺省=全部；元素含一个 '*' 为通配）
-//   start_time           可选 number       收纳区间下界纳秒（缺省 0=不限，含边界）
-//   end_time             可选 number       收纳区间上界纳秒（缺省 0=不限，含边界）
+//   start_time           可选 number|string 收纳区间下界（缺省 0=不限，含边界）。两种写法：
+//                                          非负整数纳秒；或可读时间字符串 YYYY-MM-DD_HH-MM-
+//                                          SS_毫秒-微秒-纳秒（本地时区，metadata starting_time
+//                                          的 `_format` 伴生键同款，可从产物直接拷贝）
+//   end_time             可选 number|string 收纳区间上界（写法同 start_time）
 //   max_bagfile_size     可选 number       单分片最大字节数（缺省 0=不分片；>0 须 >=1024）
 //   max_bagfile_duration 可选 number       单分片最大时长秒（缺省 0=不分片）
 bool parseBagConvertCfg(const std::string& cfgPath, std::vector<BagConvertEntry>& entries,
@@ -1537,8 +1616,40 @@ bool parseBagConvertCfg(const std::string& cfgPath, std::vector<BagConvertEntry>
             }
             out = value.get<uint64_t>();
         };
-        readU64("start_time", entry.startTimeNs);
-        readU64("end_time", entry.endTimeNs);
+        // 时间字段：非负整数纳秒之外，额外接受可读时间字符串（formatEpochNs 产出形态，
+        // 本地时区；从产物 metadata.json `_format` 伴生键拷贝即用）。非法字符串报错带原文
+        const auto readTime = [&item, &cfgPath, &fieldError](const char* key, uint64_t& out) {
+            if (!fieldError.empty() || !item.contains(key))
+            {
+                return;  // 前序字段已报错则短路；字段缺省即用缺省值
+            }
+            const auto& value = item[key];
+            if (value.is_number_unsigned())
+            {
+                out = value.get<uint64_t>();
+                return;
+            }
+            if (value.is_string())
+            {
+                const std::string text = value.get<std::string>();
+                if (parseEpochFormatNs(text, out))
+                {
+                    return;
+                }
+                fieldError = std::string("cfg [") + cfgPath;
+                fieldError += "] \"";
+                fieldError += key;
+                fieldError += "\" invalid time [";
+                fieldError += text;
+                fieldError += "], expected YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn";
+                return;
+            }
+            fieldError = std::string("cfg [") + cfgPath + "] \"" + key +
+                         "\" must be a non-negative integer or a "
+                         "\"YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn\" string";
+        };
+        readTime("start_time", entry.startTimeNs);
+        readTime("end_time", entry.endTimeNs);
         readU64("max_bagfile_size", entry.maxBagSize);
         readU64("max_bagfile_duration", entry.maxBagDurationSec);
         if (!fieldError.empty())

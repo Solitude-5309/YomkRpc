@@ -20,6 +20,9 @@
  *   C5 多输入归并：两输入 logTime 交错（含多分片输入）→ 读回全局升序 + metadata 统计
  *      合并（两主题各自 type/count）；
  *   C6 旧格式拒转（入选主题无类型名）→ fail；同主题跨输入类型冲突 → fail 精确文案。
+ *   C7 start/end 可读时间字符串：字符串形式与整数形式裁剪等价（含头含尾）+ 产物 metadata
+ *      `_format` 值拷贝即用往返无损 + 非法字符串（长度/分隔符/月 13/Feb 30 归一化）与非
+ *      字符串类型 fail 精确文案。
  *
  * 造文件经 mcap::McapWriter（写侧同款 open + Channel("cdr",0[,metadata]) + addChannel +
  * write + close，topicType 非空经 Channel.metadata 落类型名），MCAP_IMPLEMENTATION 单译元
@@ -40,9 +43,12 @@
 
 #include <cstddef> // std::byte
 #include <cstdint>
+#include <ctime> // nsToEpochFormat：localtime_r（镜像被测侧 formatEpochNs 的本地时区格式化）
 #include <limits>
 #include <filesystem>
 #include <fstream>
+#include <iomanip> // nsToEpochFormat：setw/setfill 定宽补零
+#include <sstream> // nsToEpochFormat：字符串拼装
 #include <string>
 #include <vector>
 
@@ -148,6 +154,25 @@ namespace
     {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
+    }
+
+    // epoch 纳秒 → "YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn"（本地时区，镜像被测侧 formatEpochNs）：
+    // 供 C7 造合法字符串输入，经解析往返后时区无关（任意时区均可还原原值）
+    std::string nsToEpochFormat(std::uint64_t epochNs)
+    {
+        const std::time_t secs = static_cast<std::time_t>(epochNs / kSecondNs);
+        std::tm local{};
+        localtime_r(&secs, &local);
+        std::ostringstream out;
+        out << (local.tm_year + 1900) << '-' << std::setw(2) << std::setfill('0')
+            << local.tm_mon + 1 << '-' << std::setw(2) << std::setfill('0') << local.tm_mday
+            << '_' << std::setw(2) << std::setfill('0') << local.tm_hour << '-' << std::setw(2)
+            << std::setfill('0') << local.tm_min << '-' << std::setw(2) << std::setfill('0')
+            << local.tm_sec << '_' << std::setw(3) << std::setfill('0')
+            << (epochNs % kSecondNs) / 1000 / 1000 << '-' << std::setw(3) << std::setfill('0')
+            << (epochNs % 1000000) / 1000 << '-' << std::setw(3) << std::setfill('0')
+            << epochNs % 1000;
+        return out.str();
     }
 } // namespace
 
@@ -496,6 +521,106 @@ int main()
         cleanupDir(inDir);
         cleanupDir(inA);
         cleanupDir(inB);
+        std::filesystem::remove(cfg);
+    }
+
+    // ---- C7：start/end 可读时间字符串（整数纳秒之外，metadata `_format` 伴生键同款写法）----
+    {
+        const std::string inDir = "conv_in_c7";
+        const std::string outDir = "conv_out_c7";
+        const std::string outDir2 = "conv_out_c7b";
+        const std::string cfg = "conv_c7.json";
+        cleanupDir(inDir);
+        cleanupDir(outDir);
+        cleanupDir(outDir2);
+        ensureDir(inDir);
+        CHECK(makeMcapFile(inDir + "/bag_0.mcap", "/rt/c7", 3, 2 * kSecondNs, kSecondNs,
+                  "YomkRpc::MString"),
+              "C7 前置：输入分片造文件成功（2s/3s/4s 三条）");
+
+        // C7a 字符串形式与整数形式裁剪等价（2s..4s → 3 条含头含尾，对齐 C3 断言）
+        CHECK(writeCfg(cfg,
+                  R"({"output_bags": [{"uri": ")" + outDir + R"(", "start_time": ")" +
+                      nsToEpochFormat(2 * kSecondNs) + R"(", "end_time": ")" +
+                      nsToEpochFormat(4 * kSecondNs) + R"("}]})"),
+              "C7 前置：cfg（可读时间字符串 start/end）写入成功");
+        lines.clear();
+        CHECK(FastDDSBagNode::bagConvert({inDir}, cfg, lines, &err),
+              "C7 字符串时段裁剪转换成功");
+        nlohmann::json info;
+        CHECK(readMetadataJson(outDir, info), "C7 产物 metadata.json 可解析");
+        CHECK(info.at("message_count") == 3 &&
+                  info.at("starting_time").at("nanoseconds_since_epoch") == 2 * kSecondNs,
+              "C7 字符串形式与整数形式等价（2s..4s → 3 条，起始按写入消息重算 2s）");
+        std::vector<std::uint64_t> logTimes;
+        CHECK(collectLogTimes(outDir + "/bag_0.mcap", logTimes) && logTimes.size() == 3 &&
+                  logTimes[0] == 2 * kSecondNs && logTimes[2] == 4 * kSecondNs,
+              "C7 字符串形式边界含头含尾（2s/4s）");
+
+        // C7b 拷贝即用往返：产物 metadata `_format` 值直接作 start_time → 往返无损
+        const std::string copiedStart =
+            info.at("starting_time").at("nanoseconds_since_epoch_format").get<std::string>();
+        CHECK(writeCfg(cfg,
+                  R"({"output_bags": [{"uri": ")" + outDir2 + R"(", "start_time": ")" +
+                      copiedStart + R"("}]})"),
+              "C7 前置：cfg（拷贝产物 _format 作 start_time）写入成功");
+        lines.clear();
+        CHECK(FastDDSBagNode::bagConvert({inDir}, cfg, lines, &err),
+              "C7 拷贝 _format 作 start_time 转换成功");
+        nlohmann::json info2;
+        CHECK(readMetadataJson(outDir2, info2) && info2.at("message_count") == 3 &&
+                  info2.at("starting_time").at("nanoseconds_since_epoch") == 2 * kSecondNs,
+              "C7 产物 _format 拷贝即用 → 往返无损（全量 3 条起始 2s）");
+
+        // C7c 非法输入逐类 fail 精确文案（cfg 就地覆写；解析期报错，输入目录真实存在）
+        const auto expectConvertFail = [&](const std::string &content,
+                                           const std::string &fragment,
+                                           const std::string &label) {
+            lines.clear();
+            err.clear();
+            CHECK(writeCfg(cfg, content) &&
+                      !FastDDSBagNode::bagConvert({inDir}, cfg, lines, &err) &&
+                      err.find(fragment) != std::string::npos,
+                  label);
+        };
+        expectConvertFail(
+            R"({"output_bags": [{"uri": ")" + outDir +
+                R"(", "start_time": "2026-10-08_09-52-22_685-614-54"}]})",
+            "cfg [" + cfg + "] \"start_time\" invalid time [2026-10-08_09-52-22_685-614-54], "
+                            "expected YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn",
+            "C7 长度 30（缺一位）→ invalid time 精确文案");
+        expectConvertFail(
+            R"({"output_bags": [{"uri": ")" + outDir +
+                R"(", "start_time": "2026-10-08_09-52-22-685-614-542"}]})",
+            "cfg [" + cfg + "] \"start_time\" invalid time [2026-10-08_09-52-22-685-614-542], "
+                            "expected YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn",
+            "C7 秒后分隔符 '-'（应 '_'）→ invalid time 精确文案");
+        expectConvertFail(
+            R"({"output_bags": [{"uri": ")" + outDir +
+                R"(", "start_time": "2026-13-08_09-52-22_685-614-542"}]})",
+            "cfg [" + cfg + "] \"start_time\" invalid time [2026-13-08_09-52-22_685-614-542], "
+                            "expected YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn",
+            "C7 月 13 越界 → invalid time 精确文案");
+        expectConvertFail(
+            R"({"output_bags": [{"uri": ")" + outDir +
+                R"(", "start_time": "2026-02-30_09-52-22_685-614-542"}]})",
+            "cfg [" + cfg + "] \"start_time\" invalid time [2026-02-30_09-52-22_685-614-542], "
+                            "expected YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn",
+            "C7 Feb 30 被 mktime 归一化 → 回读比对拦截 fail 精确文案");
+        expectConvertFail(
+            R"({"output_bags": [{"uri": ")" + outDir + R"(", "start_time": 1.5}]})",
+            "cfg [" + cfg + "] \"start_time\" must be a non-negative integer or a "
+                            "\"YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn\" string",
+            "C7 浮点（非整数非字符串）→ 类型错误精确文案");
+        expectConvertFail(
+            R"({"output_bags": [{"uri": ")" + outDir + R"(", "end_time": -1}]})",
+            "cfg [" + cfg + "] \"end_time\" must be a non-negative integer or a "
+                            "\"YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn\" string",
+            "C7 负数 end_time → 类型错误精确文案");
+
+        cleanupDir(inDir);
+        cleanupDir(outDir);
+        cleanupDir(outDir2);
         std::filesystem::remove(cfg);
     }
 

@@ -269,8 +269,10 @@
 // 相对/绝对均可，重复目录拒绝；多输入按 logTime 全局归并，同主题跨输入类型不一致报错）。
 // cfgPath 输出配置文件路径（JSON，顶层 output_bags 键为对象序列，每条目独立一组输出参数）：
 // uri 输出目录必填非空（已存在报错）；topics 输出主题清单（缺省全部，元素支持恰好一个 '*'
-// 的通配模式，精确项不存在/模式未命中报错）；start_time/end_time 收纳区间纳秒（缺省 0=不限，
-// start>end 报错，含头含尾）；max_bagfile_size 单分片最大字节数（0=不分片，>0 且 <1024 报错）；
+// 的通配模式，精确项不存在/模式未命中报错）；start_time/end_time 收纳区间（缺省 0=不限，
+// start>end 报错，含头含尾）两种写法：非负整数纳秒，或可读时间字符串（YYYY-MM-DD_HH-MM-SS_
+// 毫秒-微秒-纳秒，本地时区，产物 metadata starting_time 的 `_format` 伴生键同款拷贝即用）；
+// max_bagfile_size 单分片最大字节数（0=不分片，>0 且 <1024 报错）；
 // max_bagfile_duration 单分片最大时长秒（0=不分片，与 size 同用先到先分）；未知字段忽略。
 // 任一条目失败整体报错（已产生的输出目录保留不回滚）。成功返回 StringArray 包（每条目一行
 // "converted <uri>: N messages / M bytes / K topics" 统计）。返回 YomkResponse。

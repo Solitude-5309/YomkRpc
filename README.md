@@ -895,7 +895,7 @@ hello_world: 12 条 / 288 字节
     "relative_file_paths": ["bag_0.mcap"],
     "starting_time": {
         "nanoseconds_since_epoch": 1791953853726412000,
-        "nanoseconds_since_epoch_format": "2026-10-02_19-37-33-726-412-000"
+        "nanoseconds_since_epoch_format": "2026-10-02_19-37-33_726-412-000"
     },
     "duration": {
         "nanoseconds": 4012345678,
@@ -1126,8 +1126,8 @@ yomkrpc bag convert -i bag_a -i bag_b -o convert.json      # 多输入按 logTim
         },
         {
             "uri": "out_trimmed",
-            "start_time": 1791296616099551739,
-            "end_time": 1791296620099551739,
+            "start_time": "2026-10-08_09-52-22_685-614-542",
+            "end_time": "2026-10-08_09-53-22_685-614-542",
             "max_bagfile_size": 1048576,
             "max_bagfile_duration": 60
         }
@@ -1141,7 +1141,7 @@ yomkrpc bag convert -i bag_a -i bag_b -o convert.json      # 多输入按 logTim
 |---|---|
 | `uri` | 输出 bag 目录（必填非空字符串，相对/绝对均可；已存在报错——防混入旧产物，同 record `-o` 口径；父目录自动多级创建） |
 | `topics` | 输出主题清单（缺省 = 全部输入主题；元素为精确主题名或恰好一个 `*` 的通配模式——模式形态与前后缀夹逼语义同 6.7 清单通配，但展开对象是输入 bag 的主题集而非发现缓存；精确项须存在于输入主题集、模式须命中至少一个输入主题，否则报错；展开集去重升序） |
-| `start_time` / `end_time` | 收纳区间纳秒（按消息 logTime，缺省 0 = 不限；含头含尾；start > end 报错） |
+| `start_time` / `end_time` | 收纳区间（按消息 logTime，缺省 0 = 不限；含头含尾；start > end 报错）。两种写法：非负整数纳秒；或可读时间字符串 `"YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒"`（本地时区，与 6.7 `starting_time.nanoseconds_since_epoch_format` 伴生键同构——从产物 metadata.json 直接拷贝即用） |
 | `max_bagfile_size` | 单输出分片最大字节数（0=不分片缺省，>0 且 <1024 报错；实际分片粒度不小于 chunk 落盘边界，同 6.7 `-b`） |
 | `max_bagfile_duration` | 单输出分片最大时长秒（0=不分片缺省；与 size 同用先到先分，同 6.7 `-d`） |
 
@@ -1169,7 +1169,9 @@ yomkrpc bag convert -i bag_a -i bag_b -o convert.json      # 多输入按 logTim
 | `cfg [x] duplicate output uri [x]` | 条目 uri 重复 |
 | `cfg [x] "topics" must be an array of strings` / `cfg [x] "topics" elements must be strings` / `cfg [x] "topics" contains empty name` | topics 字段形态错误（非数组 / 元素非字符串 / 空名） |
 | `topic pattern [x] must contain at most one '*'` | 通配模式多于一个 `*` |
-| `cfg [x] "start_time"/"end_time"/"max_bagfile_size"/"max_bagfile_duration" must be a non-negative integer` | 数值字段为负数或浮点 |
+| `cfg [x] "max_bagfile_size"/"max_bagfile_duration" must be a non-negative integer` | 数值字段为负数或浮点 |
+| `cfg [x] "start_time"/"end_time" must be a non-negative integer or a "YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn" string` | 时间字段既非非负整数也非字符串 |
+| `cfg [x] "start_time"/"end_time" invalid time [原文], expected YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn` | 可读时间字符串非法（长度/分隔符/取值范围/归一化日期如 Feb 30，原文随报错回显） |
 | `cfg [x] start_time must not exceed end_time` | 区间倒置 |
 | `max_bagfile_size must be at least 1024 bytes (got x)` | 分片字节上限过小 |
 | `topic [x] not found in input bags` | 精确主题不存在于输入 |
