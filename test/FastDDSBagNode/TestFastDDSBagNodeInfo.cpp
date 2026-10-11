@@ -15,7 +15,11 @@
  *   I6 路径不存在 → false "bag path [..] does not exist"；
  *   I7 目录存在无 metadata.json → false "could not find metadata.json in bag directory [..]"；
  *   I8 JSON 损坏 → false "parse metadata.json failed: ..." 且 outLines 清空；
- *   I9 空 topics → "Topic information: " 空内容行（对齐参考实现防御行为）。
+ *   I9 空 topics → "Topic information: " 空内容行（对齐参考实现防御行为）；
+ *   I10 topic_metadata 带 qos 键 → Topic information 行 Type 后插 "QoS: <串>" 段（新格式
+ *      bag 可读摘要；I1/I2 的 metadata 无 qos 键 → 不插段，兼作旧 bag 兼容断言）。
+ *   I10 topic_metadata 带 qos 键 → Topic information 行 Type 后插 "QoS: <串>" 段（新格式
+ *      bag 可读摘要；I1/I2 的 metadata 无 qos 键 → 不插段，兼作旧 bag 兼容断言）。
  *
  * 用例目录避开 bag_ 前缀（防泄漏快照误报惯例），结束统一清理。
  *
@@ -330,6 +334,68 @@ int main()
         if (lines.size() == 9)
         {
             CHECK(lines[8] == labeled("Topic information:", ""), "I9 空主题 → 标签行空内容");
+        }
+        cleanupDir(dir);
+    }
+
+    // ---- I10：topic_metadata 带 qos 键 → Topic information 行 Type 后插 QoS 段 ----
+    {
+        const std::string meta = R"({
+    "version": 1,
+    "storage_identifier": "mcap",
+    "relative_file_paths": ["bag_0.mcap"],
+    "starting_time": {"nanoseconds_since_epoch": 0},
+    "duration": {"nanoseconds": 0},
+    "message_count": 5,
+    "topics_with_message_count": [
+        {"topic_metadata": {"name": "/rt/a", "type": "YomkRpc::MString",
+                            "qos": "RELIABLE,TRANSIENT_LOCAL"}, "message_count": 5}
+    ]
+}
+)";
+        const std::string dir = "info_i10";
+        CHECK(makeBagDir(dir, meta, 0), "I10 前置：带 qos 的 bag 目录创建成功");
+        std::vector<std::string> lines;
+        CHECK(FastDDSBagNode::bagInfoText(dir, lines, nullptr), "I10 bagInfoText → true");
+        CHECK(lines.size() == 9, "I10 行数 = 9（QoS 段并入主题行，不加行）");
+        if (lines.size() == 9)
+        {
+            CHECK(lines[8] == labeled("Topic information:",
+                              "Topic: /rt/a | Type: YomkRpc::MString | "
+                              "QoS: RELIABLE,TRANSIENT_LOCAL | Count: 5 | "
+                              "Serialization Format: cdr"),
+                  "I10 Topic 行 Type 后插 QoS 段（qos 键且非空才显示）");
+        }
+        cleanupDir(dir);
+    }
+
+    // ---- I10：topic_metadata 带 qos 键 → Topic information 行 Type 后插 QoS 段 ----
+    {
+        const std::string meta = R"({
+    "version": 1,
+    "storage_identifier": "mcap",
+    "relative_file_paths": ["bag_0.mcap"],
+    "starting_time": {"nanoseconds_since_epoch": 0},
+    "duration": {"nanoseconds": 0},
+    "message_count": 5,
+    "topics_with_message_count": [
+        {"topic_metadata": {"name": "/rt/a", "type": "YomkRpc::MString",
+                            "qos": "RELIABLE,TRANSIENT_LOCAL"}, "message_count": 5}
+    ]
+}
+)";
+        const std::string dir = "info_i10";
+        CHECK(makeBagDir(dir, meta, 0), "I10 前置：带 qos 的 bag 目录创建成功");
+        std::vector<std::string> lines;
+        CHECK(FastDDSBagNode::bagInfoText(dir, lines, nullptr), "I10 bagInfoText → true");
+        CHECK(lines.size() == 9, "I10 行数 = 9（QoS 段并入主题行，不加行）");
+        if (lines.size() == 9)
+        {
+            CHECK(lines[8] == labeled("Topic information:",
+                              "Topic: /rt/a | Type: YomkRpc::MString | "
+                              "QoS: RELIABLE,TRANSIENT_LOCAL | Count: 5 | "
+                              "Serialization Format: cdr"),
+                  "I10 Topic 行 Type 后插 QoS 段（qos 键且非空才显示）");
         }
         cleanupDir(dir);
     }

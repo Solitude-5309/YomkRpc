@@ -13,11 +13,14 @@
  *   R3 ~5s 后 bagRecordStop → record 返回 true；
  *   R4 stats 契约：单主题、topic/type（YomkRpc::MString）/count/bytes 一致；
  *   R5 落盘：bag 目录（bag_<YYYY-MM-DD_HH-MM-SS_mmm>）含 bag_0.mcap 与 metadata.json；
- *   R6 mcap 读回：条数 == stats.count；Channel topic/messageEncoding=cdr/schemaId=0；
+ *   R6 mcap 读回：条数 == stats.count；Channel topic/messageEncoding=cdr/schemaId=0/
+ *      metadata type+qos 两键（qos == RELIABLE,TRANSIENT_LOCAL，FastDDS 3.x DataWriter
+ *      默认 offered）；
  *      每条消息字节非空且总字节 == stats.bytes；sequence 从 0 单调递增；
  *   R7 metadata.json：storage_identifier=mcap / 起始时间与时长含 _format 可读伴生键 /
  *      relative_file_paths: bag_0.mcap /
- *      topics_with_message_count 的 name/type/message_count 与 stats 一致；
+ *      topics_with_message_count 的 name/type/message_count 与 stats 一致、qos 与
+ *      Channel.metadata 同源同值；
  *   R8 定格：成功后再次 record → false "record already finished, recreate node to record again"；
  *   R9 通配模式录制（新节点）：精确项 + 前缀模式命中同前缀双主题 → 展开去重合并
  *      （stats 两项升序、各有条数）、metadata 列出展开后的实际主题、录制定格同样成立；
@@ -37,6 +40,9 @@
  *      == 发布条数）；4096 缓存 + -d 2 组合 → 分片在消费线程照常滚动（断言组同 R13）；
  *      满载 1 字节缓存 + 50 条连发突发 → dropNew_ 置位期间丢新（写入 + 丢弃 == 发布
  *      条数守恒）、收尾打印丢条统计（按主题计数 + Total dropped 总计行）。
+ *   R15 QoS 落盘（新节点）：远端 writer 显式置 VOLATILE（区别于 FastDDS 3.x DataWriter
+ *      默认 TRANSIENT_LOCAL）→ Channel.metadata 与 metadata.json 的 qos 均 ==
+ *      "RELIABLE,VOLATILE"，证 qos 反映真实 offered 而非写死。
  *
  * 域号 202：与 TestYomkRpcBagServiceLifecycle(200)/TestFastDDSBagNodeValidation(201) 错开，
  * ctest 串行执行互不残留。
@@ -228,12 +234,15 @@ int main()
             std::string channelTopic;
             std::string channelEncoding;
             mcap::SchemaId channelSchemaId = 0;
+            std::string channelQos;
             for (const auto &msgView : reader.readMessages(onProblem))
             {
                 const mcap::Channel &channelOfMsg = *msgView.channel;
                 channelTopic = channelOfMsg.topic;
                 channelEncoding = channelOfMsg.messageEncoding;
                 channelSchemaId = channelOfMsg.schemaId;
+                const auto qosIt = channelOfMsg.metadata.find("qos");
+                channelQos = qosIt != channelOfMsg.metadata.end() ? qosIt->second : "";
                 totalBytes += msgView.message.dataSize;
                 if (msgView.message.dataSize == 0)
                 {
@@ -254,6 +263,9 @@ int main()
             CHECK(channelTopic == REC_TOPIC, "R6 Channel topic == rt/bag_rec_hit");
             CHECK(channelEncoding == "cdr", "R6 Channel messageEncoding == cdr");
             CHECK(channelSchemaId == 0, "R6 Channel schemaId == 0（无 schema 通道）");
+            CHECK(channelQos == "RELIABLE,TRANSIENT_LOCAL",
+                  "R6 Channel.metadata qos == RELIABLE,TRANSIENT_LOCAL（远端 writer 默认 offered，"
+                  "FastDDS 3.x DataWriter 默认 durability 即 TRANSIENT_LOCAL）");
             CHECK(totalBytes == recBytes, "R6 读回字节总和 == stats.bytes（CDR 全量守恒）");
             CHECK(seqMonotonic, "R6 sequence 从 0 单调递增");
             reader.close();
@@ -279,6 +291,8 @@ int main()
               "R7 metadata topics_with_message_count 列出录制主题名");
         CHECK(text.find("\"type\": \"YomkRpc::MString\"") != std::string::npos,
               "R7 metadata 主题类型 == YomkRpc::MString");
+        CHECK(text.find("\"qos\": \"RELIABLE,TRANSIENT_LOCAL\"") != std::string::npos,
+              "R7 metadata topic_metadata qos == RELIABLE,TRANSIENT_LOCAL（与 Channel.metadata 同源）");
         CHECK(text.find("\"message_count\": " + std::to_string(recCount)) != std::string::npos,
               "R7 metadata message_count 与 stats 一致");
         CHECK(text.find("\"nanoseconds_since_epoch\"") != std::string::npos,
@@ -1176,6 +1190,101 @@ int main()
         }
         CHECK(dropFileCount == dropCount,
               "R14c 落盘条数 == stats.count（丢弃消息不入队不落盘）");
+    }
+
+    // ---- R15：QoS 落盘（远端 writer 显式置 VOLATILE_DURABILITY——区别于 FastDDS 3.x
+    //      DataWriter 默认 TRANSIENT_LOCAL → Channel.metadata 与 metadata.json 的 qos 均
+    //      == "RELIABLE,VOLATILE"，证 qos 反映真实 offered 而非写死） ----
+    {
+        yomk::bagRecordReset();
+        FastDDSBagNode node11;
+        CHECK(node11.setDomainId(TEST_DOMAIN), "R15 新节点 setDomainId(202) 成功");
+
+        // 远端发布者：DataWriter QoS 显式置 VOLATILE（区别于其他用例的默认 TRANSIENT_LOCAL）
+        constexpr auto *kQosTopic = "rt/bag_rec_qos";
+        auto *topicQosT = peerParticipant->create_topic(
+            kQosTopic, ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+        dds::DataWriterQos wqos = dds::DATAWRITER_QOS_DEFAULT;
+        wqos.durability().kind = dds::VOLATILE_DURABILITY_QOS;
+        auto *writerQos = (pub != nullptr && topicQosT != nullptr)
+                              ? pub->create_datawriter(topicQosT, wqos)
+                              : nullptr;
+        CHECK(writerQos != nullptr, "R15 远端 VOLATILE DataWriter 创建成功");
+
+        std::atomic<bool> pubStop11{false};
+        std::thread pubThread11([&]()
+        {
+            YomkRpc::MString msg;
+            dds::PublicationMatchedStatus matched{};
+            for (int i = 0; i < 100; ++i) // 等订阅匹配（100×100ms 上限，未匹配照发）
+            {
+                if (dds::RETCODE_OK == writerQos->get_publication_matched_status(matched) &&
+                    matched.current_count > 0)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            uint32_t seq = 0;
+            while (!pubStop11.load())
+            {
+                msg.data("bag-record-qos-" + std::to_string(seq++));
+                writerQos->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPubIntervalMs));
+            }
+        });
+
+        std::vector<FastDDSBagNode::BagTopicStat> statsQos;
+        std::string errorQos;
+        std::atomic<bool> recDone11{false};
+        bool okQos = false;
+        std::thread recThread11([&]()
+        {
+            okQos = node11.record({kQosTopic}, statsQos, &errorQos);
+            recDone11.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(kRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone11.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread11.join();
+        pubStop11.store(true);
+        pubThread11.join();
+
+        CHECK(okQos, "R15 VOLATILE 录制 record → true");
+        if (okQos)
+        {
+            const std::string qosBagDir = node11.bagDir();
+            // Channel.metadata qos 断言（与 R6 同款读回路径）
+            std::ifstream in(qosBagDir + "/bag_0.mcap", std::ios::binary);
+            mcap::FileStreamReader dataSource{in};
+            mcap::McapReader reader;
+            const auto openStatus = reader.open(dataSource);
+            CHECK(openStatus.ok(), "R15 mcap reader.open 成功");
+            if (openStatus.ok())
+            {
+                std::string channelQos;
+                for (const auto &msgView :
+                     reader.readMessages([](const mcap::Status &) {}))
+                {
+                    const auto qosIt = msgView.channel->metadata.find("qos");
+                    channelQos =
+                        qosIt != msgView.channel->metadata.end() ? qosIt->second : "";
+                }
+                CHECK(channelQos == "RELIABLE,VOLATILE",
+                      "R15 Channel.metadata qos == RELIABLE,VOLATILE（真实 offered，区别于默认）");
+                reader.close();
+            }
+            // metadata.json qos 断言
+            std::ifstream meta(qosBagDir + "/metadata.json");
+            std::stringstream buf;
+            buf << meta.rdbuf();
+            const std::string text = buf.str();
+            CHECK(text.find("\"qos\": \"RELIABLE,VOLATILE\"") != std::string::npos,
+                  "R15 metadata.json topic_metadata qos == RELIABLE,VOLATILE");
+        }
     }
 
     // 远端发布端清理（先于 bag 节点析构亦可，二者独立参与者）

@@ -105,6 +105,38 @@ std::string formatEpochNs(uint64_t epochNs)
     return out.str();
 }
 
+// ---- QoS 枚举 → 标准 DDS 拼写名（录制落盘 qos 串用；与 FastDDSDebugNode 端点详情
+// 显示同款辅助，各节点 cpp 独立持有无共享头） ----
+const char* reliabilityKindName(ReliabilityQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case RELIABLE_RELIABILITY_QOS:
+            return "RELIABLE";
+        case BEST_EFFORT_RELIABILITY_QOS:
+            return "BEST_EFFORT";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+const char* durabilityKindName(DurabilityQosPolicyKind kind)
+{
+    switch (kind)
+    {
+        case TRANSIENT_LOCAL_DURABILITY_QOS:
+            return "TRANSIENT_LOCAL";
+        case TRANSIENT_DURABILITY_QOS:
+            return "TRANSIENT";
+        case PERSISTENT_DURABILITY_QOS:
+            return "PERSISTENT";
+        case VOLATILE_DURABILITY_QOS:
+            return "VOLATILE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 // "YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn"（formatEpochNs 产出形态，本地时区）→ epoch 纳秒。
 // 严格定宽解析：总长 31，数字位与分隔符位置固定；月 1-12、日 1-31、时 0-23、分秒 0-59。
 // mktime（tm_isdst=-1，本地时区，逆于 formatEpochNs 的 localtime_r）后 localtime_r 回读
@@ -1171,6 +1203,15 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
             return fail("topic [" + topic + "] discovered without type name");
         }
 
+        // 落盘 QoS 串：首见 writer 的 offered Reliability/Durability（与下方 reader QoS
+        // 跟随同源同刻快照）；仅订阅者主题无 offered 可取，存空串（读侧回退默认 QoS）
+        std::string qosStr;
+        if (hasWriter)
+        {
+            qosStr = std::string(reliabilityKindName(writerInfo.reliability.kind)) + "," +
+                     durabilityKindName(writerInfo.durability.kind);
+        }
+
         // 透传类型按类型名共享注册（register_type 幂等；TypeSupport 以 shared_ptr 持所有权）
         const auto ins = types.emplace(typeName, TypeSupport(new PassthroughPubSubType(typeName)));
         if (ins.second)
@@ -1209,13 +1250,14 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         ctx.maxBagDurationSec = maxBagDurationSec;
         ctx.cache = cache.get();
         // 首见主题注册 mcap Channel：schema_id=0 无 schema 通道，encoding 记 "cdr"
-        // （原始 CDR 字节透传落盘的直接落点）；metadata 记类型名——schemaless 无 schema
-        // 可承载，bag reindex 据此重建 metadata.json 的 topics type（分片滚动后 mcap
-        // write 首见 channelId 自动补写 Channel 记录时一并携带）
+        // （原始 CDR 字节透传落盘的直接落点）；metadata 记类型名与 QoS 串——schemaless 无
+        // schema 可承载，bag reindex/bag play 据此恢复 topics type 与发布 QoS（分片滚动后
+        // mcap write 首见 channelId 自动补写 Channel 记录时一并携带）
         auto channelIt = channels.find(topic);
         if (channelIt == channels.end())
         {
-            mcap::Channel channel(topic, "cdr", 0, mcap::KeyValueMap{{"type", typeName}});
+            mcap::Channel channel(topic, "cdr", 0,
+                mcap::KeyValueMap{{"type", typeName}, {"qos", qosStr}});
             writer.addChannel(channel);
             channels[topic] = channel.id;
             ctx.channelId = channel.id;
@@ -1230,6 +1272,7 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         sub.topicType = types[typeName].get();
         sub.data = sub.topicType->create_data();
         sub.topic = topicHandle;
+        sub.qos = qosStr;
         sub.listener = std::make_unique<BagSubListener>(sub.data, ctx);
         sub.reader = subscriber_->create_datareader(topicHandle, rqos, sub.listener.get());
         if (sub.data == nullptr || sub.reader == nullptr)
@@ -1304,8 +1347,8 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
     writer.close();  // 收尾写 summary（三层索引 + 统计）；close() 无返回值，索引异常经后续读回路径暴露
 
     // metadata.json：顶层平铺 bag 元信息（storage_identifier=mcap；起始时间/时长各附
-    // _format 可读伴生键便于人工阅读；最小字段集：起始时间/时长/主题清单与计数），
-    // nlohmann json 组装后 dump(4) 美化落盘
+    // _format 可读伴生键便于人工阅读；最小字段集：起始时间/时长/主题清单与计数，
+    // topic_metadata 内 name/type/qos 并列），nlohmann json 组装后 dump(4) 美化落盘
     uint64_t totalMessages = 0;
     nlohmann::json topicsWithCount = nlohmann::json::array();
     for (const auto& topic : recordTopics)
@@ -1313,7 +1356,8 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         const auto& sub = subs_[topic];
         totalMessages += sub.listener->count();
         topicsWithCount.push_back(
-            {{"topic_metadata", {{"name", topic}, {"type", sub.type->get_name()}}},
+            {{"topic_metadata",
+                 {{"name", topic}, {"type", sub.type->get_name()}, {"qos", sub.qos}}},
              {"message_count", sub.listener->count()}});
     }
     const uint64_t startNs = firstNs.load();
@@ -1447,8 +1491,15 @@ bool FastDDSBagNode::bagInfoText(const std::string& bagDir, std::vector<std::str
             const auto& meta = topic.at("topic_metadata");
             std::ostringstream line;
             line << "Topic: " << meta.at("name").get<std::string>()
-                 << " | Type: " << meta.at("type").get<std::string>()
-                 << " | Count: " << topic.at("message_count").get<uint64_t>()
+                 << " | Type: " << meta.at("type").get<std::string>();
+            // QoS 段可选：metadata.json 无 qos 键（旧 bag）或空串（仅订阅者主题录制）时
+            // 不显示，行形态回退旧版快照
+            const auto qosIt = meta.find("qos");
+            if (qosIt != meta.end() && qosIt->is_string() && !qosIt->get<std::string>().empty())
+            {
+                line << " | QoS: " << qosIt->get<std::string>();
+            }
+            line << " | Count: " << topic.at("message_count").get<uint64_t>()
                  << " | Serialization Format: cdr";
             if (firstTopic)
             {
@@ -1852,6 +1903,7 @@ bool FastDDSBagNode::bagReindex(const std::string& bagDir, std::string* error)
     // 升序即主题名升序，对齐参考实现输出序）；起止时间取全局 min/max，无消息分片不参与
     std::map<std::string, uint64_t> topicCounts;
     std::map<std::string, std::string> topicTypes;  // 主题名 → 类型名（来自 Channel.metadata）
+    std::map<std::string, std::string> topicQos;    // 主题名 → QoS 串（来自 Channel.metadata）
     uint64_t startNs = 0;
     uint64_t endNs = 0;
     bool hasMessage = false;
@@ -1894,6 +1946,12 @@ bool FastDDSBagNode::bagReindex(const std::string& bagDir, std::string* error)
             {
                 topicTypes[topic] = typeIt->second;
             }
+            // QoS 串恢复（同 type 口径）：无该元数据保持空串回退
+            const auto qosIt = channelIt->second->metadata.find("qos");
+            if (qosIt != channelIt->second->metadata.end() && !qosIt->second.empty())
+            {
+                topicQos[topic] = qosIt->second;
+            }
         }
         if (fileStats.messageCount > 0)
         {
@@ -1915,7 +1973,8 @@ bool FastDDSBagNode::bagReindex(const std::string& bagDir, std::string* error)
     const uint64_t durationNs = (hasMessage && endNs > startNs) ? endNs - startNs : 0;
 
     // 组装与写侧同构的 metadata.json（无条件覆盖：reindex 语义即从数据文件重建元信息）；
-    // type 取 Channel.metadata 恢复，旧格式 bag（无该元数据）回退空串——文件里没有就不虚构
+    // type/qos 均取 Channel.metadata 恢复，旧格式 bag（无该元数据）回退空串——文件里没有就
+    // 不虚构
     uint64_t totalMessages = 0;
     nlohmann::json topicsWithCount = nlohmann::json::array();
     for (const auto& topicCount : topicCounts)
@@ -1926,8 +1985,14 @@ bool FastDDSBagNode::bagReindex(const std::string& bagDir, std::string* error)
         {
             topicType = typeIt->second;
         }
+        std::string topicQosStr;
+        if (const auto qosIt = topicQos.find(topicCount.first); qosIt != topicQos.end())
+        {
+            topicQosStr = qosIt->second;
+        }
         topicsWithCount.push_back(
-            {{"topic_metadata", {{"name", topicCount.first}, {"type", topicType}}},
+            {{"topic_metadata",
+                 {{"name", topicCount.first}, {"type", topicType}, {"qos", topicQosStr}}},
              {"message_count", topicCount.second}});
     }
     std::vector<std::string> filePaths;
@@ -2024,6 +2089,7 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
     //      归并阶段重新线性读（无需 summary） ----
     std::set<std::string> inputTopics;
     std::map<std::string, std::string> topicTypes;
+    std::map<std::string, std::string> topicQos;  // 主题名 → QoS 串（来自 Channel.metadata，旧格式 bag 缺省空串）
     for (const auto& in : perInput)
     {
         for (const auto& bagFile : in.files)
@@ -2057,6 +2123,18 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
                     {
                         return fail("topic [" + topic + "] has conflicting types [" +
                                     ins.first->second + "] vs [" + typeIt->second +
+                                    "] across inputs");
+                    }
+                }
+                // QoS 串同款收集与冲突检测（对齐 type 口径）：防转换产物丢 QoS
+                const auto qosIt = channel.second->metadata.find("qos");
+                if (qosIt != channel.second->metadata.end() && !qosIt->second.empty())
+                {
+                    const auto qins = topicQos.emplace(topic, qosIt->second);
+                    if (!qins.second && qins.first->second != qosIt->second)
+                    {
+                        return fail("topic [" + topic + "] has conflicting qos [" +
+                                    qins.first->second + "] vs [" + qosIt->second +
                                     "] across inputs");
                     }
                 }
@@ -2136,12 +2214,18 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
             return fail("open output mcap file failed: " + openStatus.message);
         }
         // 逐主题注册 Channel（record 同款：schema_id=0 无 schema 通道，encoding "cdr"，
-        // metadata 记类型名——bag reindex/bag info 据此恢复 type）；map 迭代升序即注册序
+        // metadata 记类型名与 QoS 串——bag reindex/bag info 据此恢复）；map 迭代升序即注册序
         std::map<std::string, mcap::ChannelId> channelIds;
         for (const auto& topic : outTopics)
         {
+            // QoS 串透传：预扫收集的 Channel.metadata qos（旧格式缺省空串）
+            std::string qosStr;
+            if (const auto qIt = topicQos.find(topic); qIt != topicQos.end())
+            {
+                qosStr = qIt->second;
+            }
             mcap::Channel channel(topic, "cdr", 0,
-                mcap::KeyValueMap{{"type", topicTypes[topic]}});
+                mcap::KeyValueMap{{"type", topicTypes[topic]}, {"qos", qosStr}});
             writer.addChannel(channel);
             channelIds[topic] = channel.id;
         }
@@ -2283,8 +2367,14 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
                 count = countIt->second.first;
             }
             totalCount += count;
+            std::string qosStr;
+            if (const auto qIt = topicQos.find(topic); qIt != topicQos.end())
+            {
+                qosStr = qIt->second;
+            }
             topicsWithCount.push_back(
-                {{"topic_metadata", {{"name", topic}, {"type", topicTypes[topic]}}},
+                {{"topic_metadata",
+                     {{"name", topic}, {"type", topicTypes[topic]}, {"qos", qosStr}}},
                     {"message_count", count}});
         }
         const uint64_t durationNs = (msgCount > 0 && lastNs > firstNs) ? lastNs - firstNs : 0;

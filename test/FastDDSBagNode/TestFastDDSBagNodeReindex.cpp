@@ -8,7 +8,7 @@
  *       服务层回执链路归 TestYomkRpcBagServiceContract。
  * 覆盖：
  *   R1 单文件重建全字段（version/storage_identifier/relative_file_paths/starting_time
- *      ns+_format/duration ns+_format/message_count/topics name+count+type 经
+ *      ns+_format/duration ns+_format/message_count/topics name+count+type+qos 经
  *      Channel.metadata 恢复）；
  *   R2 多分片合并（bag_0/1/2/10 编号序——bag_10 排 bag_2 之后非字典序；per-topic
  *      count 合并；starting=min、end=max → duration=全局跨度）；
@@ -20,10 +20,11 @@
  *   R7 空目录 → "empty directory"；有文件无匹配 → "no bag files found for reindexing"；
  *   R8 路径不存在 → "bag path [..] does not exist"；传文件路径 → "must specify a bag
  *      directory"；
- *   R9 旧格式 bag（Channel 无 metadata 类型名）→ type 回退空串不虚构。
+ *   R9 旧格式 bag（Channel 无 metadata）→ type/qos 回退空串不虚构。
  *
  * 造文件经 mcap::McapWriter（写侧同款 open/Channel("cdr",0[,metadata])/addChannel/write/
- * close，topicType 非空时经 Channel.metadata 落类型名——新格式；空即旧格式 bag），
+ * close，topicType 非空时经 Channel.metadata 落类型名——新格式；topicQos 非空追加落 qos
+ * 键；均空即旧格式 bag），
  * MCAP_IMPLEMENTATION 单译元在被测库 FastDDSBagNode.cpp，此处仅声明头链接库内实现）；
  * 固定 epoch 纳秒时间戳便于断言。用例目录避开 bag_ 前缀（防泄漏快照误报惯例），
  * 结束统一清理。
@@ -62,11 +63,11 @@ namespace
     // write + close）：messageCount 条消息 logTime 自 firstLogTimeNs 起 stepNs 递增；
     // messageCount=0 仅注册 channel 不写消息（空分片）；noSummary=true 不写 summary 段
     // （无 summary 文件造法，触发读侧 AllowFallbackScan 回退扫描）；topicType 非空经
-    // Channel.metadata 落类型名（新格式），空则不写 metadata（模拟旧格式 bag）
+    // Channel.metadata 落类型名（新格式），topicQos 非空追加落 qos 键，均空即旧格式 bag
     bool makeMcapFile(const std::string &path, const std::string &topic,
                       std::size_t messageCount, std::uint64_t firstLogTimeNs,
                       std::uint64_t stepNs, bool noSummary = false,
-                      const std::string &topicType = "")
+                      const std::string &topicType = "", const std::string &topicQos = "")
     {
         mcap::McapWriter writer;
         mcap::McapWriterOptions options("");
@@ -76,9 +77,16 @@ namespace
         {
             return false;
         }
-        mcap::Channel channel(topic, "cdr", 0,
-                              topicType.empty() ? mcap::KeyValueMap{}
-                                                : mcap::KeyValueMap{{"type", topicType}});
+        mcap::KeyValueMap metadata;
+        if (!topicType.empty())
+        {
+            metadata.emplace("type", topicType);
+        }
+        if (!topicQos.empty())
+        {
+            metadata.emplace("qos", topicQos);
+        }
+        mcap::Channel channel(topic, "cdr", 0, metadata);
         writer.addChannel(channel);
         const std::string payload = "hello"; // 任意非空透传载荷（字节内容不参与统计）
         for (std::size_t i = 0; i < messageCount; ++i)
@@ -138,8 +146,8 @@ int main()
         cleanupDir(dir);
         CHECK(std::filesystem::create_directory(dir), "R1 前置：临时目录创建成功");
         CHECK(makeMcapFile(dir + "/bag_0.mcap", "/rt/a", 3, kSecondNs, kSecondNs, false,
-                           "YomkRpc::MString"),
-              "R1 前置：单分片 3 条消息（logTime 1s/2s/3s，Channel.metadata 带类型名）");
+                           "YomkRpc::MString", "RELIABLE,VOLATILE"),
+              "R1 前置：单分片 3 条消息（Channel.metadata 带类型名+qos）");
         std::string error;
         CHECK(FastDDSBagNode::bagReindex(dir, &error), "R1 bagReindex → true");
         CHECK(error.empty(), "R1 成功路径 error 为空");
@@ -170,6 +178,9 @@ int main()
             CHECK(topics[0].at("topic_metadata").at("type").get<std::string>() ==
                       "YomkRpc::MString",
                   "R1 topic type 经 Channel.metadata 恢复");
+            CHECK(topics[0].at("topic_metadata").at("qos").get<std::string>() ==
+                      "RELIABLE,VOLATILE",
+                  "R1 topic qos 经 Channel.metadata 恢复（mcap → metadata.json 恢复链）");
             CHECK(topics[0].at("message_count").get<std::uint64_t>() == 3, "R1 topic count = 3");
         }
         cleanupDir(dir);
@@ -362,7 +373,7 @@ int main()
         std::filesystem::remove(filePath, ec);
     }
 
-    // ---- R9：旧格式 bag 回退（Channel 无 metadata 类型名）→ type 空串 ----
+    // ---- R9：旧格式 bag 回退（Channel 无 metadata）→ type/qos 空串 ----
     {
         const std::string dir = "reindex_r9";
         cleanupDir(dir);
@@ -378,6 +389,8 @@ int main()
         {
             CHECK(topics[0].at("topic_metadata").at("type").get<std::string>().empty(),
                   "R9 topic type 空串（旧格式 bag 无 Channel.metadata，回退不虚构）");
+            CHECK(topics[0].at("topic_metadata").at("qos").get<std::string>().empty(),
+                  "R9 topic qos 空串（旧格式 bag 无 Channel.metadata，回退不虚构）");
         }
         cleanupDir(dir);
     }

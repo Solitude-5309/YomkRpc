@@ -41,6 +41,7 @@ class FastDDSBagNode
         eprosima::fastdds::dds::Topic* topic = nullptr;  // 订阅主题，析构时 delete_topic
         eprosima::fastdds::dds::DataReader* reader = nullptr;
         std::unique_ptr<BagSubListener> listener;  // reader 的数据监听器，引用 data 缓冲并持写盘上下文
+        std::string qos;  // 落盘 QoS 串 "<RELIABILITY>,<DURABILITY>"（首见 writer offered；仅订阅者主题空串）——Channel.metadata 与 metadata.json 同源单次取值
     };
 
 public:
@@ -85,7 +86,9 @@ public:
     //   消费线程写盘、缓存满丢弃新消息并按主题计数、停止先排空缓存再关闭；0=每条直写）。
     // ③逐主题注册透传类型并建立订阅（reader QoS 的 Reliability/Durability 跟随远端 writer
     //   offered 值——requested ≤ offered 恒成立；仅有订阅者的主题无 offered 可跟随，用默认
-    //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"）；
+    //   QoS 由用户保证与后续发布者兼容）；每主题一个 mcap Channel（schema_id=0，encoding="cdr"，
+    //   metadata 落 type+qos 两键——qos 取首见 writer 的 offered Reliability/Durability 拼
+    //   "<RELIABILITY>,<DURABILITY>" 串（与 reader 跟随同源同刻快照），仅订阅者主题存空串）；
     //   每主题建订成功即输出一行 recording topic=<名> type=<类型>（stdout，通配展开后的实际
     //   录制清单由此可见——CLI 启动行仅显示清单项数）。
     // ④等待 yomk::g_bagRecordStop（每 100ms 轮询，SIGINT 经 bagRecordStop 置位）；
@@ -111,7 +114,9 @@ public:
     }
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
-    // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。outLines 每项一行
+    // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行
+    // 在 Type 后可选插 QoS 段（metadata.json 的 topic_metadata 含非空 qos 键时显示，旧
+    // bag/仅订阅者主题不显示该段）。outLines 每项一行
     // （不含换行符，首项为空行）；失败返回 false 并经 error 出参回填原因（路径不存在/
     // 无 metadata.json/解析失败）。bagDir 相对/绝对路径均可。
     static bool bagInfoText(const std::string& bagDir, std::vector<std::string>& outLines,

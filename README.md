@@ -885,7 +885,7 @@ hello_world: 12 条 / 288 字节
 
 #### 落盘产物（bag 目录两文件）
 
-- **`bag_0.mcap`**：标准 mcap 容器，逐主题 Channel（encoding=cdr、无 schema——schemaless 对齐透传语义），Channel.metadata 记录该主题消息类型名（`type=<类型名>`，`bag reindex` 重建元信息的数据来源），消息 record 保存原始 CDR 字节；收尾 close 补写 summary 三层索引，可用任意 mcap 标准读库读回；指定 `-b`/`-d` 时滚动产生同格式分片 `bag_1.mcap`、`bag_2.mcap`、...（各分片独立完整可读回，消息按写入顺序连续切分——不重复不空洞，同主题 channelId 跨分片一致）
+- **`bag_0.mcap`**：标准 mcap 容器，逐主题 Channel（encoding=cdr、无 schema——schemaless 对齐透传语义），Channel.metadata 记录该主题消息类型名与 QoS 串（`type=<类型名>`、`qos=<Reliability>,<Durability>`，仅订阅者主题录制时 qos 为空串——`bag reindex` 重建元信息与后续 `bag play` 发布 QoS 恢复的数据来源），消息 record 保存原始 CDR 字节；收尾 close 补写 summary 三层索引，可用任意 mcap 标准读库读回；指定 `-b`/`-d` 时滚动产生同格式分片 `bag_1.mcap`、`bag_2.mcap`、...（各分片独立完整可读回，消息按写入顺序连续切分——不重复不空洞，同主题 channelId 跨分片一致）
 - **`metadata.json`**：顶层平铺 bag 元信息（`version` 为 yomkrpc 自有格式版本，1 起步）：
 
 ```json
@@ -906,7 +906,8 @@ hello_world: 12 条 / 288 字节
         {
             "topic_metadata": {
                 "name": "hello_world",
-                "type": "YomkRpc::MString"
+                "type": "YomkRpc::MString",
+                "qos": "RELIABLE,TRANSIENT_LOCAL"
             },
             "message_count": 12
         }
@@ -914,7 +915,7 @@ hello_world: 12 条 / 288 字节
 }
 ```
 
-  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）；元信息文件缺失或损坏时可经 `yomkrpc bag reindex` 从分片重建（见 6.9）；按配置把录制产物过滤/裁剪/合并转换为新 bag 可经 `yomkrpc bag convert` 完成（见 6.10）。
+  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序），`topic_metadata` 的 `qos` 键记录录制时远端 writer 的 offered QoS 串（格式 `<Reliability>,<Durability>`，FastDDS 3.x DataWriter 默认即 `RELIABLE,TRANSIENT_LOCAL`；仅订阅者主题无 offered 可取存空串）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）；元信息文件缺失或损坏时可经 `yomkrpc bag reindex` 从分片重建（见 6.9）；按配置把录制产物过滤/裁剪/合并转换为新 bag 可经 `yomkrpc bag convert` 完成（见 6.10）。
 
 失败报错退出（录制阶段失败 exit=2），错误文本按卡点归类（校验类逐项列出）：
 
@@ -1006,7 +1007,7 @@ Duration:          4.012345678s
 Start:             Oct  2 2026 19:37:33.726412000 (1791953853.726412000)
 End:               Oct  2 2026 19:37:37.738757678 (1791953857.738757678)
 Messages:          12
-Topic information: Topic: hello_world | Type: YomkRpc::MString | Count: 12 | Serialization Format: cdr
+Topic information: Topic: hello_world | Type: YomkRpc::MString | QoS: RELIABLE,TRANSIENT_LOCAL | Count: 12 | Serialization Format: cdr
 ```
 
 逐行对照 `metadata.json`（字段见 6.7 落盘产物段）：
@@ -1019,15 +1020,16 @@ Topic information: Topic: hello_world | Type: YomkRpc::MString | Count: 12 | Ser
 | `Duration:` | `duration.nanoseconds` | 录制时长，`秒.9位纳秒s` |
 | `Start:` / `End:` | `starting_time.nanoseconds_since_epoch` / Start+duration | 本地时区人类可读时刻 + 括号内 epoch 秒（小数各 9 位） |
 | `Messages:` | `message_count` | 全局累计消息条数（跨分片） |
-| `Topic information:` | `topics_with_message_count[]` | 每主题一行 `Topic: <名> \| Type: <类型> \| Count: <条数> \| Serialization Format: cdr`；首主题跟标签、**续行缩进 19 空格对齐** |
+| `Topic information:` | `topics_with_message_count[]` | 每主题一行 `Topic: <名> \| Type: <类型> \| QoS: <串> \| Count: <条数> \| Serialization Format: cdr`（QoS 段可选——metadata.json 有 qos 键且非空才显示，旧 bag 与仅订阅者主题录制的空串均不显示）；首主题跟标签、**续行缩进 19 空格对齐** |
 
+- `QoS` 段可选：`topic_metadata.qos` 键存在且为非空字符串才输出（位于 `Type:` 与 `Count:` 之间），旧格式 bag 无该键、仅订阅者主题录制存空串——均不显示，行形态回退旧版快照
 - `Serialization Format` 固定输出 `cdr`：metadata.json 不含 serialization_format 字段，录制链路单格式 CDR（透传原始 CDR 字节），该值与 `storage_identifier: mcap` 同为中性技术标识，不改元信息结构保旧 bag 兼容
 - 空主题清单（一条都未录到）防御输出：`Topic information:` 标签后为空内容
 - 多主题输出示例（续行 19 空格缩进对齐）：
 
 ```
-Topic information: Topic: hello_t1 | Type: YomkRpc::MString | Count: 5 | Serialization Format: cdr
-                   Topic: hello_t2 | Type: YomkRpc::MString | Count: 8 | Serialization Format: cdr
+Topic information: Topic: hello_t1 | Type: YomkRpc::MString | QoS: RELIABLE,TRANSIENT_LOCAL | Count: 5 | Serialization Format: cdr
+                   Topic: hello_t2 | Type: YomkRpc::MString | QoS: RELIABLE,TRANSIENT_LOCAL | Count: 8 | Serialization Format: cdr
 ```
 
 失败报错退出（exit 1）：
@@ -1069,7 +1071,7 @@ yomkrpc bag info bag_2026-10-02_19-37-33_726      # 重建后可正常查看（�
 - **文件收集**：仅收集目录内匹配 `<前缀>_<编号>.mcap` 命名约定的 regular file，按**编号升序**处理（`bag_10.mcap` 排 `bag_2.mcap` 之后，非字典序）；其余条目（含子目录、非 .mcap 文件）跳过。限定 `.mcap` 扩展名是 yomkrpc 与参考实现的差异——存储格式固定，避免误开无关文件
 - **统计合并**：逐分片读 mcap summary 的 Statistics（per-channel 条数 + 全局起止时间）——per-topic 条数跨分片累加、starting_time 取各分片最小、end 取最大、duration 为**全局跨度**（end − start，与录制侧 metadata 写出口径一致；参考实现为逐分片时长累加的近似——分片间隙不计入，不照抄）
 - **主题清单**：`topics_with_message_count` 按主题名升序排列（对齐参考实现合并输出序）；空消息分片的 channel 无统计条目，不产生主题行
-- **type 经 Channel.metadata 恢复**：录制侧把消息类型名写入各分片 Channel 的 metadata（`type=<类型名>`，与录制侧 type 同源自发现公告，区别在于落盘持久化），重建时读回填入 `topic_metadata.type`；旧格式 bag（无该元数据的既有分片）读不到则回退空串——文件里没有就不虚构
+- **type/qos 经 Channel.metadata 恢复**：录制侧把消息类型名与 QoS 串写入各分片 Channel 的 metadata（`type=<类型名>`、`qos=<Reliability>,<Durability>`，与录制侧 type/QoS 同源自发现公告与远端 writer，区别在于落盘持久化），重建时读回分别填入 `topic_metadata.type` 与 `topic_metadata.qos`；旧格式 bag（无该元数据的既有分片）读不到则回退空串——文件里没有就不虚构
 - **无 summary 回退**：分片缺 summary（中断录制残片）或 summary 损坏时，走 mcap 库级 `AllowFallbackScan` 线性扫描重建统计——中断 bag 也能恢复元信息，非报错
 - **`_format` 伴生键**：重建产物的 starting_time/duration 与录制侧同构（含 `_format` 可读伴生键，格式见 6.7）
 
@@ -1085,7 +1087,7 @@ yomkrpc bag info bag_2026-10-02_19-37-33_726      # 重建后可正常查看（�
 | `duration.nanoseconds` | 全局跨度：各分片 Statistics.messageEndTime 最大值 − starting_time（无消息为 0） |
 | `duration.nanoseconds_format` | 上值格式化（`_format` 伴生键） |
 | `message_count` | 各分片 Statistics.messageCount 累加 |
-| `topics_with_message_count[]` | 各分片 Statistics.channelMessageCounts 经 channels 表（channelId→主题名）映射后按主题名合并累加；`type` 取 Channel.metadata 的 `type` 键（旧格式 bag 无该键则为空串） |
+| `topics_with_message_count[]` | 各分片 Statistics.channelMessageCounts 经 channels 表（channelId→主题名）映射后按主题名合并累加；`type`/`qos` 取 Channel.metadata 的 `type`/`qos` 键（旧格式 bag 无该键则为空串） |
 
 失败报错退出（exit 1）：
 
@@ -1148,8 +1150,8 @@ yomkrpc bag convert -i bag_a -i bag_b -o convert.json      # 多输入按 logTim
 行为说明：
 
 - **输入收集**：`-i` 可重复、至少 1 个（相对/绝对均可）；逐输入校验存在/为目录/含分片，重复目录拒绝（同名目录重复归并会双写同一消息）；分片收集与编号升序同 6.9 口径
-- **类型预扫**：逐分片读 Channel 映射收集输入主题全集与主题→类型名（`Channel.metadata` 的 `type` 键，同 6.9 恢复口径；缺 summary 的分片回退线性扫描）；同主题跨输入类型不一致报错；**入选主题无类型名（旧格式 bag）拒转**——类型名是透传落盘的唯一来源，未入选主题不校验
-- **透传真**：消息 CDR 字节、sequence、publishTime、logTime 全保留原值；逐条目按展开主题注册新 Channel（`metadata` 落类型名），输出分片滚动为 `bag_0.mcap`、`bag_1.mcap`、...（写前检查，新分片起始取本条 logTime，同 6.7 口径）
+- **类型预扫**：逐分片读 Channel 映射收集输入主题全集与主题→类型名、主题→QoS 串（`Channel.metadata` 的 `type`/`qos` 键，同 6.9 恢复口径；缺 summary 的分片回退线性扫描）；同主题跨输入类型或 QoS 串不一致均报错（空串不参与比较——旧格式 bag 的缺值不误报）；**入选主题无类型名（旧格式 bag）拒转**——类型名是透传落盘的唯一来源，未入选主题不校验
+- **透传真**：消息 CDR 字节、sequence、publishTime、logTime 全保留原值；逐条目按展开主题注册新 Channel（`metadata` 落 `type`+`qos` 两键——预扫收集值原样透传，旧格式缺省 qos 为空串），输出分片滚动为 `bag_0.mcap`、`bag_1.mcap`、...（写前检查，新分片起始取本条 logTime，同 6.7 口径）
 - **过滤与归并**：主题 ∈ 展开集 且 logTime ∈ [start, end]（0=不限）双条件过滤；多输入游标按 logTime 全局升序归并，tie 按输入序稳定——输出全局有序
 - **条目独立**：逐条目重建游标与输出 writer；任一条目失败整体报错退出（已产生的输出目录保留不回滚，便于排查）
 - **成功输出**：每条目一行 `converted <uri>: N messages / M bytes / K topics`（N/M 为实际写出消息数与字节，K 为展开主题数；0 条写出的条目同样有统计行，且 metadata 中保留该主题 0 计数条目——对齐 record 语义）
@@ -1177,6 +1179,7 @@ yomkrpc bag convert -i bag_a -i bag_b -o convert.json      # 多输入按 logTim
 | `topic [x] not found in input bags` | 精确主题不存在于输入 |
 | `topic pattern [x] matched no input topic` | 模式未命中任何输入主题 |
 | `topic [x] has conflicting types [a] vs [b] across inputs` | 同主题跨输入类型冲突 |
+| `topic [x] has conflicting qos [a] vs [b] across inputs` | 同主题跨输入 QoS 串冲突（空串不参与比较） |
 | `topic [x] has no type name (legacy bag without channel type metadata)` | 入选主题为旧格式 bag（无类型元数据） |
 | `output dir [x] already exists` | 输出目录已存在 |
 | `open <名> failed: ...` / `write to [x] failed ...` / `write metadata.json failed ...` | 输入分片读失败 / 输出写出失败 / 元信息写失败（输出目录保留） |

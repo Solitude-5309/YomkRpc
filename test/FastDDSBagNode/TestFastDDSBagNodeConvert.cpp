@@ -4,12 +4,13 @@
  *
  * 范围：bagConvert 对 mcap::McapWriter 造的真实输入 bag 临时目录的转换断言（全缺省合并、
  *       主题展开精确/通配、时段裁剪含边界、输出分片滚动、多输入全局归并、旧格式拒转与
- *       类型冲突）与失败路径契约；产物 metadata.json 全字段 + 消息 logTime 读回升序断言 +
+ *       类型/qos 冲突）与失败路径契约；产物 metadata.json 全字段 + 消息 logTime 读回升序断言 +
  *       bagInfoText 联动可读。服务层回执链路归 TestYomkRpcBagServiceContract。
  * 覆盖：
  *   C1 全缺省（单输入单条目仅 uri）→ 全主题全时段合并；metadata 对账（version/storage/
  *      relative_file_paths/starting_time+_format/duration+_format/message_count/topics
- *      name+count+type 透传）+ bagInfoText 联动 9 行；重复转换 → 输出目录已存在 fail；
+ *      name+count+type+qos 透传，输出 Channel.metadata 读回对账）+ bagInfoText 联动 9 行；
+ *      重复转换 → 输出目录已存在 fail；
  *   C2 topics 抽取：精确 + 通配混用 → 输出仅含展开集（未选主题不转换不入 metadata）；
  *      模式未命中 / 精确项不存在 / 两个 '*' → fail 精确文案；
  *   C3 时段裁剪：start/end 收窄含头含尾（2s..4s → 3 条）+ metadata 起始/时长按写入
@@ -23,9 +24,12 @@
  *   C7 start/end 可读时间字符串：字符串形式与整数形式裁剪等价（含头含尾）+ 产物 metadata
  *      `_format` 值拷贝即用往返无损 + 非法字符串（长度/分隔符/月 13/Feb 30 归一化）与非
  *      字符串类型 fail 精确文案。
+ *   C8 跨输入 qos 冲突（同主题 type 一致而 qos 不一致）→ fail 精确文案（预扫期整体
+ *      报错，对齐类型冲突口径；空串不收集不参与冲突）。
  *
  * 造文件经 mcap::McapWriter（写侧同款 open + Channel("cdr",0[,metadata]) + addChannel +
- * write + close，topicType 非空经 Channel.metadata 落类型名），MCAP_IMPLEMENTATION 单译元
+ * write + close，topicType 非空经 Channel.metadata 落类型名，topicQos 非空追加落 qos 键），
+ * MCAP_IMPLEMENTATION 单译元
  * 在被测库 FastDDSBagNode.cpp，此处仅声明头链接库内实现；读回经 mcap::McapReader 线性视图
  * （同译元）。固定 epoch 纳秒时间戳便于断言。用例目录避开 bag_ 前缀（防泄漏快照误报
  * 惯例），结束统一清理。
@@ -60,11 +64,12 @@ namespace
     // 造真实 mcap 分片文件（写侧同款 open + Channel("cdr",0[,metadata]) + addChannel +
     // write + close）：messageCount 条消息 logTime 自 firstLogTimeNs 起 stepNs 递增；
     // topicType 非空经 Channel.metadata 落类型名（新格式），空则不写 metadata（旧格式
-    // bag）；payloadSize 控制单条载荷字节数（默认 5 字节，C4 用大载荷触发 size 分片）
+    // bag）；topicQos 非空追加落 qos 键（与 type 同键集模拟新格式 bag）；
+    // payloadSize 控制单条载荷字节数（默认 5 字节，C4 用大载荷触发 size 分片）
     bool makeMcapFile(const std::string &path, const std::string &topic,
                       std::size_t messageCount, std::uint64_t firstLogTimeNs,
                       std::uint64_t stepNs, const std::string &topicType = "",
-                      std::size_t payloadSize = 5)
+                      std::size_t payloadSize = 5, const std::string &topicQos = "")
     {
         mcap::McapWriter writer;
         mcap::McapWriterOptions options("");
@@ -73,9 +78,16 @@ namespace
         {
             return false;
         }
-        mcap::Channel channel(topic, "cdr", 0,
-                              topicType.empty() ? mcap::KeyValueMap{}
-                                                : mcap::KeyValueMap{{"type", topicType}});
+        mcap::KeyValueMap metadata;
+        if (!topicType.empty())
+        {
+            metadata.emplace("type", topicType);
+        }
+        if (!topicQos.empty())
+        {
+            metadata.emplace("qos", topicQos);
+        }
+        mcap::Channel channel(topic, "cdr", 0, metadata);
         writer.addChannel(channel);
         const std::string payload(payloadSize, 'x'); // 任意非空透传载荷（字节内容不参与断言）
         for (std::size_t i = 0; i < messageCount; ++i)
@@ -190,8 +202,8 @@ int main()
         cleanupDir(outDir);
         ensureDir(inDir);
         CHECK(makeMcapFile(inDir + "/bag_0.mcap", "/rt/c1", 3, kSecondNs, kSecondNs,
-                  "YomkRpc::MString"),
-              "C1 前置：输入分片造文件成功");
+                  "YomkRpc::MString", 5, "RELIABLE,VOLATILE"),
+              "C1 前置：输入分片造文件成功（Channel.metadata 带类型名+qos）");
         CHECK(writeCfg(cfg, R"({"output_bags": [{"uri": ")" + outDir + R"("}]})"),
               "C1 前置：cfg 写入成功");
 
@@ -220,14 +232,34 @@ int main()
                       "/rt/c1" &&
                   info.at("topics_with_message_count")[0].at("topic_metadata").at("type") ==
                       "YomkRpc::MString" &&
+                  info.at("topics_with_message_count")[0].at("topic_metadata").at("qos") ==
+                      "RELIABLE,VOLATILE" &&
                   info.at("topics_with_message_count")[0].at("message_count") == 3,
-              "C1 topics name/type（Channel.metadata 透传）/count 对账");
+              "C1 topics name/type/qos（Channel.metadata 透传）/count 对账");
 
         std::vector<std::uint64_t> logTimes;
         CHECK(collectLogTimes(outDir + "/bag_0.mcap", logTimes) && logTimes.size() == 3 &&
                   logTimes[0] == kSecondNs && logTimes[1] == 2 * kSecondNs &&
                   logTimes[2] == 3 * kSecondNs,
               "C1 消息读回 3 条且 logTime 保真升序");
+
+        // 输出分片 Channel.metadata 读回：type+qos 两键透传（bag play 恢复源不断链）。
+        // 经线性视图迭代取 channel（channels() 映射在 readMessages 填充，open 后即取为空）
+        mcap::McapReader outReader;
+        CHECK(outReader.open(outDir + "/bag_0.mcap").ok(), "C1 前置：输出分片打开成功");
+        mcap::LinearMessageView outView = outReader.readMessages(
+            [](const mcap::Status &) {}, mcap::ReadMessageOptions{});
+        bool channelQosOk = false;
+        for (const auto &msgView : outView)
+        {
+            const auto &outMd = msgView.channel->metadata;
+            channelQosOk = outMd.find("type") != outMd.end() &&
+                           outMd.at("type") == "YomkRpc::MString" &&
+                           outMd.find("qos") != outMd.end() &&
+                           outMd.at("qos") == "RELIABLE,VOLATILE";
+        }
+        outReader.close();
+        CHECK(channelQosOk, "C1 输出 Channel.metadata type+qos 两键透传");
 
         std::vector<std::string> infoLines;
         CHECK(FastDDSBagNode::bagInfoText(outDir, infoLines, &err), "C1 bagInfoText 联动可读");
@@ -271,9 +303,12 @@ int main()
         const nlohmann::json topics = info.at("topics_with_message_count");
         CHECK(topics.size() == 2 && topics[0].at("topic_metadata").at("name") == "/rt/a" &&
                   topics[0].at("topic_metadata").at("type") == "T_A" &&
+                  topics[0].at("topic_metadata").at("qos") == "" &&
                   topics[1].at("topic_metadata").at("name") == "/rt/b" &&
-                  topics[1].at("topic_metadata").at("type") == "T_B",
-              "C2 输出仅含展开集（/rt/a ∪ /rt/b* 命中；/rt/c 不入选；type 逐主题透传）");
+                  topics[1].at("topic_metadata").at("type") == "T_B" &&
+                  topics[1].at("topic_metadata").at("qos") == "",
+              "C2 输出仅含展开集（/rt/a ∪ /rt/b* 命中；/rt/c 不入选；type 逐主题透传；"
+              "旧格式输入 qos 空串）");
 
         cleanupDir(outDir);
         CHECK(writeCfg(cfg,
@@ -621,6 +656,39 @@ int main()
         cleanupDir(inDir);
         cleanupDir(outDir);
         cleanupDir(outDir2);
+        std::filesystem::remove(cfg);
+    }
+
+    // ---- C8：跨输入 qos 冲突（同主题 type 一致而 qos 不一致）→ fail 精确文案 ----
+    {
+        const std::string inA = "conv_in_c8a";
+        const std::string inB = "conv_in_c8b";
+        const std::string outDir = "conv_out_c8";
+        const std::string cfg = "conv_c8.json";
+        cleanupDir(inA);
+        cleanupDir(inB);
+        cleanupDir(outDir);
+        ensureDir(inA);
+        ensureDir(inB);
+        CHECK(makeMcapFile(inA + "/bag_0.mcap", "/rt/q", 1, kSecondNs, kSecondNs, "T_Q", 5,
+                  "RELIABLE,VOLATILE") &&
+                  makeMcapFile(inB + "/bag_0.mcap", "/rt/q", 1, 2 * kSecondNs, kSecondNs,
+                      "T_Q", 5, "RELIABLE,TRANSIENT_LOCAL"),
+              "C8 前置：同主题 type 一致而 qos 不同的两输入造文件成功");
+        CHECK(writeCfg(cfg, R"({"output_bags": [{"uri": ")" + outDir + R"("}]})"),
+              "C8 前置：cfg 写入成功");
+        lines.clear();
+        err.clear();
+        CHECK(!FastDDSBagNode::bagConvert({inA, inB}, cfg, lines, &err) &&
+                  err.find("topic [/rt/q] has conflicting qos [RELIABLE,VOLATILE] vs "
+                           "[RELIABLE,TRANSIENT_LOCAL] across inputs") != std::string::npos,
+              "C8 跨输入 qos 冲突 fail 精确文案（预扫期整体报错）");
+        std::error_code ec;
+        CHECK(!std::filesystem::exists(outDir, ec),
+              "C8 冲突发生在输出目录创建之前（不落盘）");
+
+        cleanupDir(inA);
+        cleanupDir(inB);
         std::filesystem::remove(cfg);
     }
 
