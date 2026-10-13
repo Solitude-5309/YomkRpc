@@ -9,6 +9,20 @@
 #                                 重配+重编 stress 目标后全量运行
 #   ./run_tests.sh --bin DIR     指定测试可执行根目录（默认 <test>/build，自动定位子目录）
 #   ./run_tests.sh --timeout N   覆盖单测试超时秒数（默认 300；stress 默认 1800）
+#   ./run_tests.sh --sanitizer <套件列表>   插桩全量回归，逗号分隔多套顺序执行:
+#       ./run_tests.sh --sanitizer asan        仅 ASan+UBSan 一轮
+#       ./run_tests.sh --sanitizer asan,tsan   asan、tsan 各一轮（顺序执行，避免并发 CPU 争抢假失败）
+#       套件: asan → ASan+UBSan+LSan 插桩，自动注入 ASAN/UBSAN_OPTIONS 与
+#                    LSAN_OPTIONS=suppressions（契约：suppressions 必须走 LSAN_OPTIONS，
+#                    走 ASAN_OPTIONS 在本机 GCC libasan 上对任何非空文件均 parse 失败）；
+#            tsan → ThreadSanitizer 插桩，自动以 setarch -R 禁用 ASLR 包裹运行
+#                    （契约：本机内核 high-entropy ASLR 下 TSan runtime 启动即
+#                    "unexpected memory mapping"，退出码 66）。
+#                    注：GCC 11.4 libtsan 死锁检测器曾对 FastDDSDebugNode 的 cv 等待模式报
+#                    确定性假阳性 double lock（exit 66）并级联假 data race，已在源码侧以
+#                    sleep 轮询等价规避（workerLoop 去 cv 化，论证链见 test/tsan.supp 头注），
+#                    tsan 轮现可全绿
+#       （默认 off 行为不变；插桩可执行缺失时自动配置+构建独立目录 test/build-<套件>，不污染默认 test/build）
 #   ./run_tests.sh -h/--help     显示本帮助
 #
 # 行为:
@@ -45,6 +59,11 @@ TIMEOUT_SECS=300
 USER_TIMEOUT=0
 SKIP_STRESS=0
 FULL_MODE=0
+SANITIZER="off"
+# sanitizer 运行包裹器（tsan 轮为 setarch -R 禁 ASLR，其余轮为空数组 → 展开退化为原命令）
+SAN_RUNNER=()
+# 本轮执行的 sanitizer 轮次清单（--sanitizer 逗号分隔/重复累积；空 = 单轮默认 off）
+SAN_LIST=()
 
 # 测试清单：快→慢，stress 压尾（与 test/CMakeLists.txt 注册的目标一一对应）
 # bag 七例：契约（DDS-free 快）→ 生命周期（含 ~3s 校验窗与 ~5s 录制）→ 节点层三快测
@@ -75,8 +94,23 @@ ALL_TESTS=(
 STRESS_TESTS=(TestYomkRpcStressSerial TestYomkRpcStressConcurrent)
 
 usage() {
-    sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
+}
+
+# 解析 --sanitizer 值到 SAN_LIST: 支持逗号分隔多套（asan,tsan）与选项重复累积（--sanitizer asan --sanitizer tsan）
+add_sanitizer_list() {
+    local raw="$1" item
+    local -a items=()
+    IFS=',' read -ra items <<< "${raw}"
+    for item in "${items[@]}"; do
+        case "${item}" in
+            asan|tsan) SAN_LIST+=("${item}") ;;
+            off) ;;  # off 即跳过该轮；全部为 off 时由 parse_args 兜底为默认单轮
+            "") ;;   # 容忍尾逗号/空段
+            *) echo "错误: 未知 sanitizer '${item}'（可选 off/asan/tsan，逗号分隔多套）"; exit 1 ;;
+        esac
+    done
 }
 
 parse_args() {
@@ -88,11 +122,17 @@ parse_args() {
                            BIN_DIR="$2"; shift ;;
             --timeout)     [ $# -ge 2 ] || { echo "错误: --timeout 需要秒数参数"; exit 1; }
                            TIMEOUT_SECS="$2"; USER_TIMEOUT=1; shift ;;
+            --sanitizer)   [ $# -ge 2 ] || { echo "错误: --sanitizer 需要参数（off/asan/tsan，逗号分隔多套）"; exit 1; }
+                           add_sanitizer_list "$2"; shift ;;
             -h|--help)     usage ;;
             *) echo "错误: 未知参数 $1"; usage ;;
         esac
         shift
     done
+    # sanitizer 清单兜底: 未指定/全部为 off → 单轮默认模式（现有行为零变化）
+    if [ ${#SAN_LIST[@]} -eq 0 ]; then
+        SAN_LIST=("off")
+    fi
 }
 
 # EXIT/INT/TERM 兜底清理临时工作目录（幂等）
@@ -107,6 +147,7 @@ trap 'echo ""; echo "被用户中断"; exit 130' INT TERM
 # 定位每个测试可执行（兼容 test/build/{Harness,YomkRpcService}/ 与单 bin 目录两种布局）
 declare -A TEST_BIN
 locate_tests() {
+    TEST_BIN=()   # 多轮 sanitizer 间复用: 先清空，防上一轮 BIN_DIR 的旧路径残留误判为就绪
     local t found
     for t in "${TESTS[@]}"; do
         found="$(find "${BIN_DIR}" -maxdepth 2 -type f -name "${t}" -perm -u+x -print -quit 2>/dev/null)"
@@ -116,12 +157,19 @@ locate_tests() {
     done
 }
 
-BUILD_HINT="cmake -S ${SCRIPT_DIR} -B ${SCRIPT_DIR}/build -DCMAKE_PREFIX_PATH=\"\${YOMK_PREFIX_PATH:-/opt/yomk}\" && cmake --build ${SCRIPT_DIR}/build -j"
+# 构建提示按 sanitizer 轮次生成（插桩使用独立构建目录 test/build-<套件>，输出目录隔离避免污染默认 test/build）
+build_hint() {
+    if [ "${SANITIZER}" = "off" ]; then
+        echo "cmake -S ${SCRIPT_DIR} -B ${SCRIPT_DIR}/build -DCMAKE_PREFIX_PATH=\"\${YOMK_PREFIX_PATH:-/opt/yomk}\" && cmake --build ${SCRIPT_DIR}/build -j"
+    else
+        echo "cmake -S ${SCRIPT_DIR} -B ${SCRIPT_DIR}/build-${SANITIZER} -DYOMKRPC_TEST_SANITIZER=${SANITIZER} -DCMAKE_PREFIX_PATH=\"\${YOMK_PREFIX_PATH:-/opt/yomk}\" && cmake --build ${SCRIPT_DIR}/build-${SANITIZER} -j"
+    fi
+}
 
 precheck_bin() {
     if [ ! -d "${BIN_DIR}" ]; then
         echo "错误: 测试可执行根目录不存在: ${BIN_DIR}"
-        echo "请先构建: ${BUILD_HINT}"
+        echo "请先构建: $(build_hint)"
         exit 1
     fi
     locate_tests
@@ -134,9 +182,39 @@ precheck_bin() {
     if [ ${#missing[@]} -gt 0 ]; then
         echo "错误: ${BIN_DIR} 缺少以下测试可执行（共 ${#missing[@]} 个）:"
         for t in "${missing[@]}"; do echo "   - ${t}"; done
-        echo "请先构建: ${BUILD_HINT}"
+        echo "请先构建: $(build_hint)"
         exit 1
     fi
+}
+
+# 静默检查: BIN_DIR 存在且 TESTS 齐全（locate_tests 静默填充 TEST_BIN，供插桩轮自动构建决策）
+check_bin_ready() {
+    [ -d "${BIN_DIR}" ] || return 1
+    locate_tests
+    local t
+    for t in "${TESTS[@]}"; do
+        [ -n "${TEST_BIN[${t}]+set}" ] || return 1
+    done
+    return 0
+}
+
+# 插桩轮独有: 测试可执行缺失即自动配置+构建独立插桩目录 test/build-<套件>
+# （stdout 落盘 /dev/null 保 stderr 透传；FULL_MODE 时一并注入闭环 stress 规模，
+#   免去构建完成后再 rebuild_stress_full 的二次重编；插桩开关持久写入该目录 cache）
+ensure_sanitizer_build() {
+    local bdir="${SCRIPT_DIR}/build-${SANITIZER}"
+    echo "-- [sanitizer=${SANITIZER}] 测试可执行缺失，自动构建 ${bdir} ..."
+    local -a cfg=(-S "${SCRIPT_DIR}" -B "${bdir}"
+                  -DYOMKRPC_TEST_SANITIZER="${SANITIZER}"
+                  -DCMAKE_PREFIX_PATH="${YOMK_PREFIX_PATH:-/opt/yomk}")
+    if [ "${FULL_MODE}" -eq 1 ]; then
+        cfg+=(-DSTRESS_ITERS=100000 -DSTRESS_CYCLES=50)
+    fi
+    cmake "${cfg[@]}" > /dev/null \
+        || { echo "错误: cmake 配置失败，请手动执行: $(build_hint)"; exit 1; }
+    cmake --build "${bdir}" -j"$(nproc)" > /dev/null \
+        || { echo "错误: 构建失败，请手动执行: $(build_hint)"; exit 1; }
+    echo "-- [sanitizer=${SANITIZER}] 自动构建完成"
 }
 
 # ---------------------------------------------------------------------------
@@ -327,15 +405,18 @@ timeout_for() {
     fi
 }
 
-# --full：以闭环规模重配+重编 2 个 stress 目标（规模持久写入 test/build cache）
+# --full：以闭环规模重配+重编 2 个 stress 目标（规模持久写入 <构建目录>/CMakeCache.txt）
+# 入参为构建根目录：默认模式 test/build；插桩轮为其对应 build-<套件> 目录
+# （重配沿用该目录既有 cache —— YOMKRPC_TEST_SANITIZER 已持久化，插桩标志不会被清除）
 rebuild_stress_full() {
-    echo "-- full 模式: 重配 ${BUILD_DIR} 为闭环规模 STRESS_ITERS=100000 STRESS_CYCLES=50"
-    cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DSTRESS_ITERS=100000 -DSTRESS_CYCLES=50 \
+    local bdir="$1"
+    echo "-- full 模式: 重配 ${bdir} 为闭环规模 STRESS_ITERS=100000 STRESS_CYCLES=50"
+    cmake -S "${SCRIPT_DIR}" -B "${bdir}" -DSTRESS_ITERS=100000 -DSTRESS_CYCLES=50 \
         || { echo "错误: stress 重配失败"; exit 1; }
-    cmake --build "${BUILD_DIR}" \
+    cmake --build "${bdir}" \
         --target TestYomkRpcStressSerial TestYomkRpcStressConcurrent -j"$(nproc)" \
         || { echo "错误: stress 重编失败"; exit 1; }
-    echo "-- 闭环规模已持久写入 ${BUILD_DIR}/CMakeCache.txt（后续默认运行沿用）"
+    echo "-- 闭环规模已持久写入 ${bdir}/CMakeCache.txt（后续默认运行沿用）"
 }
 
 main() {
@@ -356,17 +437,93 @@ main() {
 
     clean_residue
 
-    if [ "${FULL_MODE}" -eq 1 ]; then
-        rebuild_stress_full
+    # 多套 sanitizer 顺序逐轮执行（并发会因 CPU 争抢造成时序类断言假失败）
+    local san round_total=${#SAN_LIST[@]} round_idx=0
+    for san in "${SAN_LIST[@]}"; do
+        SANITIZER="${san}"
+        round_idx=$((round_idx + 1))
+        if [ "${round_total}" -gt 1 ]; then
+            echo ""
+            echo "================ 第 ${round_idx}/${round_total} 轮: sanitizer=${san} ================"
+        fi
+        run_one_suite || exit 1
+    done
+    if [ "${round_total}" -gt 1 ]; then
+        echo ""
+        echo "==========================================="
+        echo " 全部 ${round_total} 轮 sanitizer 回归通过"
+        echo "==========================================="
+    fi
+}
+
+# 单轮完整流程: 定位/自动构建插桩目录 → 环境契约注入 → 测试循环 → 残留验收
+run_one_suite() {
+    local san_build="${SCRIPT_DIR}/build-${SANITIZER}"
+    if [ "${SANITIZER}" = "off" ]; then
+        # 默认模式行为零变化: --full 先重配重编 stress，再门禁检查
+        if [ "${FULL_MODE}" -eq 1 ]; then
+            rebuild_stress_full "${BUILD_DIR}"
+        else
+            echo "-- 模式: 默认（stress 编译期规模 5000/30，--full 可切闭环规模）"
+        fi
+        precheck_bin
     else
-        echo "-- 模式: 默认（stress 编译期规模 5000/30，--full 可切闭环规模）"
+        # 插桩轮: 默认指向独立插桩构建目录 test/build-<套件>（用户显式 --bin 时尊重其值）
+        if [ "${BIN_DIR}" = "${BUILD_DIR}" ]; then
+            BIN_DIR="${san_build}"
+        fi
+        if [ "${BIN_DIR}" != "${san_build}" ]; then
+            precheck_bin    # 显式 --bin: 缺失按错误报告（不自动构建到别处造成困惑）
+        elif check_bin_ready; then
+            if [ "${FULL_MODE}" -eq 1 ]; then
+                rebuild_stress_full "${san_build}"   # 复用既有插桩目录重配重编 stress（插桩 cache 保留）
+            else
+                echo "-- 模式: 默认（stress 编译期规模 5000/30，--full 可切闭环规模）"
+            fi
+            precheck_bin
+        else
+            ensure_sanitizer_build   # 缺失自愈: 自动配置+构建（FULL_MODE 时一并注入闭环 stress 规模）
+            precheck_bin
+        fi
     fi
 
-    precheck_bin
+    # sanitizer 运行环境契约（与本仓库 ctest ENVIRONMENT 注入同源，见 test/*/CMakeLists.txt）:
+    # 1) suppressions 必须走 LSAN_OPTIONS/TSAN_OPTIONS（LSan 抑制走 ASAN_OPTIONS 在本机
+    #    GCC libasan 上对任何非空 suppression 文件均 parse 失败）
+    # 2) TSan 须禁用 ASLR（本机内核 high-entropy ASLR 下 TSan runtime 启动即
+    #    "unexpected memory mapping" 退出码 66，非 race、非 YomkRpc 缺陷）
+    # 每轮环境隔离: 只保留本轮需要的 sanitizer 变量（多轮顺序执行时防上一轮残留）
+    SAN_RUNNER=()
+    case "${SANITIZER}" in
+        asan)
+            unset TSAN_OPTIONS
+            export ASAN_OPTIONS="detect_leaks=1:halt_on_error=1"
+            export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"
+            export LSAN_OPTIONS="suppressions=${SCRIPT_DIR}/lsan.supp:print_suppressions=0"
+            echo "-- sanitizer: asan（ASan+UBSan 插桩；suppressions 走 LSAN_OPTIONS）"
+            ;;
+        tsan)
+            unset ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS
+            export TSAN_OPTIONS="suppressions=${SCRIPT_DIR}/tsan.supp:print_suppressions=0:halt_on_error=1"
+            SAN_RUNNER=(setarch "$(uname -m)" -R)
+            echo "-- sanitizer: tsan（setarch -R 禁用 ASLR 包裹运行；suppressions 走 TSAN_OPTIONS）"
+            ;;
+        off)
+            unset ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS TSAN_OPTIONS
+            ;;
+    esac
 
-    local log_root="${SCRIPT_DIR}/test_logs/$(date +%Y%m%d_%H%M%S)"
+    local log_root
+    if [ "${SANITIZER}" = "off" ]; then
+        log_root="${SCRIPT_DIR}/test_logs/$(date +%Y%m%d_%H%M%S)"
+    else
+        log_root="${SCRIPT_DIR}/test_logs/$(date +%Y%m%d_%H%M%S)_${SANITIZER}"
+    fi
     mkdir -p "${log_root}"
     local summary="${log_root}/summary.log"
+    if [ "${SANITIZER}" != "off" ]; then
+        printf "[MODE] sanitizer=%s bin=%s\n" "${SANITIZER}" "${BIN_DIR}" >> "${summary}"
+    fi
 
     echo "-- 测试可执行目录: ${BIN_DIR}"
     echo "-- 日志目录:       ${log_root}"
@@ -381,7 +538,7 @@ main() {
         CURRENT_WORKDIR="$(mktemp -d)"
         printf "[%2d/%2d] %-32s " "${idx}" "${total}" "${t}"
         start=${SECONDS}
-        ( cd "${CURRENT_WORKDIR}" && timeout "${to}" "${TEST_BIN[${t}]}" ) > "${log}" 2>&1
+        ( cd "${CURRENT_WORKDIR}" && timeout "${to}" "${SAN_RUNNER[@]}" "${TEST_BIN[${t}]}" ) > "${log}" 2>&1
         rc=$?
         elapsed=$((SECONDS - start))
         cleanup_workdir
@@ -400,7 +557,7 @@ main() {
                 echo "${res_out}"
                 echo "完整日志: ${log}"
                 echo "-------------------------------------------"
-                exit 1
+                return 1
             fi
             echo "PASS (${elapsed}s)"
             if [ -n "${res_out}" ]; then
@@ -429,7 +586,7 @@ main() {
             fi
             echo "-------------------------------------------"
             clean_residue   # 崩溃/超时遗留的 SHM 立即清掉，保证机器现场干净
-            exit 1
+            return 1
         fi
     done
 
@@ -445,7 +602,7 @@ main() {
         echo "==========================================="
         echo " 测试后现场残留检查未通过，整体判定失败"
         echo "==========================================="
-        exit 1
+        return 1
     fi
 
     echo ""
@@ -455,7 +612,7 @@ main() {
     echo " 日志目录: ${log_root}"
     echo "==========================================="
     echo "YomkRpc 全量测试通过: ${passed}/${total}" >> "${summary}"
-    exit 0
+    return 0
 }
 
 main "$@"

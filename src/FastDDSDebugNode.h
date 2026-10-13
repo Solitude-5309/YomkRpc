@@ -2,7 +2,6 @@
 #define FASTDDSDEBUGNODE_H
 
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <fastdds/dds/builtin/topic/PublicationBuiltinTopicData.hpp>
 #include <fastdds/dds/builtin/topic/SubscriptionBuiltinTopicData.hpp>
@@ -318,7 +317,8 @@ private:
     // kSubWarnIntervalMs 才重复（既避免永久静默使调用方无从得知失败原因，也避免刷屏）。
     bool tryStartSubscription(const std::string& topicName,
                               const eprosima::fastdds::rtps::PublicationBuiltinTopicData& info);
-    // 订阅建立工作线程主体：轮询 pending_ × seen_ 交集并尝试建订阅；等待由 cv_ 有界超时驱动。
+    // 订阅建立工作线程主体：轮询 pending_ × seen_ 交集并尝试建订阅；等待由 sleep 有界节奏驱动
+    // （刻意不用 cv：GCC 11.4 libtsan 死锁检测器对 cv 等待模式报确定性假阳性，见 test/tsan.supp 头注）。
     // 并对登记满 kPendingHintDelayMs 仍无 writer 的主题打一次性等待提示（见 pendingSince_）。
     void workerLoop();
 
@@ -354,7 +354,6 @@ private:
     // mtx_ 调 create_topic/create_datareader，内部等 PDP 锁）形成锁序倒置死锁（实测 AB-BA）。
     // 锁序固定：mtx_ → seenMtx_，seenMtx_ 永不反向嵌套。
     std::mutex seenMtx_;
-    std::condition_variable cv_;  // 发现/登记变化时唤醒工作线程
     std::thread worker_;          // 订阅建立工作线程（setDomainId 成功后启动）
     bool workerRunning_ = false;  // 工作线程生命周期标志（mtx_ 保护）
 };

@@ -13,6 +13,34 @@
 # （由 libfastdds 线程回调，若用 called_from_lib:libfastdds.so 会连同其栈一并屏蔽，抹掉核心验证）。
 # 若某条抑制被证实掩盖 YomkRpc 自有源码缺陷，应删除该条并修复源码。
 
+# ---- GCC 11.4 libtsan 死锁检测器假阳性定罪（2026-10，用户决策：维持 GCC 仅记录，不加抑制）----
+# 现象：TestFastDDSDebugNode / TestYomkRpcDebugServiceLifecycle 以 exit 66 失败，报 double lock
+#       （当前栈 setDomainId:512 / listTopics:612 / ~FastDDSDebugNode():473 / topicPub:1472，"首次加锁栈"指向更早的
+#       一次正常获取，如 listTopics:612←main:309）并级联双侧同锁的假 data race（如 dtor:474 写 vs
+#       workerLoop:2052 读 workerRunning_，双侧均标 "mutexes: write M1238"）。
+# 定罪（非产品缺陷）：
+#   a. 31 行纯标准库最小复现 build/probe/probe_repro.cpp（栈上 mutex + worker 线程 cv_.wait_for +
+#      主线程顺序二次加锁）：-O1/-O0 各 3/3 复现同构 double lock 且程序打印 done 正常跑完——
+#      真实同线程重入必 100% 挂死；
+#   b. 报告自相矛盾：同一对方法无论先后调用方向均报重入（listTopics→setDomainId 与反向镜像）；
+#      race 双侧标注持有同一互斥量（同锁序列化下 TSan 语义不应报 race）；
+#   c. 源码全路径持锁核对通过（workerLoop:2009/2016/2042/2050-2052、dtor:473、tryStartSubscription:1891
+#      入口即持 mtx_，pendingSince_/pending_/workerRunning_ 无未持锁访问）；
+#   d. 触发面吻合：FastDDSDebugNode 是唯一使用 condition_variable 的类，MC6 tsan 基线全绿后新增的
+#      收敛轮询（cv_.wait_for 模式）即踩中。
+# GCC 侧规避均实测无效：detect_deadlocks=0（help 列表存在但不生效）、report_mutex_bugs=0（消 double
+#   lock 但残留 24 条级联假 race）、suppressions 的 deadlock:/mutex: 类型（对该报告不响应）、-O0、
+#   history_size=7；系统亦无更高版本 GCC 可试。
+# clang++-14 对照（LLVM TSan 14 死锁检测器默认关闭，race 检测完整保留）：cmake -S test -B
+#   test/build-tsan-clang -DCMAKE_CXX_COMPILER=clang++-14 -DYOMKRPC_TEST_SANITIZER=tsan 后两测
+#   6/6 全绿 0 报告，本清单的 FastDDS 第三方抑制条目照常生效。
+#
+# 【最终处置（2026-10-12）】源码侧规避落地：FastDDSDebugNode 去 cv 化（workerLoop 改 sleep
+#   轮询，删 cv_ 成员与三处 notify_all），探针变体矩阵证实 cv_.wait_for 是触发必要条件
+#   （sleep 轮询版 3/3 干净、仅线程锁外启动版 3/3 仍报）。落地后 tsan 全量 19/19 全绿
+#   （复用 test/build-tsan，运行器 --sanitizer tsan 实测 254s）；语义代价仅为新登记响应/
+#   析构停止延迟 ≤100ms。本清单条目未新增（无需抑制 YomkRpc 自有源码）。
+
 # ---- FastDDS ResourceEvent：异步事件线程内部锁序（lock-order-inversion / double-lock）----
 deadlock:eprosima::fastdds::rtps::ResourceEvent
 mutex:eprosima::fastdds::rtps::ResourceEvent

@@ -1238,6 +1238,7 @@ cmake --build test/build -j
 ./test/run_tests.sh --full         # 闭环规模：自动重配+重编 stress（100000/50）后全量运行
 ./test/run_tests.sh --bin DIR      # 指定测试可执行根目录（默认 test/build，自动定位子目录）
 ./test/run_tests.sh --timeout N    # 单测试超时秒数（默认 300；stress 默认 1800）
+./test/run_tests.sh --sanitizer asan,tsan  # 插桩全量回归：asan、tsan 各一轮顺序执行（可执行缺失时自动构建 test/build-<套件>）
 ```
 
 运行器行为：
@@ -1246,6 +1247,7 @@ cmake --build test/build -j
 - **日志落盘**：`test/test_logs/<时间戳>/` 下每个测试一份日志 + `summary.log` 汇总
 - **现场清理**：每个测试在独立临时目录运行（隔离 CWD）；运行前清理 `/dev/shm` 中 FastDDS 上次遗留的共享内存（崩溃/超时时 SHM 段不会自清），每个测试结束后与全部结束后复查残留，发现即清理并判定失败
 - **超时保护**：每个测试由 `timeout` 包裹，防卡死
+- **sanitizer 插桩回归**（`--sanitizer <套件列表>`，默认 off 行为不变）：逗号分隔多套（如 `asan,tsan`）各跑一轮、顺序执行防 CPU 争抢假失败；插桩可执行缺失时自动配置+构建独立目录 `test/build-<套件>/`（即 7.1 的 `-DYOMKRPC_TEST_SANITIZER` 开关，`--full` 时一并注入闭环 stress 规模）。asan 轮注入 ASAN/UBSAN_OPTIONS 与 `LSAN_OPTIONS=suppressions=test/lsan.supp`（契约：suppressions 必须走 LSAN_OPTIONS，走 ASAN_OPTIONS 在本机 GCC libasan 上对任何非空文件均 parse 失败）；tsan 轮注入 `TSAN_OPTIONS=suppressions=test/tsan.supp` 并以 `setarch -R` 禁用 ASLR 包裹运行（契约：本机内核 high-entropy ASLR 下 TSan runtime 启动即 "unexpected memory mapping"，退出码 66）。注：GCC 11.4 libtsan 死锁检测器曾对 FastDDSDebugNode 的 `cv_.wait_for` 等待模式报确定性假阳性 double lock 并级联假 data race（31 行纯标准库最小复现定罪，详见 `test/tsan.supp` 头注），已在源码侧以 sleep 轮询等价规避（workerLoop 去 cv 化，新登记响应/析构停止延迟 ≤100ms），tsan 轮现可全绿
 
 ### 7.3 单独运行与压测规模
 

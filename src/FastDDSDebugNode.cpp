@@ -468,12 +468,11 @@ FastDDSDebugNode::FastDDSDebugNode()
 FastDDSDebugNode::~FastDDSDebugNode()
 {
     // 先停工作线程（不再触碰 subs_/participant_），再按 DataReader → Topic → Subscriber →
-    // Participant 顺序清理
+    // Participant 顺序清理；停止标志由工作线程下一轮轮询感知（等待 ≤ kWorkerInterval）
     {
         std::lock_guard<std::mutex> lock(mtx_);
         workerRunning_ = false;
     }
-    cv_.notify_all();
     if (worker_.joinable())
     {
         worker_.join();
@@ -586,8 +585,9 @@ bool FastDDSDebugNode::subscribeTopic(const std::string& topicName, std::string*
     // kPendingHintDelayMs 仍无 writer 时打）。不在此处直接查发现缓存判定：调用方
     // 通常在 setDomainId 之后立即登记，本端发现尚未完成会对"发布者早已在线"误报
     pendingSince_[topicName] = std::chrono::steady_clock::now();
-    // 订阅建立由工作线程完成（含 writer 先于登记、TypeObject 稍后就绪等时序），此处仅登记并唤醒
-    cv_.notify_all();
+    // 订阅建立由工作线程完成（含 writer 先于登记、TypeObject 稍后就绪等时序），此处仅登记，
+    // 由工作线程按 kWorkerInterval 轮询取件（刻意不用 cv 即时唤醒：GCC 11.4 libtsan 死锁
+    // 检测器对 cv 等待模式报确定性 double lock 假阳性，定罪链见 test/tsan.supp 头注）
     return true;
 }
 
@@ -1818,17 +1818,15 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
     return ok;
 }
 
-// 发现线程回调入口：新见 writer 追加进 seen_ 列表并唤醒工作线程；回调内不建订阅。
+// 发现线程回调入口：新见 writer 追加进 seen_ 列表（由工作线程按 kWorkerInterval 轮询取件）；
+// 回调内不建订阅。
 // 仅拿 seenMtx_ 叶子锁：本回调在 Fast DDS EDP 锁临界区内被调用，拿 mtx_ 会与工作线程
 // （持 mtx_ 建 reader 内部等 PDP/EDP 锁）锁序倒置死锁（详见 seenMtx_ 成员注释）。
 bool FastDDSDebugNode::onWriterDiscovered(const std::string& topicName,
         const rtps::PublicationBuiltinTopicData& info)
 {
-    {
-        std::lock_guard<std::mutex> lock(seenMtx_);
-        seen_[topicName].push_back(info);
-    }
-    cv_.notify_all();
+    std::lock_guard<std::mutex> lock(seenMtx_);
+    seen_[topicName].push_back(info);
     return true;
 }
 
@@ -1998,60 +1996,67 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
     return true;
 }
 
-// 订阅建立工作线程：轮询 pending_ × seen_ 交集建订阅；cv_ 有界超时兼顾"新发现/新登记即时响应"
+// 订阅建立工作线程：轮询 pending_ × seen_ 交集建订阅；sleep 有界节奏兼顾"新发现/新登记响应"
 // 与"TypeObject 稍后就绪的重试"。查交集时按锁序 mtx_ → seenMtx_ 嵌套。
+// 等待刻意不用 condition_variable：GCC 11.4 libtsan 死锁检测器对「常驻 unique_lock +
+// cv_.wait_for + 主线程顺序二次获取同一锁」模式报确定性 double lock 假阳性并级联假 data
+// race（定罪链见 test/tsan.supp 头注），sleep 轮询为等价规避，新登记响应延迟 ≤ kWorkerInterval。
 // 附带职责：对登记满 kPendingHintDelayMs 仍无 writer 的主题打一次性等待提示，消除
 // 主题名拼错 / 发布者未上线 / 仅有订阅者无发布者三种情形下 topic print 与 topic hz 的
 // 永久静默（仅提示，不改登记状态与返回值：后续 writer 上线仍会自动建订）。
 void FastDDSDebugNode::workerLoop()
 {
-    constexpr auto kWorkerInterval = std::chrono::milliseconds(100);  // 空闲等待/重试节奏
-    std::unique_lock<std::mutex> lock(mtx_);
-    while (workerRunning_)
+    constexpr auto kWorkerInterval = std::chrono::milliseconds(100);  // 空闲轮询/重试节奏
+    while (true)
     {
         std::string todo;
         std::string undiscovered;  // 宽限期满仍无 writer 的主题（待打一次性提示）
         rtps::PublicationBuiltinTopicData info;
         {
-            std::lock_guard<std::mutex> seenLock(seenMtx_);
-            for (const auto& name : pending_)
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (!workerRunning_)
             {
-                auto it = seen_.find(name);
-                if (it != seen_.end())
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> seenLock(seenMtx_);
+                for (const auto& name : pending_)
                 {
-                    todo = name;
-                    info = it->second.front();  // 取任一同主题 writer 发现信息快照，解锁后使用
-                    break;
+                    auto it = seen_.find(name);
+                    if (it != seen_.end())
+                    {
+                        todo = name;
+                        info = it->second.front();  // 取任一同主题 writer 发现信息快照，解锁后使用
+                        break;
+                    }
+                    // 无 writer（含仅见 reader 的情形，建订只由 writer 驱动）：登记满宽限窗且
+                    // 尚未提示过（已提示者值为 time_point::max()）→ 记一个待提示主题
+                    auto since = pendingSince_.find(name);
+                    if (pendingSince_.end() != since &&
+                            std::chrono::steady_clock::time_point::max() != since->second &&
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - since->second).count() >=
+                            static_cast<int64_t>(kPendingHintDelayMs))
+                    {
+                        undiscovered = name;
+                    }
                 }
-                // 无 writer（含仅见 reader 的情形，建订只由 writer 驱动）：登记满宽限窗且
-                // 尚未提示过（已提示者值为 time_point::max()）→ 记一个待提示主题
-                auto since = pendingSince_.find(name);
-                if (pendingSince_.end() != since &&
-                        std::chrono::steady_clock::time_point::max() != since->second &&
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - since->second).count() >=
-                        static_cast<int64_t>(kPendingHintDelayMs))
-                {
-                    undiscovered = name;
-                }
+            }
+            if (!undiscovered.empty())
+            {
+                // 先置 max() 作已提示标记再打印（打印挪到锁外），保证同一主题只提示一次
+                pendingSince_[undiscovered] = std::chrono::steady_clock::time_point::max();
             }
         }
         if (!undiscovered.empty())
         {
-            // 先置 max() 作已提示标记再打印，保证同一主题只提示一次
-            pendingSince_[undiscovered] = std::chrono::steady_clock::time_point::max();
             std::cout << "topic [" << undiscovered
                       << "] not discovered yet, waiting for publisher..." << std::endl;
         }
         if (!todo.empty())
         {
-            lock.unlock();
             tryStartSubscription(todo, info);
-            lock.lock();
         }
-        if (workerRunning_)
-        {
-            cv_.wait_for(lock, kWorkerInterval);
-        }
+        std::this_thread::sleep_for(kWorkerInterval);
     }
 }
