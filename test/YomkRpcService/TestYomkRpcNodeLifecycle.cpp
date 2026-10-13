@@ -38,7 +38,7 @@ namespace
       // 构造 /create_node 请求包
       YomkPkgPtr mkNode(uint32_t domainId, const std::string &nodeName)
       {
-            return YomkMkPtr(DDSNode, DDSNode{domainId, nodeName});
+            return YomkMkPtr(DDSNode, DDSNode{nodeName, domainId});
       }
 
       // Part A-1：生命周期——创建/重名/同域共存/删除/重复删除

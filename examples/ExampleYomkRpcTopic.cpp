@@ -24,7 +24,7 @@ int main(int argc, char* argv[])
 
     // 1. 创建节点（每节点一个独立 DDS 参与者）
     YOMK_INFO_TAG("ExampleYomkRpcTopic", "=== YomkRpcService::createNode ===");
-    auto resp = YOMKRPC_NODE(0, "node0");
+    auto resp = YOMKRPC_NODE("node0");
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("ExampleYomkRpcTopic", "create node failed: ", resp.m_msg);

@@ -26,8 +26,9 @@ int main(int argc, char* argv[])
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
 
-    // 1. 创建节点：domainId=0（仅同域节点互通），nodeName 唯一
-    auto resp = YOMKRPC_NODE(0, "pub_node");
+    // 1. 创建节点：domainId 缺省取环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法回落 0；仅同域
+    //    节点互通），nodeName 唯一
+    auto resp = YOMKRPC_NODE("pub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("ExampleYomkRpcPub", "create node failed: ", resp.m_msg);

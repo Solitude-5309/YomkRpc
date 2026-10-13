@@ -24,8 +24,8 @@ int main(int argc, char* argv[])
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
 
-    // 1. 创建节点：domainId=0，须与发布端同域方可互通
-    auto resp = YOMKRPC_NODE(0, "sub_node");
+    // 1. 创建节点：domainId 缺省取环境变量 YOMKRPC_DDS_DOMAIN_ID，须与发布端同域方可互通
+    auto resp = YOMKRPC_NODE("sub_node");
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("ExampleYomkRpcSub", "create node failed: ", resp.m_msg);

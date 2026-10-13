@@ -62,7 +62,7 @@ namespace
     // 构造 /create_node 请求包
     YomkPkgPtr mkNode(uint32_t domainId, const std::string &nodeName)
     {
-        return YomkMkPtr(DDSNode, DDSNode{domainId, nodeName});
+        return YomkMkPtr(DDSNode, DDSNode{nodeName, domainId});
     }
 
     // ---- Part A1：并发 create_node 同名 → 每轮唯一赢家（service mtx_ 序列化 find-then-insert）----

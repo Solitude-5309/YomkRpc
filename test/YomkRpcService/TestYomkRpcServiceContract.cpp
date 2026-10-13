@@ -66,7 +66,7 @@ namespace
         };
 
         checkGuards("/create_node", "DDSNode", YomkMkPtr(String, "wrong"));
-        checkGuards("/delete_node", "String", YomkMkPtr(DDSNode, DDSNode{0, "wrong"}));
+        checkGuards("/delete_node", "String", YomkMkPtr(DDSNode, DDSNode{"wrong", 0}));
         checkGuards("/register_pub_topic", "DDSTopic", YomkMkPtr(String, "wrong"));
         checkGuards("/register_sub_topic", "DDSSubRequest", YomkMkPtr(String, "wrong"));
         checkGuards("/publish", "DDSPublish", YomkMkPtr(String, "wrong"));

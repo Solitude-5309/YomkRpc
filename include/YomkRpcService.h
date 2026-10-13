@@ -3,6 +3,8 @@
 // 订阅回调类型 DDSCallbackFunc，以及服务类 YomkRpcService 的声明。用户通常直接使用 YomkRpcAPI.h 中的宏。
 #include <YomkServer/YomkAPI.h>
 
+#include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -38,11 +40,36 @@ private:
 // 不同类型的安全消费方式见 README。
 using DDSCallbackFunc = std::function<void(const void*)>;
 
+// 缺省域 id 解析辅助常量：十进制解析基数与 DDS 域号上限（与 src 各服务 createNode 校验一致）
+constexpr unsigned long kDomainEnvBase = 10;
+constexpr unsigned long kDomainIdEnvMax = 232;
+
+// 缺省域 id 解析：读环境变量 YOMKRPC_DDS_DOMAIN_ID（与 yomkrpc CLI 同源同语义）。
+// 未设置/为空/非法（非纯十进制）/超出 [0,232] 时静默回落 0；不打印日志（纯头文件内联，
+// 不引入日志依赖）。
+inline uint32_t YomkRpcDefaultDomainId()
+{
+    const char* v = std::getenv("YOMKRPC_DDS_DOMAIN_ID");
+    if (!v || !*v)
+    {
+        return 0;
+    }
+    char* end = nullptr;
+    unsigned long n = std::strtoul(v, &end, kDomainEnvBase);
+    if (end == v || *end != '\0' || n > kDomainIdEnvMax)
+    {
+        return 0;
+    }
+    return static_cast<uint32_t>(n);
+}
+
 // create_node 请求负载。
 struct DDSNode
 {
-    uint32_t domainId;     // DDS 域号，合法范围 [0,232]
     std::string nodeName;  // 节点唯一名，不可为空
+    // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_NODE 单参形态）经类内缺省初始化器读
+    // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0）。
+    uint32_t domainId = YomkRpcDefaultDomainId();
 };
 
 // register_pub_topic 请求负载。

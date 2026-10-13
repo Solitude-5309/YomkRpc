@@ -7,9 +7,12 @@
 // 除 YOMKRPC_VERSION（无返回值）外，其余宏均返回 YomkResponse，调用后须判 m_status==YomkResponse::eOk。
 
 // 创建 DDS 节点（每节点对应一个独立的 DDS 参与者）。
-// domainId：DDS 域号，合法范围 [0,232]，仅同域节点可互通；nodeName：节点唯一名。
-#define YOMKRPC_NODE(domainId, nodeName) \
-    YOMK_REQUEST("/YomkRpcService/create_node", YomkMkPtr(DDSNode, DDSNode{domainId, nodeName}))
+// 形态 1：YOMKRPC_NODE(nodeName)            —— domainId 缺省，经 DDSNode 类内缺省初始化器
+//            读环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超 [0,232] 回落 0）。
+// 形态 2：YOMKRPC_NODE(nodeName, domainId)  —— 显式指定，合法范围 [0,232]。
+// nodeName：节点唯一名。仅同域节点可互通。
+#define YOMKRPC_NODE(nodeName, ...) \
+    YOMK_REQUEST("/YomkRpcService/create_node", YomkMkPtr(DDSNode, DDSNode{nodeName, ##__VA_ARGS__}))
 
 // 查询扩展版本：宏内部自动解包并打印（成功走 YOMK_INFO_TAG、失败走 YOMK_ERROR_TAG），无返回值。
 #define YOMKRPC_VERSION()                                                          \

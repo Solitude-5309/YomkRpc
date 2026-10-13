@@ -20,7 +20,7 @@ int main(int argc, char* argv[])
 
     // 1. 创建节点
     YOMK_INFO_TAG("ExampleYomkRpcTopicLoan", "=== YomkRpcService::createNode ===");
-    auto resp = YOMKRPC_NODE(0, "node0");
+    auto resp = YOMKRPC_NODE("node0");
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("ExampleYomkRpcTopicLoan", "create node failed: ", resp.m_msg);

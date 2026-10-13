@@ -73,7 +73,7 @@ namespace
 
     YomkPkgPtr mkNode(uint32_t domainId, const std::string &nodeName)
     {
-        return YomkMkPtr(DDSNode, DDSNode{domainId, nodeName});
+        return YomkMkPtr(DDSNode, DDSNode{nodeName, domainId});
     }
 
     // ============================ 资源采样器（Linux /proc，零第三方依赖；与 serial exe 各自独立）============================

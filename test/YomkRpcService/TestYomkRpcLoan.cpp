@@ -49,7 +49,7 @@ namespace
     // 构造 /create_node 请求包
     YomkPkgPtr mkNode(uint32_t domainId, const std::string &nodeName)
     {
-        return YomkMkPtr(DDSNode, DDSNode{domainId, nodeName});
+        return YomkMkPtr(DDSNode, DDSNode{nodeName, domainId});
     }
 
     // Part A：loan 类型差异（plain MInt32 借出成功 / 非 plain MString 回退）+ discard 归还

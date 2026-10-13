@@ -47,7 +47,7 @@ namespace
     // 构造 /create_node 请求包
     YomkPkgPtr mkNode(uint32_t domainId, const std::string &nodeName)
     {
-        return YomkMkPtr(DDSNode, DDSNode{domainId, nodeName});
+        return YomkMkPtr(DDSNode, DDSNode{nodeName, domainId});
     }
 
     // T8/T10/T9：注册成功 + 守卫（重复注册/type==null）+ 类型名不符回滚

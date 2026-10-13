@@ -9,7 +9,7 @@
 | 宏 API（用户调用） | 功能说明 |
 |--------------------|----------|
 | `YOMKRPC_VERSION()` | URL端点：`/YomkRpcService/version`<br>简述：版本查询<br>详述：宏内部自动解包并打印版本，无返回值 |
-| `YOMKRPC_NODE(domainId, nodeName)` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{domainId, nodeName}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误 |
+| `YOMKRPC_NODE(nodeName[, domainId])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0） |
 | `YOMKRPC_DEL_NODE(nodeName)` | URL端点：`/YomkRpcService/delete_node`<br>简述：删除节点<br>详述：销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
 | `YOMKRPC_PUB_TOPIC(nodeName, topicName, type)` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放） |
 | `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback)` | URL端点：`/YomkRpcService/register_sub_topic`<br>简述：注册订阅主题<br>详述：打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建 |
@@ -143,8 +143,8 @@ int main(int argc, char *argv[])
     YOMK_NEW_SERVICE(YomkRpcService);
     YOMKRPC_VERSION(); // 查看版本（宏内部自动解包并打印）
 
-    // 2. 创建节点（每节点一个独立 DDS 参与者）
-    YOMKRPC_NODE(0, "node0");
+    // 2. 创建节点（每节点一个独立 DDS 参与者；domainId 缺省取环境变量 YOMKRPC_DDS_DOMAIN_ID）
+    YOMKRPC_NODE("node0");
 
     // 3. 注册发布主题（type 所有权移交 FastDDSNode）
     YOMKRPC_PUB_TOPIC("node0", "my_topic", new YomkRpc::MStringPubSubType());
@@ -201,8 +201,9 @@ int main(int argc, char *argv[])
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
 
-    // 2. 创建节点与发布主题（loan 仅支持 plain 类型：纯基础类型成员 + FINAL 可扩展性）
-    YOMKRPC_NODE(0, "node0");
+    // 2. 创建节点与发布主题（loan 仅支持 plain 类型：纯基础类型成员 + FINAL 可扩展性；
+    //    domainId 缺省取环境变量 YOMKRPC_DDS_DOMAIN_ID）
+    YOMKRPC_NODE("node0");
     YOMKRPC_PUB_TOPIC("node0", "int_topic", new YomkRpc::MInt32PubSubType());
 
     // 3. 等待 DDS discovery 完成后借出发布
@@ -747,7 +748,7 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
-`yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出。节点名称在创建节点时经 `YOMKRPC_NODE(domainId, nodeName)` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
+`yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出。节点名称在创建节点时经 `YOMKRPC_NODE(nodeName[, domainId])` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
 
 ```bash
 yomkrpc node list          # 默认域 0
