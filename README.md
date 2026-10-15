@@ -311,7 +311,7 @@ ExampleYomkRpcPub
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
 | `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc topic pub -ef <主题名> [-o 目录]` | 按主题名导出消息描述 JSON 文件（内容即默认值模板 JSON 本身，多行缩进可直接 `$(cat)` 填进发布命令；仅发描述不发布） |
-| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出统计，首轮收敛 + ack 确认；`-w N` 期望建匹配订阅端数，计数达到 N 才开始发布否则一直等待（主题未发现时先等待主题出现）；`-r N` 按 N Hz 持续发布；`-t N` 条数上限，发满即停排空 200ms 后退出；`-w`/`-r`/`-t` 可任意顺序叠加） |
+| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出统计，首轮收敛 + ack 确认；逐条回执附带消息 JSON 内容——从实际待发数据转出，与 topic print 输出同源；`-w N` 期望建匹配订阅端数，计数达到 N 才开始发布否则一直等待（主题未发现时先等待主题出现）；`-r N` 按 N Hz 持续发布；`-t N` 条数上限，发满即停排空 200ms 后退出；`-w`/`-r`/`-t` 可任 意顺序叠加） |
 | `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省 1Hz 持续发送，`-w N` 等待订阅者匹配、`-r N` 持续发布、`-t N` 条数上限，语义同直发） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |

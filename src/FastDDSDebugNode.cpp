@@ -1734,9 +1734,21 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
     // ④ write 恰一次 + ack 自适应确认
     // DynamicPubSubType 约定 void* 指向 DynamicData::_ref_type（智能指针地址，非裸指针，
     // 见源码 calculate_serialized_size/serialize 的 static_cast），传 &data 而非 data.get()
+    // 逐条回执附带消息内容：从实际待发的 DynamicData 经 json_serialize 转出（非 CLI 原始
+    // 输入文本，所见即所发），与 topic print 订阅端同 API 同格式可对账；内容固定，发前
+    // 序列化一次复用全程（失败占位符对齐 topic print 惯例，不影响发布流程）
+    std::ostringstream payloadOs;
+    if (RETCODE_OK != json_serialize(data, DynamicDataJsonFormat::EPROSIMA, payloadOs))
+    {
+        payloadOs << "<json_serialize failed>";
+    }
+    const std::string payloadJson = payloadOs.str();
     bool ok = RETCODE_OK == writer->write(&data);
     if (ok)
     {
+        // 首条回执（循环内条目从 #2 起，此处补齐 #1 使逐条回执连续；write 失败不回执，
+        // 对齐循环内"write 成功即计"语义，不等 ack）
+        std::cout << "publishing #1 to topic " << topicName << ": " << payloadJson << std::endl;
         // 发现缓存该主题存在 RELIABLE 订阅者才启用 ack（仅 RELIABLE reader 参与 ackNack；
         // 全 BEST_EFFORT 或无订阅者退化尽力而为）
         bool ackUsable = false;
@@ -1797,7 +1809,8 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
             if (RETCODE_OK == writer->write(&data))
             {
                 ++sent;
-                std::cout << "publishing #" << sent << " to topic " << topicName << std::endl;
+                std::cout << "publishing #" << sent << " to topic " << topicName
+                          << ": " << payloadJson << std::endl;
             }
             else
             {
