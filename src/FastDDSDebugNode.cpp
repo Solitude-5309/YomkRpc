@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -57,6 +59,25 @@ std::string nowStamp()
     std::ostringstream os;
     os << std::put_time(&local, "%H:%M:%S") << '.'
        << std::setw(kMicroDigits) << std::setfill('0') << us;
+    return os.str();
+}
+
+// 参与者唯一后缀：12 位小写 hex（kUidHexChars 定宽，低位不足补零）。种子混入 random_device 与
+// 单调时钟——同进程重复调用不复现；单节点模型下跨进程碰撞概率可忽略。uid 后缀使多进程各自的
+// 调试/录制节点在 node list/node info 视角可区分（固定名参与者会同名列出、端点被合并）
+std::string makeUidSuffix()
+{
+    constexpr int kUidHexChars = 12;  // 后缀字符数（12 hex = 6 字节随机）
+    constexpr std::uint64_t kUidMask = (std::uint64_t{1} << (kUidHexChars * 4)) - 1;
+    constexpr int kRdBits = 32;  // random_device 结果位宽（两次采样拼 64 位种子）
+    std::random_device rd;
+    std::uint64_t seed = (static_cast<std::uint64_t>(rd()) << kRdBits) | rd();
+    seed ^= static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    std::mt19937_64 gen(seed);
+    std::ostringstream os;
+    os << std::hex << std::setw(kUidHexChars) << std::setfill('0')
+       << (gen() & kUidMask);
     return os.str();
 }
 
@@ -516,9 +537,10 @@ bool FastDDSDebugNode::setDomainId(uint32_t domainId)
 
     // listener 仅服务发现回调（RTPS 层直接派发，不受 mask 控制）；mask 用 none() 对齐
     // FastDDSNode——实测 all() 会使本节点上的动态 reader 匹配成功但数据不交付。
-    // 调试节点固定名：入域即被同域 nodeList 列出（发现层面可辨识），创建后不可改
+    // 调试节点唯一名：入域即被同域 nodeList 列出（发现层面可辨识），创建后不可改；
+    // uid 后缀使多进程各自的调试节点名称互不相同
     DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
-    qos.name(std::string("yomkrpc-debug"));
+    qos.name(std::string("yomkrpc_debug_") + makeUidSuffix());
     participant_ = DomainParticipantFactory::get_instance()->create_participant(
         domainId, qos, listener_.get(), StatusMask::none());
     if (participant_ == nullptr)

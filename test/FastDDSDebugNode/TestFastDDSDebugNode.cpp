@@ -74,7 +74,6 @@
 #include <fcntl.h>    // stdout 捕获：管道非阻塞读
 #include <unistd.h>   // stdout 捕获：dup/dup2/read/close
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -648,6 +647,7 @@ int main()
         CHECK(dbg.nodeList(nodes, 5, 100), "nodeList(5,100ms) → true（参与者发现收敛查询）");
         bool hasNamed = false;
         bool noBadLine = true;  // 每行均非空、非 "/" 且不含 GUID 串特征 '|'（无效名参与者跳过的证据）
+        bool noSelf = true;     // 无调试节点唯一名前缀行（自身不在发现回调中）
         for (const auto& name : nodes)
         {
             if (name == "test-peer-node")
@@ -658,11 +658,14 @@ int main()
             {
                 noBadLine = false;
             }
+            if (name.rfind("yomkrpc_debug_", 0) == 0)
+            {
+                noSelf = false;
+            }
         }
         CHECK(hasNamed, "nodeList 含 test-peer-node（SPDP participant_name 端到端传播）");
         CHECK(noBadLine, "nodeList 无空名/\"/\"名/GUID 串行（无效名参与者跳过，每行均为有效命名节点）");
-        CHECK(std::find(nodes.begin(), nodes.end(), "yomkrpc-debug") == nodes.end(),
-              "nodeList 不含调试节点自身（自身不在发现回调中）");
+        CHECK(noSelf, "nodeList 不含调试节点自身（自身不在发现回调中）");
         std::cout << "[OBSERVE] nodeList " << nodes.size() << " nodes:" << std::endl;
         for (const auto& name : nodes)
         {

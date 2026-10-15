@@ -23,6 +23,7 @@
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -30,6 +31,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -63,6 +65,25 @@ constexpr uint64_t kNsPerMs = kNsPerUs * kNsPerUs;      // 纳秒每毫秒
 constexpr uint64_t kNsPerSecond = kNsPerMs * kNsPerUs;  // 纳秒每秒
 constexpr uint64_t kNsPerMinute = 60 * kNsPerSecond;    // 纳秒每分
 constexpr uint64_t kNsPerHour = 60 * kNsPerMinute;      // 纳秒每小时
+
+// 参与者唯一后缀：12 位小写 hex（kUidHexChars 定宽，低位不足补零）。种子混入 random_device 与
+// 单调时钟——同进程重复调用不复现；单节点模型下跨进程碰撞概率可忽略。uid 后缀使多进程各自的
+// 调试/录制节点在 node list/node info 视角可区分（固定名参与者会同名列出、端点被合并）
+std::string makeUidSuffix()
+{
+    constexpr int kUidHexChars = 12;                  // 后缀字符数（12 hex = 6 字节随机）
+    constexpr uint64_t kUidMask = (uint64_t{1} << (kUidHexChars * 4)) - 1;
+    constexpr int kRdBits = 32;                       // random_device 结果位宽（两次采样拼 64 位种子）
+    std::random_device rd;
+    uint64_t seed = (static_cast<uint64_t>(rd()) << kRdBits) | rd();
+    seed ^= static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    std::mt19937_64 gen(seed);
+    std::ostringstream os;
+    os << std::hex << std::setw(kUidHexChars) << std::setfill('0')
+       << (gen() & kUidMask);
+    return os.str();
+}
 
 // ---- metadata 可读时间伴生键（_format）的格式化 ----
 // 毫秒-微秒-纳秒三段 → "mmm-uuu-nnn"（各 3 位补零，'-' 分隔）
@@ -832,9 +853,10 @@ bool FastDDSBagNode::setDomainId(uint32_t domainId)
 
     // listener 仅服务发现回调（RTPS 层直接派发，不受 mask 控制）；mask 用 none() 对齐
     // FastDDSNode/FastDDSDebugNode——实测 all() 会使动态 reader 匹配成功但数据不交付。
-    // bag 节点固定名：入域即被同域 nodeList 类工具辨识，创建后不可改
+    // bag 节点唯一名：入域即被同域 nodeList 类工具辨识，创建后不可改；uid 后缀使多进程
+    // 各自的 bag 节点名称互不相同
     DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
-    qos.name(std::string("yomkrpc-bag"));
+    qos.name(std::string("yomkrpc_bag_") + makeUidSuffix());
     participant_ = DomainParticipantFactory::get_instance()->create_participant(
         domainId, qos, listener_.get(), StatusMask::none());
     if (participant_ == nullptr)
@@ -1258,6 +1280,11 @@ bool FastDDSBagNode::record(const std::vector<std::string>& topics, std::vector<
         {
             mcap::Channel channel(topic, "cdr", 0,
                 mcap::KeyValueMap{{"type", typeName}, {"qos", qosStr}});
+            // 前序主题的 reader 已活跃（直写回调/双缓冲消费线程持 payloadMtx 调
+            // shardCheckAndWrite→write）：addChannel 扩容 vector<Channel> 会 relocate 既有
+            // 元素（移动构造写 string），与 write 侧读 Channel 构成数据竞态（McapWriter
+            // 非线程安全，TSan 实测多主题订阅期）——写路径同锁互斥
+            std::lock_guard<std::mutex> lock(payloadMtx);
             writer.addChannel(channel);
             channels[topic] = channel.id;
             ctx.channelId = channel.id;

@@ -92,6 +92,9 @@ if(NOT YOMKRPC_TEST_SANITIZER STREQUAL "off")
     endif()
     target_compile_options(yomkrpc_under_test PUBLIC ${_YOMKRPC_SAN_FLAGS})
     target_link_options(yomkrpc_under_test PUBLIC ${_YOMKRPC_SAN_FLAGS})
+    # 插桩构建的预处理标记（PUBLIC 沿 under_test 传播到链接它的测试 exe）：插桩轮的
+    # 性能/吞吐类断言可据此降级（插桩与分配器开销使耗时类数据波动为固有属性，无信号）
+    target_compile_definitions(yomkrpc_under_test PUBLIC YOMKRPC_SANITIZED_TEST_BUILD=1)
     message(STATUS "[test] YOMKRPC_TEST_SANITIZER=${YOMKRPC_TEST_SANITIZER}, flags=${_YOMKRPC_SAN_FLAGS}")
 endif()
 

@@ -78,7 +78,9 @@
 // ===== YomkRpcDebugService 调试 API（端点定义见 YomkRpcDebugService.h） =====
 
 // 创建调试节点（单节点模型：一个进程至多一个，重复创建须先删除）。
-// domainId：DDS 域号，合法范围 [0,232]，仅同域节点的主题可被调试。返回 YomkResponse。
+// domainId：DDS 域号，合法范围 [0,232]，仅同域节点的主题可被调试。调试节点以唯一名
+// yomkrpc_debug_<uid> 入域（uid 为 12 位随机 hex，可被 yomkrpc node list 列出）。
+// 返回 YomkResponse。
 #define YOMKRPC_DEBUG_NODE(domainId) \
     YOMK_REQUEST("/YomkRpcDebugService/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{domainId}))
 
@@ -229,7 +231,8 @@
 // ===== YomkRpcBagService 录制 API（端点定义见 YomkRpcBagService.h） =====
 
 // 创建 bag 节点（单节点模型：一个进程至多一个，重复创建须先删除）。
-// domainId：DDS 域号，合法范围 [0,232]。返回 YomkResponse。
+// domainId：DDS 域号，合法范围 [0,232]。bag 节点以唯一名 yomkrpc_bag_<uid> 入域（uid 为
+// 12 位随机 hex，可被 yomkrpc node list 列出）。返回 YomkResponse。
 #define YOMKRPC_BAG_NODE(domainId) \
     YOMK_REQUEST("/YomkRpcBagService/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{domainId}))
 

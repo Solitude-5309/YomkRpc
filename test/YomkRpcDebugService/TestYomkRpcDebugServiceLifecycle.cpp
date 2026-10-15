@@ -257,7 +257,7 @@ int main()
                     {
                         noBadLine = false;
                     }
-                    if (name == "yomkrpc-debug")
+                    if (name.rfind("yomkrpc_debug_", 0) == 0)
                     {
                         noSelf = false;
                     }

@@ -748,7 +748,7 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
-`yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出。节点名称在创建节点时经 `YOMKRPC_NODE(nodeName[, domainId])` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
+`yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出；同域其他进程的调试节点与 bag 节点分别以唯一名 `yomkrpc_debug_<uid>` / `yomkrpc_bag_<uid>` 列出（uid 为 12 位随机 hex，多进程各自的调试/录制节点可区分）。节点名称在创建节点时经 `YOMKRPC_NODE(nodeName[, domainId])` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
 
 ```bash
 yomkrpc node list          # 默认域 0

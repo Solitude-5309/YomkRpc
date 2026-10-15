@@ -22,7 +22,8 @@
 #                    确定性假阳性 double lock（exit 66）并级联假 data race，已在源码侧以
 #                    sleep 轮询等价规避（workerLoop 去 cv 化，论证链见 test/tsan.supp 头注），
 #                    tsan 轮现可全绿
-#       （默认 off 行为不变；插桩可执行缺失时自动配置+构建独立目录 test/build-<套件>，不污染默认 test/build）
+#       （默认 off 行为不变；插桩可执行缺失时自动配置+构建独立目录 test/build-<套件>，不污染默认 test/build；
+#        构建输出实时透传控制台，进度百分比逐行可见，不落盘日志文件——插桩全新全量编译需数分钟）
 #   ./run_tests.sh -h/--help     显示本帮助
 #
 # 行为:
@@ -55,6 +56,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"   # --full 重编 stress 的默认构建目录
 BIN_DIR="${BUILD_DIR}"            # 默认从 test/build 定位测试可执行
+USER_BIN_DIR=""                   # 用户显式 --bin 值（多轮 sanitizer 间每轮重置 BIN_DIR 的依据）
 TIMEOUT_SECS=300
 USER_TIMEOUT=0
 SKIP_STRESS=0
@@ -119,7 +121,7 @@ parse_args() {
             --skip-stress) SKIP_STRESS=1 ;;
             --full)        FULL_MODE=1 ;;
             --bin)         [ $# -ge 2 ] || { echo "错误: --bin 需要目录参数"; exit 1; }
-                           BIN_DIR="$2"; shift ;;
+                           BIN_DIR="$2"; USER_BIN_DIR="$2"; shift ;;
             --timeout)     [ $# -ge 2 ] || { echo "错误: --timeout 需要秒数参数"; exit 1; }
                            TIMEOUT_SECS="$2"; USER_TIMEOUT=1; shift ;;
             --sanitizer)   [ $# -ge 2 ] || { echo "错误: --sanitizer 需要参数（off/asan/tsan，逗号分隔多套）"; exit 1; }
@@ -199,22 +201,23 @@ check_bin_ready() {
 }
 
 # 插桩轮独有: 测试可执行缺失即自动配置+构建独立插桩目录 test/build-<套件>
-# （stdout 落盘 /dev/null 保 stderr 透传；FULL_MODE 时一并注入闭环 stress 规模，
-#   免去构建完成后再 rebuild_stress_full 的二次重编；插桩开关持久写入该目录 cache）
+# （构建输出实时透传控制台——进度百分比逐行可见，不落盘日志文件；FULL_MODE 时一并注入
+#   闭环 stress 规模，免去构建完成后再 rebuild_stress_full 的二次重编；插桩开关持久写入该目录 cache）
 ensure_sanitizer_build() {
     local bdir="${SCRIPT_DIR}/build-${SANITIZER}"
-    echo "-- [sanitizer=${SANITIZER}] 测试可执行缺失，自动构建 ${bdir} ..."
+    echo "-- [sanitizer=${SANITIZER}] 测试可执行缺失，自动构建 ${bdir}（插桩全新全量编译需数分钟，进度逐行输出）..."
+    local start=${SECONDS}
     local -a cfg=(-S "${SCRIPT_DIR}" -B "${bdir}"
                   -DYOMKRPC_TEST_SANITIZER="${SANITIZER}"
                   -DCMAKE_PREFIX_PATH="${YOMK_PREFIX_PATH:-/opt/yomk}")
     if [ "${FULL_MODE}" -eq 1 ]; then
         cfg+=(-DSTRESS_ITERS=100000 -DSTRESS_CYCLES=50)
     fi
-    cmake "${cfg[@]}" > /dev/null \
+    cmake "${cfg[@]}" \
         || { echo "错误: cmake 配置失败，请手动执行: $(build_hint)"; exit 1; }
-    cmake --build "${bdir}" -j"$(nproc)" > /dev/null \
+    cmake --build "${bdir}" -j"$(nproc)" \
         || { echo "错误: 构建失败，请手动执行: $(build_hint)"; exit 1; }
-    echo "-- [sanitizer=${SANITIZER}] 自动构建完成"
+    echo "-- [sanitizer=${SANITIZER}] 自动构建完成（耗时 $((SECONDS - start))s）"
 }
 
 # ---------------------------------------------------------------------------
@@ -459,6 +462,11 @@ main() {
 # 单轮完整流程: 定位/自动构建插桩目录 → 环境契约注入 → 测试循环 → 残留验收
 run_one_suite() {
     local san_build="${SCRIPT_DIR}/build-${SANITIZER}"
+    # 多轮 sanitizer 间重置可执行目录: 无显式 --bin 时每轮从默认 build/ 出发（插桩轮
+    # 再切 test/build-<套件>）——否则上一轮的插桩目录（如 build-asan）会被下方 L474/477
+    # 误判为用户显式 --bin 而原样复用：asan,tsan 连跑时 tsan 轮曾拿 build-asan 的
+    # asan 二进制跑（setarch -R 下无 TSan runtime 不报错，测试全过但 tsan 名不副实）
+    BIN_DIR="${USER_BIN_DIR:-${BUILD_DIR}}"
     if [ "${SANITIZER}" = "off" ]; then
         # 默认模式行为零变化: --full 先重配重编 stress，再门禁检查
         if [ "${FULL_MODE}" -eq 1 ]; then
