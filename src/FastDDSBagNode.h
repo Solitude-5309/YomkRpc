@@ -130,15 +130,19 @@ public:
     //   内存队列（满则阻塞背压，等待处检测停止标志）；全部读毕推 EOS
     // ③播放线程——writer 按需创建（主题首条前：透传类型注册 + create_topic/publisher/
     //   datawriter，history depth 设预读队列深度以支持 TRANSIENT_LOCAL 匹配后补发，history
-    //   为本地行为不参与匹配）；首条锚定 steady_clock 基准，此后按相邻时间戳差值 sleep_until
-    //   绝对锚定还原录制节奏；暂停标志置位期间冻结时间轴不发布（恢复后重锚继续）；write
-    //   原始字节并按主题累计 count/bytes
+    //   为本地行为不参与匹配）；首条锚定 steady_clock 基准，此后按相邻时间戳差值除以速率
+    //   倍率 sleep_until 绝对锚定还原录制节奏（倍率缩放消息间调度间隔；运行时经
+    //   yomk::bagPlaySetRate 动态调节，换率重锚保已播进度连续）；暂停标志置位期间冻结
+    //   时间轴不发布（恢复后重锚继续）；write 原始字节并按主题累计 count/bytes
     // ④停止序列——停止标志置位（yomk::g_bagPlayStop，SIGINT 经 bagPlayStop 置位）或 EOS →
     //   播放线程退出 → 读线程退出（阻塞处被唤醒检测）→ join → 删除全部发布实体（类型注册
     //   幂等不注销，对齐 debugNode 先例）→ 回填 stats（预扫清单序）
     // 读流中途失败：记错误并推 EOS，已读消息照常播完后返回 false（error 回填原因）。
+    // playbackRate 回放速率倍率：>0 生效（2.0 两倍速、0.5 半倍速，对齐 ros2 --rate），
+    // <=0 报 "invalid playback rate" 快速返回 false（不建任何 DDS 实体，对齐预扫失败
+    // 快速返回路径）
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
-            std::string* error = nullptr);
+            std::string* error = nullptr, double playbackRate = 1.0);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

@@ -24,8 +24,9 @@
  *   yomkrpc bag info <bag-path>
  *   yomkrpc bag reindex <bag-path>
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
- *   yomkrpc bag play <bag-path>
- *           交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，Ctrl+C 停止
+ *   yomkrpc bag play [-r <rate> | --rate <rate>] <bag-path>
+  *           交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，+/- 调节回放速率（±10%），
+ *           Ctrl+C 停止
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -50,6 +51,7 @@
  *   yomkrpc bag reindex bag_2026-01-01_12-00-00_000
  *   yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000
+  *   yomkrpc bag play -r 2.0 bag_2026-01-01_12-00-00_000   # 2 倍速回放
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -181,8 +183,9 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag info <bag-path>\n"
           "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
-          "  yomkrpc bag play <bag-path>\n"
-          "          交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，Ctrl+C 停止\n"
+          "  yomkrpc bag play [-r <rate> | --rate <rate>] <bag-path>\n"
+                    "          交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，+/- 调节回放速率\n"
+          "          （±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -218,7 +221,9 @@ static void printUsage(std::ostream &os)
           "                      等待（Ctrl+C 中断报错退出）；省略则发现稳定即发（自动收敛）\n"
           "  -r, --rate N        持续发布频率 Hz（仅 topic pub 发布模式生效）：首轮校验发布成功后\n"
           "                      按该频率周期重发（尽力而为），Ctrl+C 停止并输出统计；省略则缺省\n"
-          "                      1Hz 持续发送\n"
+          "                      1Hz 持续发送。bag play 生效：回放速率倍率（>0，2.0 两倍速、\n"
+          "                      0.5 半倍速，对齐 ros2 --rate；<=0 报 not in the valid range\n"
+          "                      (> 0.0)；运行时 +/- 键 ±10% 步进动态调率）\n"
           "  -t, --times N       发布条数上限（仅 topic pub 发布模式生效，含首轮）：发满 N 条自动\n"
           "                      停止，排空 200ms 后退出并输出统计；省略则不限条数持续到 Ctrl+C。\n"
           "                      短名 -t 复用判定：下一参数为整数时视为条数（topic pub 语境），\n"
@@ -273,6 +278,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag reindex bag_2026-01-01_12-00-00_000\n"
           "  yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json\n"
           "  yomkrpc bag play bag_2026-01-01_12-00-00_000\n"
+                    "  yomkrpc bag play -r 2.0 bag_2026-01-01_12-00-00_000   # 2 倍速回放\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -536,12 +542,21 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     return 0;
 }
 
+// %g 风格格式化倍率（iostream 默认 general 格式等价 %g：去尾零，2.0 → "2"、0.5 → "0.5"）
+static std::string formatRate(double rate)
+{
+    std::ostringstream oss;
+    oss << rate;
+    return oss.str();
+}
+
 // bag play 子命令：回放 bag 目录（预扫 metadata.json 后按录制时间轴重建透传发布），服务端
-// 长驻阻塞至全部消息播毕或 SIGINT 停止；tty 下额外起键盘监听线程：p/SPACE 暂停、r 继续
-// （操作 yomk::g_bagPlayPaused 全局原子，播放线程冻结时间轴、恢复后重锚），Ctrl+C 经
-// yomk::bagPlayStop 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，
-// 仅剩开始/停止两通道
-static int runBagPlay(uint32_t domainId, const std::string &bagDir)
+// 长驻阻塞至全部消息播毕或 SIGINT 停止；playbackRate 回放速率倍率（>0，对齐 ros2 --rate：
+// 倍率缩放消息间调度间隔，<=0 由主解析层报错退出）；tty 下额外起键盘监听线程：p/SPACE
+// 暂停、r 继续、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
+// 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
+// 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，仅剩开始/停止两通道
+static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -557,10 +572,17 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir)
 
     // 2. 监听 Ctrl+C：处理函数经 yomk::bagPlayStop 无锁置位，节点层回放循环读它收尾
     std::signal(SIGINT, onSignal);
+    // 启动回显：速率非缺省 1.0 时附 rate=<g>（-r 显式传入的可见性）
+    std::string rateNote;
+    if (playbackRate != 1.0)
+    {
+        rateNote = ", rate=" + formatRate(playbackRate);
+    }
     YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
-                  std::to_string(domainId), ", press p to pause, r to resume, Ctrl+C to stop");
+                  std::to_string(domainId), rateNote,
+                  ", press p to pause, r to resume, +/- rate, Ctrl+C to stop");
 
-    // 3. 键盘监听线程（tty 下生效）：p/SPACE=pause，r=resume，Ctrl+C 退出
+    // 3. 键盘监听线程（tty 下生效）：p/SPACE=pause，r=resume，+/-=rate ±10%，Ctrl+C 退出
     //    poll() 100ms 超时轮询：每次超时后检查 g_bagPlayStop，Ctrl+C 后最多 100ms 内干净
     //    退出并还原终端；非 tty（管道/重定向）时 tcgetattr 失败直接 return，仅剩开始/
     //    停止两通道（同 record 主流程/键盘分工）
@@ -602,6 +624,22 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir)
                     std::cout << "replay paused" << std::endl;
                 }
             }
+            else if (ch == '+' || ch == '-')
+            {
+                // 回放速率 ±10% 步进（对齐 ros2 Increase/Decrease Rate 10% 键位语义）；
+                // <=0 拒绝保持原值（对齐 ros2 set_rate 拒绝语义）
+                const double next = yomk::bagPlayGetRate() + (ch == '+' ? 0.1 : -0.1);
+                if (yomk::bagPlaySetRate(next))
+                {
+                    std::cout << "rate set to " << formatRate(yomk::bagPlayGetRate())
+                              << std::endl;
+                }
+                else
+                {
+                    std::cout << "failed to set rate to " << formatRate(next)
+                              << std::endl;
+                }
+            }
             // 其他键忽略
         }
         tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // 还原终端（Ctrl+C 后干净退出）
@@ -609,7 +647,7 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir)
 
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
     //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
-    resp = YOMKRPC_BAG_PLAY(bagDir);
+    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1605,6 +1643,7 @@ int main(int argc, char *argv[])
     std::vector<std::string> convertInputs; // 输入 bag 目录清单（-i/--input；仅 bag convert 生效，可重复）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     double pubRateHz = 1.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，缺省 1Hz 持续发送，Ctrl+C 停止）
+    double playbackRate = 1.0;  // 回放速率倍率（-r/--rate；仅 bag play 生效，对齐 ros2 --rate，>0）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
     uint32_t pubMaxTimes = 0; // 发布条数上限（-t/--times；仅 topic pub 发布模式生效，含首轮，0=不限）
     std::vector<std::string> pos;
@@ -1656,6 +1695,11 @@ int main(int argc, char *argv[])
         }
         if (arg == "-r" || arg == "--rate")
         {
+            // 短名 -r 语境分流（-t 复用判定先例同款）：pos 已含 "bag play" 即回放倍率
+            // 语境（bag play <bag-path> -r <倍率>，>0，对齐 ros2 --rate），否则为 topic
+            // pub 的持续发布频率（Hz）
+            const bool bagPlayCtx =
+                pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play";
             if (i + 1 >= argc)
             {
                 std::cerr << "yomkrpc: " << arg << " 缺少频率参数\n";
@@ -1665,12 +1709,44 @@ int main(int argc, char *argv[])
             // -r 0 不再表示"仅发一次"（缺省已改 1Hz 持续发送，单次模式已移除）：仍须 >0
             char *end = nullptr;
             const double value = std::strtod(argv[++i], &end);
-            if (end == argv[i] || *end != '\0' || value <= 0.0)
+            if (end == argv[i] || *end != '\0')
             {
-                std::cerr << "yomkrpc: 非法频率 \"" << argv[i] << "\"（须为 >0 的数值，单位 Hz）\n";
+                if (bagPlayCtx)
+                {
+                    // 非数字：报用法错（对齐 ros2 argparse invalid value 形态）
+                    std::cerr << "yomkrpc: 非法回放倍率 \"" << argv[i]
+                              << "\"（须为数值，>0）\n";
+                    printUsage(std::cerr);
+                }
+                else
+                {
+                    std::cerr << "yomkrpc: 非法频率 \"" << argv[i]
+                              << "\"（须为 >0 的数值，单位 Hz）\n";
+                }
                 return 2;
             }
-            pubRateHz = value;
+            if (bagPlayCtx)
+            {
+                if (value <= 0.0)
+                {
+                    // <=0：文案对齐 ros2 check_positive_float
+                    std::cerr << "yomkrpc: " << value
+                              << " is not in the valid range (> 0.0)\n";
+                    return 2;
+                }
+                playbackRate = value;
+            }
+            else
+            {
+                // -r 0 仍须 >0（topic pub 频率语境既有校验）
+                if (value <= 0.0)
+                {
+                    std::cerr << "yomkrpc: 非法频率 \"" << argv[i]
+                              << "\"（须为 >0 的数值，单位 Hz）\n";
+                    return 2;
+                }
+                pubRateHz = value;
+            }
             continue;
         }
         if (arg == "-w" || arg == "--wait")
@@ -1912,7 +1988,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
-        return runBagPlay(domainId, pos[2]);
+        return runBagPlay(domainId, pos[2], playbackRate);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

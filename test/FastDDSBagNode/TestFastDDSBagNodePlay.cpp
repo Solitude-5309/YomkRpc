@@ -31,6 +31,15 @@
  *      收数 ≤ 播出数（writer 已删，无补发窗口）；
  *   P6 多分片回放守恒：双分片 bag（bag_0/bag_1 各 10 条，时间轴连续）→ 跨分片升序游标
  *      回放 → 订阅端精确收 20、stats 守恒。
+ *   P7 回放速率倍率（对齐 ros2 --rate 语义）：P7.1 rate=2.0 全程（span 1.6s → 播放
+ *      耗时 ≉0.8s 窗口 0.6-1.2s）；P7.2 rate=0.5 全程（≈3.2s 窗口 2.6-4.2s）；P7.3
+ *      运行时动态调率（rate=1.0 启动，第 2 条播放时刻 bagPlaySetRate(2.0)——换率重锚保
+ *      已播 bag 进度连续，总耗时 ≉1.0s 窗口 0.8-1.4s）；P7.4 调率接口语义（SetRate(0)/
+ *      (-1) 拒绝 false 且 GetRate 不变、SetRate(2.0) 生效、bagPlayReset 复位 1.0）；
+ *      P7.5 rate=0/-1 启动（play false + invalid playback rate + stats 清空）。
+ *      节奏断言口径：play 长驻阻塞线程总耗时（start→done，轮询粒度 5ms）——订阅端
+ *      TRANSIENT_LOCAL latched 补发到达时刻随匹配建立漂移不可作间隔证据，消息真实发出
+ *      以 stats 精确计数钉死。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -90,6 +99,7 @@ namespace
     const std::string kP3cBag = "play_test_p3c";
     const std::string kP4Bag = "play_test_p4";
     const std::string kP6Bag = "play_test_p6";
+    const std::string kP7Bag = "play_test_p7";
     const std::string kP5Missing = "play_p5_miss";      // 不创建（目录不存在）
     const std::string kP5IsFile = "play_p5_isfile";     // 路径是文件
     const std::string kP5NoMeta = "play_p5_nometa";     // 缺 metadata.json
@@ -356,19 +366,21 @@ namespace
         return subscriber->create_datareader(topic, rqos, listener);
     }
 
-    // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读）
+    // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
+    // playbackRate 缺省 1.0 透传节点层入口注入——P7 速率用例经尾参传入）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
-                                std::string &error, bool &ok, std::atomic<bool> &done)
+                                std::string &error, bool &ok, std::atomic<bool> &done,
+                                double playbackRate = 1.0)
     {
-        return std::thread([&node, &bagDir, &stats, &error, &ok, &done]()
+        return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate]()
         {
-            ok = node.play(bagDir, stats, &error);
+            ok = node.play(bagDir, stats, &error, playbackRate);
             done.store(true);
         });
     }
 
-    // play 线程收尾（轮询完成标志后 join，超时兜底防悬挂——ctest 300s 总超时最终兜底）
+    // play 线程收尾（轮询完成标志后 join，超时兑底防悬挂——ctest 300s 总超时最终兑底）
     void joinPlay(std::thread &playThread, const std::atomic<bool> &done,
                   int timeoutMs = kJoinTimeoutMs)
     {
@@ -377,6 +389,22 @@ namespace
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         playThread.join();
+    }
+
+    // play 线程耗时测量收尾（P7 节奏断言专用：轮询 done 首真后记完成时刻再 join，返回
+    // 耗时毫秒——轮询粒度 5ms，测量误差 ≤5ms；joinPlay 的 100ms 粒度对秒级节奏断言
+    // 不够细，须单独实现）
+    double joinPlayElapsedMs(std::thread &playThread, const std::atomic<bool> &done,
+                             const std::chrono::steady_clock::time_point &start,
+                             int timeoutMs = kJoinTimeoutMs)
+    {
+        for (int waited = 0; waited < timeoutMs && !done.load(); waited += 5)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const auto doneTime = std::chrono::steady_clock::now();
+        playThread.join();
+        return std::chrono::duration<double, std::milli>(doneTime - start).count();
     }
 
     // 订阅端收数等待（每 50ms 轮询至 expect 条或超时；返回是否收满）
@@ -425,8 +453,8 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(participant);
         }
         for (const std::string &dir : {kP1Bag, kP3aBag, kP3bBag, kP3cBag, kP4Bag, kP6Bag,
-                 kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard, kP5BadEnum, kP5MultiComma,
-                 kP5Legacy})
+                 kP7Bag, kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard, kP5BadEnum,
+                 kP5MultiComma, kP5Legacy})
         {
             fs::remove_all(dir, ec);
         }
@@ -694,6 +722,94 @@ int main()
     CHECK(p6Ok, "P6 play 全程完成返回 true");
     CHECK(p6Stats.size() == 1 && p6Stats[0].count == 20 && p6Stats[0].bytes == 20 * kPayloadSize,
           "P6 stats 守恒（跨分片计数与字节对账）");
+
+    // ---- P7：回放速率倍率（对齐 ros2 --rate：倍率缩放消息间调度间隔 + 运行时动态调率） ----
+    CHECK(makeBag(kP7Bag,
+              {{"/rt/play_rate", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 5}},
+              400 * 1000000ULL),
+          "P7 前置：单主题 5 条 @400ms bag 构造成功（时间轴 span 1.6s）");
+
+    // P7.1 rate=2.0 全程快放：span 1.6s → 播放 ≉0.8s（窗口 0.6-1.2s）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p71Stats;
+    std::string p71Error;
+    std::atomic<bool> p71Done{false};
+    bool p71Ok = false;
+    const auto p71Start = std::chrono::steady_clock::now();
+    std::thread p71Thread =
+        startPlayThread(node, kP7Bag, p71Stats, p71Error, p71Ok, p71Done, 2.0);
+    const double p71ElapsedMs = joinPlayElapsedMs(p71Thread, p71Done, p71Start);
+    CHECK(p71Ok, "P7.1 play 全程完成返回 true");
+    CHECK(p71Stats.size() == 1 && p71Stats[0].count == 5,
+          "P7.1 stats 计数 5（时间轴全播，消息真实发出）");
+    CHECK(p71ElapsedMs >= 600.0 && p71ElapsedMs <= 1200.0,
+          "P7.1 rate=2.0 播放耗时 ≉0.8s（窗口 0.6-1.2s，实测 " +
+              std::to_string(static_cast<int>(p71ElapsedMs)) + "ms）");
+
+    // P7.2 rate=0.5 全程慢放：span 1.6s → 播放 ≉3.2s（窗口 2.6-4.2s）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p72Stats;
+    std::string p72Error;
+    std::atomic<bool> p72Done{false};
+    bool p72Ok = false;
+    const auto p72Start = std::chrono::steady_clock::now();
+    std::thread p72Thread =
+        startPlayThread(node, kP7Bag, p72Stats, p72Error, p72Ok, p72Done, 0.5);
+    const double p72ElapsedMs = joinPlayElapsedMs(p72Thread, p72Done, p72Start);
+    CHECK(p72Ok, "P7.2 play 全程完成返回 true");
+    CHECK(p72Stats.size() == 1 && p72Stats[0].count == 5,
+          "P7.2 stats 计数 5（时间轴全播）");
+    CHECK(p72ElapsedMs >= 2600.0 && p72ElapsedMs <= 4200.0,
+          "P7.2 rate=0.5 播放耗时 ≉3.2s（窗口 2.6-4.2s，实测 " +
+              std::to_string(static_cast<int>(p72ElapsedMs)) + "ms）");
+
+    // P7.3 运行时动态调率：rate=1.0 启动，400ms（第 2 条播放时刻 @1x，播放线程正处第
+    //      2→3 条睡眠分片段）时 bagPlaySetRate(2.0)——换率重锚保已播 bag 进度连续
+    //      （无跳发/重复，对齐 ros2 PlayerClock set_rate 进度语义）：剩余 1.2s bag 时间
+    //      按 2x 播 → 总耗时 ≉1.0s（窗口 0.8-1.4s）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p73Stats;
+    std::string p73Error;
+    std::atomic<bool> p73Done{false};
+    bool p73Ok = false;
+    const auto p73Start = std::chrono::steady_clock::now();
+    std::thread p73Thread =
+        startPlayThread(node, kP7Bag, p73Stats, p73Error, p73Ok, p73Done);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK(yomk::bagPlaySetRate(2.0),
+          "P7.3 运行时 bagPlaySetRate(2.0) 返回 true（换率即时生效）");
+    const double p73ElapsedMs = joinPlayElapsedMs(p73Thread, p73Done, p73Start);
+    CHECK(p73Ok, "P7.3 play 全程完成返回 true");
+    CHECK(p73Stats.size() == 1 && p73Stats[0].count == 5,
+          "P7.3 stats 计数 5（换率进度连续：无跳发计数不缺、无重复计数不超）");
+    CHECK(p73ElapsedMs >= 800.0 && p73ElapsedMs <= 1400.0,
+          "P7.3 动态调率耗时 ≉1.0s（400ms@1x + 1.2s bag@2x，窗口 0.8-1.4s，实测 " +
+              std::to_string(static_cast<int>(p73ElapsedMs)) + "ms）");
+
+    // P7.4 调率接口语义（进程内 API 对齐 ros2 ~/set_rate、~/get_rate 服务）：P7.3 结束
+    //      时原子为 2.0（SetRate 生效未复位）
+    CHECK(!yomk::bagPlaySetRate(0.0) && yomk::bagPlayGetRate() == 2.0,
+          "P7.4 SetRate(0) 拒绝返回 false 且 GetRate 保持 2.0");
+    CHECK(!yomk::bagPlaySetRate(-1.0) && yomk::bagPlayGetRate() == 2.0,
+          "P7.4 SetRate(-1) 拒绝返回 false 且 GetRate 保持 2.0");
+    CHECK(yomk::bagPlaySetRate(2.0) && yomk::bagPlayGetRate() == 2.0,
+          "P7.4 SetRate(2.0) 合法值生效（GetRate 读回一致）");
+    yomk::bagPlayReset();
+    CHECK(yomk::bagPlayGetRate() == 1.0,
+          "P7.4 bagPlayReset 复位速率为 1.0（防上次会话残留倍率）");
+
+    // P7.5 rate=0 与 rate=-1 启动：入口校验拒绝快速返回（不建任何 DDS 实体），stats 清空
+    std::vector<FastDDSBagNode::BagTopicStat> p75Stats;
+    std::string p75Error;
+    p75Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约（失败=未播放）
+    CHECK(!node.play(kP7Bag, p75Stats, &p75Error, 0.0) &&
+              p75Error.find("invalid playback rate") != std::string::npos,
+          "P7.5 rate=0 启动 → false + invalid playback rate");
+    CHECK(p75Stats.empty(), "P7.5 rate=0 stats 清空（失败即未播放）");
+    CHECK(!node.play(kP7Bag, p75Stats, &p75Error, -1.0) &&
+              p75Error.find("invalid playback rate") != std::string::npos,
+          "P7.5 rate=-1 启动 → false + invalid playback rate");
+    CHECK(p75Stats.empty(), "P7.5 rate=-1 stats 清空");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

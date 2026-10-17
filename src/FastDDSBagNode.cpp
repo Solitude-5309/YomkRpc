@@ -2564,7 +2564,7 @@ private:
 
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
-        std::string* error)
+        std::string* error, double playbackRate)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2582,6 +2582,15 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     }
 
     stats.clear();
+
+    // 速率入参校验（快速返回不建任何 DDS 实体，对齐预扫失败路径；stats 已清空——失败
+    // 语义为"未播放任何消息"）；通过后注入原子初值，此后播放线程只认原子（运行时
+    // bagPlaySetRate 动态调节的唯一生效通道）
+    if (playbackRate <= 0.0)
+    {
+        return fail("invalid playback rate");
+    }
+    yomk::g_bagPlayRate.store(playbackRate, std::memory_order_relaxed);
 
     // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
     const std::filesystem::path dirPath(bagDir);
@@ -2779,11 +2788,16 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     std::thread playThread([&]()
     {
         // 时间轴锚定:anchor(steady_clock)对应 bag 时间 t0;第 i 条播放时刻 =
-        // anchor + (logTime_i - t0)。暂停恢复重锚:anchor' = now - (logTime_当前 - t0)
-        // (当前条立即播,后续按 logTime 差值顺延——暂停时长不折算进回放节奏)
+        // anchor + (logTime_i - t0)/rate——倍率缩放消息间调度间隔(对齐 ros2 PlayerClock:
+        // 2.0 两倍速、0.5 半倍速)。等价进度式:当前 bag 时间 = t0 + (now - anchor) * rate。
+        // 暂停恢复重锚:anchor' = now - (logTime_当前 - t0)/rate(当前条立即播,后续按 bag
+        // 差值顺延——暂停时长不折算进回放节奏)。换率重锚:保持已播 bag 进度
+        // ((now - anchor) * 旧倍率)不跳变反解新锚点,后续调度即时按新倍率推进(对齐
+        // PlayerClock 进度连续语义,无跳发/重复)
         std::chrono::steady_clock::time_point anchor{};
         uint64_t t0 = 0;
         bool anchored = false;
+        double rate = 1.0;
         PlayMsg msg;
         while (!stopped() && queue.pop(msg))
         {
@@ -2796,24 +2810,51 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 anchor = std::chrono::steady_clock::now();
                 t0 = msg.logTime;
                 anchored = true;
+                rate = yomk::g_bagPlayRate.load(std::memory_order_relaxed);
             }
-            // 目标时刻(乱序防御:logTime 早于锚点 bag 时间按 0 延迟立即播——录制侧
-            // 单调,仅防御手造 bag 的乱序时间戳)
-            const auto deadline =
-                anchor + std::chrono::nanoseconds(msg.logTime > t0 ? msg.logTime - t0 : 0);
+            // bag 偏移(乱序防御:logTime 早于锚点 bag 时间按 0 延迟立即播——录制侧单调,
+            // 仅防御手造 bag 的乱序时间戳;uint64 差值先算再转 double 除速率)
+            const double bagOffsetNs =
+                static_cast<double>(msg.logTime > t0 ? msg.logTime - t0 : 0);
+            // 目标时刻 = 锚点 + bag 偏移 / 倍率(倍率>1 间隔缩短快放,<1 间隔拉长慢放)
+            auto deadline = anchor +
+                std::chrono::nanoseconds(static_cast<int64_t>(bagOffsetNs / rate));
             while (!stopped())
             {
                 if (yomk::g_bagPlayPaused.load(std::memory_order_relaxed))
                 {
-                    // 暂停:冻结时间轴短轮询等恢复;恢复后重锚(当前条立即播)
+                    // 暂停:冻结时间轴短轮询等恢复;恢复后重锚(当前条立即播;暂停期间
+                    // 倍率可能经 bagPlaySetRate 变更,重锚按最新倍率反解)
                     while (!stopped() &&
                            yomk::g_bagPlayPaused.load(std::memory_order_relaxed))
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(kPlayPausePollMs));
                     }
-                    anchor = std::chrono::steady_clock::now() -
-                             std::chrono::nanoseconds(msg.logTime > t0 ? msg.logTime - t0 : 0);
+                    rate = yomk::g_bagPlayRate.load(std::memory_order_relaxed);
+                    const auto resumeNow = std::chrono::steady_clock::now();
+                    anchor = resumeNow -
+                             std::chrono::nanoseconds(
+                                 static_cast<int64_t>(bagOffsetNs / rate));
+                    deadline = anchor + std::chrono::nanoseconds(
+                                 static_cast<int64_t>(bagOffsetNs / rate));
                     break;
+                }
+                // 换率检测:分片醒后读原子,与当前倍率不同即重锚(已播 bag 进度不跳变),
+                // 立即按新 deadline 重新判定
+                const double rateNew = yomk::g_bagPlayRate.load(std::memory_order_relaxed);
+                if (rateNew != rate)
+                {
+                    const auto reAnchorNow = std::chrono::steady_clock::now();
+                    const double elapsedBagNs =
+                        std::chrono::duration<double, std::nano>(reAnchorNow - anchor).count() *
+                        rate;
+                    anchor = reAnchorNow -
+                             std::chrono::nanoseconds(
+                                 static_cast<int64_t>(elapsedBagNs / rateNew));
+                    rate = rateNew;
+                    deadline = anchor + std::chrono::nanoseconds(
+                                 static_cast<int64_t>(bagOffsetNs / rate));
+                    continue;
                 }
                 const auto now = std::chrono::steady_clock::now();
                 if (now >= deadline)

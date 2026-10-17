@@ -81,10 +81,17 @@ inline void bagRecordReset()
 // 停住），恢复后重锚时间基准继续按录制节奏发布。暂停/恢复由 CLI 键盘交互键（p/SPACE
 // 暂停、r 继续）或库用户 bagPlayPause/bagPlayResume 置位；不经 DDSBagPlay 协议传递
 //（CLI 与 bag 服务同进程，全局标志直读）。
+//
+// bag play 回放速率标志：播放线程每条消息调度前读取（对齐 ros2 PlayerClock 的
+// set_rate 原语——倍率缩放消息间调度间隔，2.0 两倍速、0.5 半倍速）。初值由 play 入口
+// 注入（playbackRate 参数校验通过后 store），此后播放线程只认原子；运行时经
+// bagPlaySetRate 动态调节（换率即时作用于后续调度，已播进度不跳变）；不经 DDSBagPlay
+// 协议传递（CLI 与 bag 服务同进程，全局标志直读）。
 namespace yomk
 {
 inline std::atomic<bool> g_bagPlayStop{false};
 inline std::atomic<bool> g_bagPlayPaused{false};
+inline std::atomic<double> g_bagPlayRate{1.0};  // 回放速率倍率（初值由 play 入口注入）
 inline void bagPlayStop()
 {
     g_bagPlayStop.store(true);
@@ -97,10 +104,27 @@ inline void bagPlayResume()
 {
     g_bagPlayPaused.store(false);
 }
+// 设置回放速率倍率（对齐 ros2 ~/set_rate 服务语义）：rate<=0 拒绝返回 false 并保持
+// 原值（调用方可打印失败提示），合法值即时生效于后续消息调度
+inline bool bagPlaySetRate(double rate)
+{
+    if (rate <= 0.0)
+    {
+        return false;
+    }
+    g_bagPlayRate.store(rate, std::memory_order_relaxed);
+    return true;
+}
+// 查询当前回放速率倍率（对齐 ros2 ~/get_rate 服务语义）
+inline double bagPlayGetRate()
+{
+    return g_bagPlayRate.load(std::memory_order_relaxed);
+}
 inline void bagPlayReset()
 {
     g_bagPlayStop.store(false);
     g_bagPlayPaused.store(false);  // 双复位：防上次会话残留暂停态（表现为开播即冻住）
+    g_bagPlayRate.store(1.0, std::memory_order_relaxed);  // 速率复位：防上次会话残留倍率
 }
 }  // namespace yomk
 
@@ -146,6 +170,8 @@ struct DDSBagConvert
 struct DDSBagPlay
 {
     std::string bagDir;  // bag 目录名/路径（相对/绝对均可，须含 metadata.json）
+    double playbackRate = 1.0;  // 回放速率倍率（>0；2.0 两倍速，0.5 半倍速，对齐 ros2 --rate；
+                                // 尾部缺省字段，旧调用方零改动）
 };
 
 // clang-format off

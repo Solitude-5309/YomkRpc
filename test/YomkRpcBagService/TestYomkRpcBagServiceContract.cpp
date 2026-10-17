@@ -26,7 +26,8 @@
  *      N messages / ...）+ 输出 bag_0.mcap/metadata.json 落盘；输出目录已存在报错。
  *   T10 /bag_play 契约：bagDir 空校验锁外前置；节点检查先于文件触达（未建节点报
  *      "bag node not created" 而非文件层错误——与 /bag_info 纯文件读形态相反，
- *      bag_play 触 DDS 必经节点实例）。
+ *      bag_play 触 DDS 必经节点实例）；playbackRate<=0 锁外校验先于节点检查（报
+ *      invalid playback rate），合法值放行至节点兑底拦截。
  * DDS-free 保证：T5 的越界校验在锁外返回；T6 的 topics 校验在锁外、node_ 空检查在触达节点层前返回；
  *   T10 的空目录校验在锁外、node_ 空检查在文件触达前返回；
  *   T7/T8/T9 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
@@ -375,6 +376,20 @@ namespace
                   rNoNode.m_msg.find("bag node not created") != std::string::npos &&
                   rNoNode.m_msg.find("does not exist") == std::string::npos,
               "/bag_play 未建节点 → eNo bag node not created（先于文件触达）");
+
+        // playbackRate<=0 锁外校验先于节点检查（纯输入校验先例）：报速率错误而非节点错误
+        auto rRate = svc->invoke("/bag_play",
+            YomkMkPtr(DDSBagPlay, DDSBagPlay{"play_svc_t10", 0.0}));
+        CHECK(rRate.m_status == YomkResponse::eNo &&
+                  rRate.m_msg.find("invalid playback rate") != std::string::npos,
+            "/bag_play rate=0.0 + 未建节点 → eNo invalid playback rate（输入校验先于节点检查）");
+
+        // rate 合法通过锁外校验后仍受节点检查兑底拦截（校验放行、节点拦截）
+        auto rOkRate = svc->invoke("/bag_play",
+            YomkMkPtr(DDSBagPlay, DDSBagPlay{"play_svc_t10", 2.0}));
+        CHECK(rOkRate.m_status == YomkResponse::eNo &&
+                  rOkRate.m_msg.find("bag node not created") != std::string::npos,
+            "/bag_play rate=2.0 合法通过校验 → eNo bag node not created（节点兑底）");
     }
 } // namespace
 

@@ -230,6 +230,12 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
         YOMK_ERROR_TAG("YomkRpcBagService::bagPlay", "no bag dir given");
         return YomkResponse(YomkResponse::eNo, "no bag dir given");
     }
+    // playbackRate 校验锁外前置（纯输入校验先于节点检查，同上先例）；错误文案对齐节点层
+    if (p->msg.playbackRate <= 0.0)
+    {
+        YOMK_ERROR_TAG("YomkRpcBagService::bagPlay", "invalid playback rate");
+        return YomkResponse(YomkResponse::eNo, "invalid playback rate");
+    }
 
     std::lock_guard<std::mutex> lock(mtx_);
     if (node_ == nullptr)
@@ -247,7 +253,7 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
     // 预扫失败（目录不存在/旧 bag 拒播/qos 非法）快速返回 eNo，m_msg 携带原因
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
-    if (!node_->play(p->msg.bagDir, stats, &error))
+    if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate))
     {
         if (error.empty())
         {
