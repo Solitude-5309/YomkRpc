@@ -52,3 +52,15 @@ add_test(NAME TestFastDDSBagNodeConvert COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGE
 set_tests_properties(TestFastDDSBagNodeConvert PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
+
+# bag play 用例：McapWriter 造真实分片 bag（手写 metadata.json，写侧同款落盘形态）+
+# 直连 FastDDS 透传订阅端对账（预扫校验/时间轴回放/QoS 快照恢复/Ctrl+C 停止/多分片守恒，
+# 真实 DDS），循 Record 先例；bag 为构造产物（无远端发布端），订阅端透传只计数——
+# 无需链接 YomkRpcMsg
+add_executable(TestFastDDSBagNodePlay TestFastDDSBagNodePlay.cpp)
+target_link_libraries(TestFastDDSBagNodePlay PRIVATE yomkrpc_under_test)
+
+add_test(NAME TestFastDDSBagNodePlay COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestFastDDSBagNodePlay>)
+set_tests_properties(TestFastDDSBagNodePlay PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)

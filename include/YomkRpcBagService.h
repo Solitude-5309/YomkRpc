@@ -1,9 +1,9 @@
 #pragma once
 // YomkRpcBagService 对外头：定义 YOMKRPC_BAG_* 宏（见 YomkRpcAPI.h）所打包的请求结构
-// （DDSBagNode/DDSBagRecord/DDSBagInfo/DDSBagReindex），以及服务类 YomkRpcBagService 的声明。
-// 录制能力由内部的
+// （DDSBagNode/DDSBagRecord/DDSBagInfo/DDSBagReindex/DDSBagConvert/DDSBagPlay），以及
+// 服务类 YomkRpcBagService 的声明。录制能力由内部的
 // FastDDSBagNode 提供（类型无关：透传原始 CDR 字节直写 mcap，schema_id=0 无 schema 通道，
-// 零消息类型依赖）。
+// 零消息类型依赖）；回放能力同节点（读 mcap 分片重建透传 writer，按录制时间轴发布）。
 #include <YomkServer/YomkAPI.h>
 
 #include <atomic>
@@ -29,6 +29,7 @@ private:
     YomkResponse bagInfo(YomkPkgPtr pkg);
     YomkResponse bagReindex(YomkPkgPtr pkg);
     YomkResponse bagConvert(YomkPkgPtr pkg);
+    YomkResponse bagPlay(YomkPkgPtr pkg);
 
 private:
     // 单 bag 节点：一个进程至多一个实例，重复 create 须先 delete；服务析构时自动销毁节点
@@ -70,6 +71,39 @@ inline void bagRecordReset()
 }
 }  // namespace yomk
 
+// bag play 回放停止标志：播放线程（读线程/播放线程各阻塞处）只读，SIGINT 处理函数
+//（CLI onSignal）经 bagPlayStop 写——atomic 无锁 store 保证 async-signal-safe（同
+// bagRecordStop 约定：不可经 YOMK_REQUEST 停止）。调用方在发起回放前应先 bagPlayReset
+// 复位，避免上次会话残留置位导致秒退；bag 服务 handler 回放前亦兜底复位 stop（只复位
+// stop 不动 paused——暂停是调用方运行意图）。
+//
+// bag play 暂停标志：置位后播放线程冻结时间轴不再发布新消息（读线程被队列满反压自然
+// 停住），恢复后重锚时间基准继续按录制节奏发布。暂停/恢复由 CLI 键盘交互键（p/SPACE
+// 暂停、r 继续）或库用户 bagPlayPause/bagPlayResume 置位；不经 DDSBagPlay 协议传递
+//（CLI 与 bag 服务同进程，全局标志直读）。
+namespace yomk
+{
+inline std::atomic<bool> g_bagPlayStop{false};
+inline std::atomic<bool> g_bagPlayPaused{false};
+inline void bagPlayStop()
+{
+    g_bagPlayStop.store(true);
+}
+inline void bagPlayPause()
+{
+    g_bagPlayPaused.store(true);
+}
+inline void bagPlayResume()
+{
+    g_bagPlayPaused.store(false);
+}
+inline void bagPlayReset()
+{
+    g_bagPlayStop.store(false);
+    g_bagPlayPaused.store(false);  // 双复位：防上次会话残留暂停态（表现为开播即冻住）
+}
+}  // namespace yomk
+
 // create_node 请求负载。
 struct DDSBagNode
 {
@@ -108,6 +142,12 @@ struct DDSBagConvert
                                       // 对象序列，每条目独立一组输出参数）
 };
 
+// bag_play 请求负载。
+struct DDSBagPlay
+{
+    std::string bagDir;  // bag 目录名/路径（相对/绝对均可，须含 metadata.json）
+};
+
 // clang-format off
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
@@ -116,3 +156,4 @@ YomkMsg(DDSBagRecord, DDSBagRecord, msg)
 YomkMsg(DDSBagInfo, DDSBagInfo, msg)
 YomkMsg(DDSBagReindex, DDSBagReindex, msg)
 YomkMsg(DDSBagConvert, DDSBagConvert, msg)
+YomkMsg(DDSBagPlay, DDSBagPlay, msg)

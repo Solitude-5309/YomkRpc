@@ -290,5 +290,18 @@
 #define YOMKRPC_BAG_CONVERT(inputs, cfgPath) \
     YOMK_REQUEST("/YomkRpcBagService/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{(inputs), (cfgPath)}))
 
+// 回放 bag：打开 bag 目录预扫 metadata.json（主题 type/qos 快照）后按录制时间轴回放全部
+// 主题（长驻阻塞：调用线程阻塞至全部消息播毕或 SIGINT 经 yomk::bagPlayStop 无锁置位后
+// 收尾返回；读播解耦——读线程逐条预读原始 CDR 字节入有界内存队列，播放线程按相邻时间
+// 戳差值定时发布，writer 按需创建，发布 QoS 按录制快照恢复，空串/缺失回退 RELIABLE+
+// VOLATILE；旧格式 bag——任一主题 type 空串——报错拒播；暂停/恢复由 yomk::bagPlayPause /
+// bagPlayResume 键盘通道控制，不经协议传递）。
+// 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
+// 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
+// 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
+// 返回 YomkResponse。
+#define YOMKRPC_BAG_PLAY(bagDir) \
+    YOMK_REQUEST("/YomkRpcBagService/bag_play", YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir)}))
+
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

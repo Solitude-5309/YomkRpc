@@ -21,12 +21,18 @@
 // 存储层 thirdparty/mcap v2.1.3，实现仅在本节点 .cpp 单译元编译）；Ctrl+C 停止标志由
 // YomkRpcBagService 提供（yomk::g_bagRecordStop），收尾删除全部 reader 后关闭 writer 补写
 // summary 并生成 metadata.json（顶层平铺元信息 + _format 可读时间伴生键）。
+// 回放（play）为反向链路：预扫 bag 目录 metadata.json（主题 type/qos 快照）后按读播解耦
+// 架构发布——读线程经 mcap 索引逐条预读原始 CDR 字节入有界内存队列（深度对齐参考实现
+// 预读队列默认值），播放线程按录制时间轴（相邻时间戳差值）还原节奏，writer 按需创建
+//（发布 QoS 按 bag 内快照恢复，缺键回退 RELIABLE+VOLATILE）；停止标志 yomk::g_bagPlayStop、
+// 暂停标志 yomk::g_bagPlayPaused（暂停冻结时间轴，恢复后重锚继续）。
 // 线程模型：发现回调仅缓存发现信息（seenMtx_ 叶子锁，锁序倒置防护同 FastDDSDebugNode）；
 // 数据回调两路：maxCacheSize=0 同步直写（DDS 接收线程逐条写盘，payloadMtx_ 串行多 reader
 // 并发写同一 McapWriter）；>0 写缓存双缓冲（回调深拷贝入队后即返回，缓存满丢弃新消息并
 // 按主题计数、独立消费线程逐条写盘——仅把写盘 IO 挪出接收线程，不改变消息内容与时间戳
 // 口径；停止先排空缓存再关 writer）。公开方法以 mtx_ 串行化；record 为长驻阻塞调用（调用
-// 线程阻塞至录制收尾完成），成功返回后节点定格（再次 record 报错，须重建节点）。
+// 线程阻塞至录制收尾完成），成功返回后节点定格（再次 record 报错，须重建节点）；play 同
+// 为长驻阻塞调用，不引入定格（播完实体全清，可再次调用）。
 class FastDDSBagNode
 {
     class BagParticipantListener;  // 参与者监听器：writer/reader 发现回调 → onWriterDiscovered/onReaderDiscovered
@@ -112,6 +118,27 @@ public:
     {
         return bagDir_;
     }
+    // 回放 bag 目录（长驻阻塞：调用线程阻塞至全部消息按录制时间轴发布完毕或停止标志置位；
+    // 不引入定格——播完发布实体全清，可再次调用）：
+    // ①预扫（失败即整体返回 false，不建任何 DDS 实体）——校验 bagDir 存在且含 metadata.json；
+    //   解析 topics_with_message_count（name/type/qos 三键）与 message_count/starting_time/
+    //   duration；任一主题 type 为空串（旧格式 bag）整体报错拒播（对齐参考实现告警跳过的
+    //   有意偏离裁定）；qos 串 "<RELIABILITY>,<DURABILITY>"（录制侧落盘口径）解析为发布
+    //   QoS，空串/缺失回退 RELIABLE+VOLATILE，非法枚举名报错；collectBagShards 收集分片
+    //   （无分片报错）。预扫完成后逐主题输出一行 replaying topic=<名> type=<类型> qos=<串>
+    // ②读线程——复用 convert 轮游标逐条预读（topic/logTime/原始 CDR 字节深拷贝）入有界
+    //   内存队列（满则阻塞背压，等待处检测停止标志）；全部读毕推 EOS
+    // ③播放线程——writer 按需创建（主题首条前：透传类型注册 + create_topic/publisher/
+    //   datawriter，history depth 设预读队列深度以支持 TRANSIENT_LOCAL 匹配后补发，history
+    //   为本地行为不参与匹配）；首条锚定 steady_clock 基准，此后按相邻时间戳差值 sleep_until
+    //   绝对锚定还原录制节奏；暂停标志置位期间冻结时间轴不发布（恢复后重锚继续）；write
+    //   原始字节并按主题累计 count/bytes
+    // ④停止序列——停止标志置位（yomk::g_bagPlayStop，SIGINT 经 bagPlayStop 置位）或 EOS →
+    //   播放线程退出 → 读线程退出（阻塞处被唤醒检测）→ join → 删除全部发布实体（类型注册
+    //   幂等不注销，对齐 debugNode 先例）→ 回填 stats（预扫清单序）
+    // 读流中途失败：记错误并推 EOS，已读消息照常播完后返回 false（error 回填原因）。
+    bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
+            std::string* error = nullptr);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

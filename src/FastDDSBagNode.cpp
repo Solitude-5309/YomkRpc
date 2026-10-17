@@ -26,7 +26,9 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -42,6 +44,8 @@
 #include <fastdds/dds/core/status/StatusMask.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/DomainParticipantListener.hpp>
+#include <fastdds/dds/publisher/DataWriter.hpp>
+#include <fastdds/dds/publisher/Publisher.hpp>
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
 #include <fastdds/dds/subscriber/Subscriber.hpp>
@@ -156,6 +160,48 @@ const char* durabilityKindName(DurabilityQosPolicyKind kind)
         default:
             return "UNKNOWN";
     }
+}
+
+// 标准 DDS 拼写名 → 枚举(play 预扫恢复发布 QoS 用,与上方两个序列化辅助成对;未知拼写
+// 返回 false 由调用方报错——不静默回退,QoS 快照恢复是回放正确性的一部分)
+bool parseReliabilityKindName(const std::string& name, ReliabilityQosPolicyKind& kind)
+{
+    if (name == "RELIABLE")
+    {
+        kind = RELIABLE_RELIABILITY_QOS;
+        return true;
+    }
+    if (name == "BEST_EFFORT")
+    {
+        kind = BEST_EFFORT_RELIABILITY_QOS;
+        return true;
+    }
+    return false;
+}
+
+bool parseDurabilityKindName(const std::string& name, DurabilityQosPolicyKind& kind)
+{
+    if (name == "TRANSIENT_LOCAL")
+    {
+        kind = TRANSIENT_LOCAL_DURABILITY_QOS;
+        return true;
+    }
+    if (name == "TRANSIENT")
+    {
+        kind = TRANSIENT_DURABILITY_QOS;
+        return true;
+    }
+    if (name == "PERSISTENT")
+    {
+        kind = PERSISTENT_DURABILITY_QOS;
+        return true;
+    }
+    if (name == "VOLATILE")
+    {
+        kind = VOLATILE_DURABILITY_QOS;
+        return true;
+    }
+    return false;
 }
 
 // "YYYY-MM-DD_HH-MM-SS_mmm-uuu-nnn"（formatEpochNs 产出形态，本地时区）→ epoch 纳秒。
@@ -2426,6 +2472,447 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
         outLines.push_back("converted " + entry.uri + ": " + std::to_string(msgCount) +
                            " messages / " + std::to_string(bytesTotal) + " bytes / " +
                            std::to_string(outTopics.size()) + " topics");
+    }
+    return true;
+}
+
+// ---- bag play 专属辅助(行为语义见 FastDDSBagNode.h play 声明注释) ----
+constexpr size_t kPlayReadAheadQueueSize = 1000;  // 预读队列深度(对齐参考实现预读队列默认值)
+constexpr uint32_t kPlayPausePollMs = 20;         // 暂停标志轮询间隔(短于录制轮询,暂停/恢复更跟手)
+
+// 读线程 → 播放线程单条消息(深拷贝所有权转移;eos 哨兵标志读毕)
+struct PlayMsg
+{
+    std::string topic;
+    uint64_t logTime = 0;
+    std::vector<uint8_t> data;
+    bool eos = false;
+};
+
+// 预扫主题项(metadata.json name/type/qos 三键 + qos 解析产物发布配置)
+struct PlayTopic
+{
+    std::string topic;
+    std::string type;
+    std::string qos;
+    DataWriterQos qosCfg;
+};
+
+// 发布实体登记项(writer 按需创建;停止序列 delete_datawriter → delete_topic)
+struct PlayWriterEntry
+{
+    Topic* topic = nullptr;
+    DataWriter* writer = nullptr;
+};
+
+// 读播解耦有界队列:读线程 push(满则背压阻塞)、播放线程 pop(空则等待)。双侧等待均
+// wait_for 带超时轮询停止谓词(不用无限 wait——TSan 规避同 record 消费线程先例);
+// notify 移出锁外避免被唤醒方立即撞锁。
+class PlayQueue
+{
+public:
+    using StopPredicate = std::function<bool()>;
+
+    explicit PlayQueue(StopPredicate stopped)
+        : stopped_(std::move(stopped))
+    {
+    }
+
+    void push(PlayMsg&& msg)
+    {
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            while (!stopped_() && items_.size() >= kPlayReadAheadQueueSize)
+            {
+                cv_.wait_for(lock, std::chrono::milliseconds(kRecordPollMs));
+            }
+            if (stopped_())
+            {
+                return;  // 停止即弃:读线程随后退出
+            }
+            items_.push_back(std::move(msg));
+        }
+        cv_.notify_one();
+    }
+
+    // 取一条(含 EOS 哨兵);false = 已停止且队列空(播放线程据此退出)
+    bool pop(PlayMsg& out)
+    {
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            while (items_.empty() && !stopped_())
+            {
+                cv_.wait_for(lock, std::chrono::milliseconds(kRecordPollMs));
+            }
+            if (items_.empty())
+            {
+                return false;
+            }
+            out = std::move(items_.front());
+            items_.pop_front();
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+private:
+    StopPredicate stopped_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::deque<PlayMsg> items_;
+};
+
+// 回放 bag 目录(实现见头注释)。
+bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
+        std::string* error)
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto fail = [&error](const std::string& msg)
+    {
+        if (error != nullptr)
+        {
+            *error = msg;
+        }
+        return false;
+    };
+
+    if (participant_ == nullptr || subscriber_ == nullptr)
+    {
+        return fail("bag node not created");
+    }
+
+    stats.clear();
+
+    // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
+    const std::filesystem::path dirPath(bagDir);
+    std::error_code ec;
+    if (!std::filesystem::exists(dirPath, ec))
+    {
+        return fail("bag path [" + bagDir + "] does not exist");
+    }
+    if (!std::filesystem::is_directory(dirPath, ec))
+    {
+        return fail("must specify a bag directory");
+    }
+    std::ifstream metaFile(dirPath / "metadata.json");
+    if (!metaFile)
+    {
+        return fail("could not find metadata.json in bag directory [" + bagDir + "]");
+    }
+    nlohmann::json info;
+    try
+    {
+        metaFile >> info;
+    }
+    catch (const std::exception& e)
+    {
+        return fail(std::string("parse metadata.json failed: ") + e.what());
+    }
+
+    // 逐主题解析(name/type/qos 三键;type 空串旧格式 bag 拒播;qos 空串/缺失回退
+    // RELIABLE+VOLATILE 且回填生效口径保 replaying 行与实际发布一致;非法枚举名报错)
+    std::vector<PlayTopic> playTopics;
+    try
+    {
+        for (const auto& item : info.at("topics_with_message_count"))
+        {
+            PlayTopic pt;
+            pt.topic = item.at("topic_metadata").at("name").get<std::string>();
+            pt.type = item.at("topic_metadata").at("type").get<std::string>();
+            if (pt.type.empty())
+            {
+                return fail("topic [" + pt.topic + "] has no type info (legacy bag), cannot replay");
+            }
+            const auto& meta = item.at("topic_metadata");
+            const auto qosIt = meta.find("qos");
+            if (qosIt != meta.end() && qosIt->is_string())
+            {
+                pt.qos = qosIt->get<std::string>();
+            }
+            if (pt.qos.empty())
+            {
+                pt.qos = "RELIABLE,VOLATILE";  // 回退组合显式设置(不依赖 QoS 默认值)
+            }
+            const std::size_t comma = pt.qos.find(',');
+            if (comma == std::string::npos ||
+                pt.qos.find(',', comma + 1) != std::string::npos ||
+                !parseReliabilityKindName(pt.qos.substr(0, comma), pt.qosCfg.reliability().kind) ||
+                !parseDurabilityKindName(pt.qos.substr(comma + 1), pt.qosCfg.durability().kind))
+            {
+                return fail("topic [" + pt.topic + "] invalid qos string [" + pt.qos + "]");
+            }
+            // history 与 resource 显式对齐设预读队列深度:history 为本地行为不参与匹配,
+            // 设大支持 TRANSIENT_LOCAL 订阅端匹配建立后 latched 补发;FastDDS 默认
+            // max_samples_per_instance=100 会触发 QoS 一致性检查拒绝,不依赖默认值
+            pt.qosCfg.history().depth = kPlayReadAheadQueueSize;
+            pt.qosCfg.resource_limits().max_samples_per_instance = kPlayReadAheadQueueSize;
+            pt.qosCfg.resource_limits().max_samples = kPlayReadAheadQueueSize;
+            playTopics.push_back(std::move(pt));
+        }
+    }
+    catch (const std::exception& e)
+    {
+        return fail(std::string("invalid metadata.json: ") + e.what());
+    }
+    if (playTopics.empty())
+    {
+        return fail("no topics found in metadata.json");
+    }
+
+    // 开播回显的 bag 元信息(缺键/类型不符容忍按 0 显示——回显辅助字段,不阻断回放)
+    uint64_t metaMsgCount = 0;
+    uint64_t metaStartNs = 0;
+    uint64_t metaDurationNs = 0;
+    try
+    {
+        metaMsgCount = info.value("message_count", uint64_t{0});
+        metaStartNs = info.at("starting_time").value("nanoseconds_since_epoch", uint64_t{0});
+        metaDurationNs = info.at("duration").value("nanoseconds", uint64_t{0});
+    }
+    catch (const std::exception&)
+    {
+        // 元信息缺失:回显按 0,回放主流程不受影响
+    }
+
+    // 分片收集(空目录与无匹配分片分列报错,对齐 reindex 口径)
+    std::vector<std::pair<uint64_t, std::string>> bagFiles;
+    if (collectBagShards(dirPath, bagFiles) == 0)
+    {
+        return fail("empty directory");
+    }
+    if (bagFiles.empty())
+    {
+        return fail("no bag files found for playing");
+    }
+
+    // 开播回显:逐主题 replaying 行(对齐 record 的 recording 行,qos 段为生效口径)+
+    // bag 元信息一行
+    for (const auto& pt : playTopics)
+    {
+        std::cout << "replaying topic=" << pt.topic << " type=" << pt.type
+                  << " qos=" << pt.qos << std::endl;
+    }
+    std::cout << "replaying bag [" << bagDir << "]: " << metaMsgCount << " messages / duration "
+              << formatDurationNs(metaDurationNs);
+    if (metaStartNs != 0)
+    {
+        std::cout << " / start " << formatEpochNs(metaStartNs);
+    }
+    std::cout << std::endl;
+
+    // 发布者:全部回放主题共用一个(停止序列统一删除)
+    Publisher* playPublisher =
+        participant_->create_publisher(PUBLISHER_QOS_DEFAULT, nullptr, StatusMask::none());
+    if (playPublisher == nullptr)
+    {
+        return fail("create publisher failed");
+    }
+
+    // 停止谓词:全局标志(SIGINT 经 yomk::bagPlayStop 置位)或局部失败停止(writer 创建
+    // 失败不污染全局标志)。relaxed 读足够:同步点由队列 cv 超时与线程 join 提供
+    std::atomic<bool> localStop{false};
+    const auto stopped = [&localStop]()
+    {
+        return yomk::g_bagPlayStop.load(std::memory_order_relaxed) ||
+               localStop.load(std::memory_order_relaxed);
+    };
+    PlayQueue queue(stopped);
+
+    // topic → playTopics 下标(读线程清单过滤与播放线程配置查表共用)
+    std::map<std::string, std::size_t> topicIndex;
+    for (std::size_t i = 0; i < playTopics.size(); ++i)
+    {
+        topicIndex.emplace(playTopics[i].topic, i);
+    }
+
+    // 线程产物与共享登记(线程写,join 后主线程读——join 同步屏障保证可见)
+    std::map<std::string, std::pair<uint64_t, uint64_t>> played;  // topic → (条数, 字节)
+    std::map<std::string, PlayWriterEntry> writers;               // 播放实体(停止序列删除)
+    std::map<std::string, TypeSupport> playTypes;                 // 透传类型按类型名共享注册
+    bool readFailed = false;
+    std::string readErrorMsg;
+    std::string publishError;
+
+    // ---- ②读线程:分片升序逐条预读深拷贝入队(满则背压);清单外主题告警一次跳过;
+    //      读流失败记错误(已读消息照常播完,play 返回 false);循环出口统一推 EOS 哨兵
+    //      (停止时 push 内部弃推,播放线程由停止谓词退出)
+    std::thread readThread([&]()
+    {
+        BagConvertCursor cursor(dirPath, bagFiles);
+        std::set<std::string> warnedTopics;
+        while (!stopped())
+        {
+            std::string stepError;
+            const BagConvertCursor::Step step = cursor.advance(&stepError);
+            if (step == BagConvertCursor::Step::kError)
+            {
+                readFailed = true;
+                readErrorMsg = stepError;
+                break;
+            }
+            if (step == BagConvertCursor::Step::kExhausted)
+            {
+                break;  // 正常读毕
+            }
+            if (topicIndex.count(cursor.topic()) == 0)
+            {
+                // 分片内主题不在 metadata.json 清单(分片与元信息不一致):告警一次跳过
+                if (warnedTopics.insert(cursor.topic()).second)
+                {
+                    std::cout << "play: topic [" << cursor.topic()
+                              << "] not listed in metadata.json, skipped" << std::endl;
+                }
+                continue;
+            }
+            PlayMsg msg;
+            msg.topic = cursor.topic();
+            msg.logTime = cursor.logTime();
+            msg.data = cursor.data();  // 深拷贝(cursor 内部缓冲随推进复用)
+            queue.push(std::move(msg));
+        }
+        PlayMsg eosMsg;
+        eosMsg.eos = true;
+        queue.push(std::move(eosMsg));
+    });
+
+    // ---- ③播放线程:writer 按需创建(主题首条前)+ 时间轴还原 + 原始字节 write
+    std::thread playThread([&]()
+    {
+        // 时间轴锚定:anchor(steady_clock)对应 bag 时间 t0;第 i 条播放时刻 =
+        // anchor + (logTime_i - t0)。暂停恢复重锚:anchor' = now - (logTime_当前 - t0)
+        // (当前条立即播,后续按 logTime 差值顺延——暂停时长不折算进回放节奏)
+        std::chrono::steady_clock::time_point anchor{};
+        uint64_t t0 = 0;
+        bool anchored = false;
+        PlayMsg msg;
+        while (!stopped() && queue.pop(msg))
+        {
+            if (msg.eos)
+            {
+                break;  // 读毕哨兵:正常结束
+            }
+            if (!anchored)
+            {
+                anchor = std::chrono::steady_clock::now();
+                t0 = msg.logTime;
+                anchored = true;
+            }
+            // 目标时刻(乱序防御:logTime 早于锚点 bag 时间按 0 延迟立即播——录制侧
+            // 单调,仅防御手造 bag 的乱序时间戳)
+            const auto deadline =
+                anchor + std::chrono::nanoseconds(msg.logTime > t0 ? msg.logTime - t0 : 0);
+            while (!stopped())
+            {
+                if (yomk::g_bagPlayPaused.load(std::memory_order_relaxed))
+                {
+                    // 暂停:冻结时间轴短轮询等恢复;恢复后重锚(当前条立即播)
+                    while (!stopped() &&
+                           yomk::g_bagPlayPaused.load(std::memory_order_relaxed))
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(kPlayPausePollMs));
+                    }
+                    anchor = std::chrono::steady_clock::now() -
+                             std::chrono::nanoseconds(msg.logTime > t0 ? msg.logTime - t0 : 0);
+                    break;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline)
+                {
+                    break;
+                }
+                // 睡眠分片化(≤100ms/次):停止与暂停响应不被长间隔时间戳拖延
+                std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(
+                    deadline - now, std::chrono::milliseconds(kRecordPollMs)));
+            }
+            if (stopped())
+            {
+                break;
+            }
+            // writer 按需创建:透传类型共享注册(同 record)+ create_topic +
+            // create_datawriter;失败置局部停止记错误,停止序列统一清理
+            auto entryIt = writers.find(msg.topic);
+            if (entryIt == writers.end())
+            {
+                const PlayTopic& pt = playTopics[topicIndex.at(msg.topic)];
+                const auto typeIns =
+                    playTypes.emplace(pt.type, TypeSupport(new PassthroughPubSubType(pt.type)));
+                if (typeIns.second)
+                {
+                    typeIns.first->second.register_type(participant_);
+                }
+                Topic* topicHandle =
+                    participant_->create_topic(msg.topic, pt.type, TOPIC_QOS_DEFAULT);
+                if (topicHandle == nullptr)
+                {
+                    localStop.store(true, std::memory_order_relaxed);
+                    publishError = "create topic [" + msg.topic + "] failed";
+                    break;
+                }
+                DataWriter* writer = playPublisher->create_datawriter(topicHandle, pt.qosCfg);
+                if (writer == nullptr)
+                {
+                    participant_->delete_topic(topicHandle);
+                    localStop.store(true, std::memory_order_relaxed);
+                    publishError = "create datawriter [" + msg.topic + "] failed";
+                    break;
+                }
+                PlayWriterEntry entry;
+                entry.topic = topicHandle;
+                entry.writer = writer;
+                entryIt = writers.emplace(msg.topic, entry).first;
+            }
+            // write 原始 CDR 字节(Blob 透传,含 encapsulation header);失败告警继续不
+            // 中断回放(单条丢弃,对齐录制侧单条写失败仅告警的口径)
+            Blob blob;
+            blob.bytes = std::move(msg.data);
+            if (entryIt->second.writer->write(&blob) != RETCODE_OK)
+            {
+                std::cout << "play: write [" << msg.topic << "] failed, message dropped"
+                          << std::endl;
+            }
+            else
+            {
+                auto& stat = played[msg.topic];
+                stat.first += 1;
+                stat.second += blob.bytes.size();
+            }
+        }
+    });
+
+    // ---- ④停止序列:播放线程退出(stop 或 EOS)→ 读线程退出(等待处 100ms 内醒)→
+    //      join → 删除全部发布实体(类型注册幂等不注销,对齐 debugNode 先例)
+    playThread.join();
+    readThread.join();
+    for (auto& kv : writers)
+    {
+        playPublisher->delete_datawriter(kv.second.writer);
+        participant_->delete_topic(kv.second.topic);
+    }
+    participant_->delete_publisher(playPublisher);
+
+    // 回填 stats(预扫清单序;早停/读流失败时未播主题计 0)
+    stats.reserve(playTopics.size());
+    for (const auto& pt : playTopics)
+    {
+        BagTopicStat stat;
+        stat.topic = pt.topic;
+        stat.type = pt.type;
+        const auto statIt = played.find(pt.topic);
+        if (statIt != played.end())
+        {
+            stat.count = statIt->second.first;
+            stat.bytes = statIt->second.second;
+        }
+        stats.push_back(std::move(stat));
+    }
+
+    if (readFailed)
+    {
+        return fail(readErrorMsg);
+    }
+    if (!publishError.empty())
+    {
+        return fail(publishError);
     }
     return true;
 }

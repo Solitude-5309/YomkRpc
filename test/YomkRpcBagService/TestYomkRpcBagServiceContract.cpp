@@ -2,7 +2,7 @@
  * @file TestYomkRpcBagServiceContract.cpp
  * @brief YomkRpcBagService 服务层契约测试（DDS-free，白盒经 invoke 直接分发）
  *
- * 范围：仅验证 bag 服务 7 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
+ * 范围：仅验证 bag 服务 8 端点在不触发任何 DDS 运行时（不创建 participant）前提下的
  *       输入校验与错误码契约；真实 DDS 生命周期（创建/录制/删除）归
  *       TestYomkRpcBagServiceLifecycle，节点层校验与落盘归 TestFastDDSBagNode。
  * 覆盖：
@@ -24,7 +24,11 @@
  *   T9 /bag_convert 纯文件操作契约：inputs/cfgPath 空校验锁外前置；cfg 不存在/非法 JSON
  *      报解析错误；真实带类型输入 bag + 最小 cfg → eOk + 统计行回执（converted <uri>:
  *      N messages / ...）+ 输出 bag_0.mcap/metadata.json 落盘；输出目录已存在报错。
+ *   T10 /bag_play 契约：bagDir 空校验锁外前置；节点检查先于文件触达（未建节点报
+ *      "bag node not created" 而非文件层错误——与 /bag_info 纯文件读形态相反，
+ *      bag_play 触 DDS 必经节点实例）。
  * DDS-free 保证：T5 的越界校验在锁外返回；T6 的 topics 校验在锁外、node_ 空检查在触达节点层前返回；
+ *   T10 的空目录校验在锁外、node_ 空检查在文件触达前返回；
  *   T7/T8/T9 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
@@ -130,6 +134,7 @@ namespace
         checkGuards("/bag_info", "DDSBagInfo", YomkMkPtr(String, "wrong"));
         checkGuards("/bag_reindex", "DDSBagReindex", YomkMkPtr(String, "wrong"));
         checkGuards("/bag_convert", "DDSBagConvert", YomkMkPtr(String, "wrong"));
+        checkGuards("/bag_play", "DDSBagPlay", YomkMkPtr(String, "wrong"));
     }
 
     // T4：/delete_node 特殊契约——单节点模型无参载荷，(void)pkg 不走解包守卫
@@ -353,6 +358,24 @@ namespace
         fs::remove_all(outDir, ec);
         fs::remove(cfg, ec);
     }
+
+    // T10：/bag_play 契约（未建节点：输入校验先于节点检查、节点检查先于文件触达）
+    void testBagPlayContract(YomkRpcBagService *svc)
+    {
+        // bagDir 空校验锁外前置：未建节点也报输入错误（对齐 bagInfo 输入校验先例）
+        auto rEmpty = svc->invoke("/bag_play", YomkMkPtr(DDSBagPlay, DDSBagPlay{""}));
+        CHECK(rEmpty.m_status == YomkResponse::eNo &&
+                  rEmpty.m_msg.find("no bag dir given") != std::string::npos,
+              "/bag_play 空目录+未建节点 → eNo no bag dir given（输入校验先于一切）");
+
+        // 节点检查先于文件触达：非空目录但未建节点 → eNo bag node not created（与
+        // /bag_info 的"未建节点也可纯文件读"形态相反——bag_play 触 DDS 必经节点实例）
+        auto rNoNode = svc->invoke("/bag_play", YomkMkPtr(DDSBagPlay, DDSBagPlay{"play_svc_t10"}));
+        CHECK(rNoNode.m_status == YomkResponse::eNo &&
+                  rNoNode.m_msg.find("bag node not created") != std::string::npos &&
+                  rNoNode.m_msg.find("does not exist") == std::string::npos,
+              "/bag_play 未建节点 → eNo bag node not created（先于文件触达）");
+    }
 } // namespace
 
 int main()
@@ -363,13 +386,13 @@ int main()
     auto *svc = new YomkRpcBagService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcBagService 注册成功（所有权移交框架，init() 已内部调用）");
 
-    // T1：内省——7 端点齐全
+    // T1：内省——8 端点齐全
     auto infos = svc->funcInfos();
-    CHECK(infos.size() == 7 && infos.count("/version") && infos.count("/create_node") &&
+    CHECK(infos.size() == 8 && infos.count("/version") && infos.count("/create_node") &&
               infos.count("/bag_record") && infos.count("/delete_node") &&
               infos.count("/bag_info") && infos.count("/bag_reindex") &&
-              infos.count("/bag_convert"),
-          "funcInfos 内省 7 端点齐全");
+              infos.count("/bag_convert") && infos.count("/bag_play"),
+          "funcInfos 内省 8 端点齐全");
 
     testVersion(svc);
     testUnpackGuards(svc);
@@ -379,6 +402,7 @@ int main()
     testBagInfoContract(svc);
     testBagReindexContract(svc);
     testBagConvertContract(svc);
+    testBagPlayContract(svc);
 
     CHECK(svc->invoke("/no_such_endpoint").m_status == YomkResponse::eNo, "未知端点返回 eNo");
 

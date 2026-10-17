@@ -294,7 +294,7 @@ ExampleYomkRpcPub
 
 ## 6 YomkRpc 调试
 
-`yomkrpc` 命令行工具经 `YomkRpcDebugService` 调试服务观察任意 DDS 域（类型无关，无需 IDL 生成代码）；库用户可在代码中用等价的 `YOMKRPC_DEBUG_*` 宏（定义于 `YomkRpcAPI.h`，全集见第 1 章宏 API 表）实现相同能力，各命令小节附等价宏调用；bag 族（record/info/reindex/convert）经 `YomkRpcBagService` bag 服务实现，等价宏为 `YOMKRPC_BAG_*`（分别见 6.7-6.10）。
+`yomkrpc` 命令行工具经 `YomkRpcDebugService` 调试服务观察任意 DDS 域（类型无关，无需 IDL 生成代码）；库用户可在代码中用等价的 `YOMKRPC_DEBUG_*` 宏（定义于 `YomkRpcAPI.h`，全集见第 1 章宏 API 表）实现相同能力，各命令小节附等价宏调用；bag 族（record/info/reindex/convert/play）经 `YomkRpcBagService` bag 服务实现，等价宏为 `YOMKRPC_BAG_*`（分别见 6.7-6.11）。
 
 ### 6.1 yomkrpc 命令清单
 
@@ -319,6 +319,7 @@ ExampleYomkRpcPub
 | `yomkrpc bag info <bag目录>` | 查看 bag 元信息（输出对齐 `ros2 bag info` 的多行文本，纯文件读不经 bag 节点，详见 6.8） |
 | `yomkrpc bag reindex <bag目录>` | 从 mcap 分片重建被删/损坏的 `metadata.json` 并无条件覆盖写出（行为对齐 `ros2 bag reindex`，纯文件操作不经 bag 节点，详见 6.9） |
 | `yomkrpc bag convert -i <bag目录> [-i <bag目录> ...] -o <配置文件>\|--output <配置文件>` | 按输出配置文件把一个或多个输入 bag 过滤/裁剪/合并写为新 bag（纯文件操作不经 bag 节点，详见 6.10） |
+| `yomkrpc bag play <bag目录>` | 按录制时间轴把 bag 回放为真实 DDS 流量（预扫 metadata.json 后透传发布——QoS 按录制快照恢复，读播解耦 1x 定时发布，播毕/Ctrl+C 收尾统计；CLI 自动建删 bag 节点，详见 6.11） |
 
 公共参数（各命令通用）：
 
@@ -916,7 +917,7 @@ hello_world: 12 条 / 288 字节
 }
 ```
 
-  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序），`topic_metadata` 的 `qos` 键记录录制时远端 writer 的 offered QoS 串（格式 `<Reliability>,<Durability>`，FastDDS 3.x DataWriter 默认即 `RELIABLE,TRANSIENT_LOCAL`；仅订阅者主题无 offered 可取存空串）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）；元信息文件缺失或损坏时可经 `yomkrpc bag reindex` 从分片重建（见 6.9）；按配置把录制产物过滤/裁剪/合并转换为新 bag 可经 `yomkrpc bag convert` 完成（见 6.10）。
+  起始时间与时长各附 `_format` 可读伴生键（格式 `YYYY-MM-DD_HH-MM-SS_毫秒-微秒-纳秒`，本地时区；时长为 `HH-MM-SS_毫秒-微秒-纳秒`）；一条消息都未录到时 starting_time 与 duration 均为 0。`topics_with_message_count` 按展开后录制清单排列（纯精确清单为输入顺序，含模式为去重升序），`topic_metadata` 的 `qos` 键记录录制时远端 writer 的 offered QoS 串（格式 `<Reliability>,<Durability>`，FastDDS 3.x DataWriter 默认即 `RELIABLE,TRANSIENT_LOCAL`；仅订阅者主题无 offered 可取存空串）。`relative_file_paths` 列出全部分片文件名（默认单分片即 `bag_0.mcap`；分片时按序列全 `bag_0.mcap`...`bag_N.mcap`），起始时间/时长/条数统计保持全局累计（跨分片）。bag 目录元信息可经 `yomkrpc bag info` 查看（见 6.8）；元信息文件缺失或损坏时可经 `yomkrpc bag reindex` 从分片重建（见 6.9）；按配置把录制产物过滤/裁剪/合并转换为新 bag 可经 `yomkrpc bag convert` 完成（见 6.10）；把录制产物按录制时间轴回放为真实 DDS 流量可经 `yomkrpc bag play` 完成（见 6.11）。
 
 失败报错退出（录制阶段失败 exit=2），错误文本按卡点归类（校验类逐项列出）：
 
@@ -1202,6 +1203,73 @@ if (resp.m_status == YomkResponse::eOk)
     }
 }
 // eNo 时 m_msg 携带上表原因（任一条目失败即整体失败）
+```
+
+### 6.11 回放 bag（yomkrpc bag play）
+
+`yomkrpc bag play <bag目录>` 把录制 bag 按录制时间轴回放为真实 DDS 流量（命令形态对齐参考实现 `bag play <bag路径>`：单个位置参数，全主题 1x 速率）。回放端预扫 `metadata.json` 后按主题按需重建透传发布实体——消息 CDR 原始字节直发不反序列化，发布 QoS 按录制快照恢复；读线程从分片逐条预读入有界内存队列（深度 1000，满则背压等待）、播放线程从队列取消息按消息 logTime 相对间隔定时发布（绝对锚定抗累积漂移），读播解耦同参考实现；全部消息播毕或 Ctrl+C 停止后清理全部发布实体。CLI 自动创建并在退出前删除 bag 节点（域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择，同其他命令）；播放期间服务端长驻阻塞，播毕即退出。
+
+```bash
+yomkrpc bag play bag_in                    # 全主题 1x 按录制时间轴回放
+yomkrpc bag play ./bag_2026-10-08_09-52-22 # 回放指定录制产物目录
+```
+
+开播回显与收尾统计（开播逐主题打印类型与恢复的 QoS 快照 + bag 元信息行；收尾按主题打印播出统计）：
+
+```text
+replaying topic=/chatter type=YomkRpc::MString qos=RELIABLE,TRANSIENT_LOCAL
+replaying topic=/battery type=YomkRpc::MInt32 qos=RELIABLE,TRANSIENT_LOCAL
+replaying bag [bag_in]: 60 messages / duration 00-00-06_000-000-000 / start 2026-10-08_09-52-22_685-614-542
+bag_in
+/chatter: 30 条 / 150 字节
+/battery: 30 条 / 120 字节
+```
+
+行为说明：
+
+- **预扫拒错**：打开 bag 目录读 `metadata.json`（主题清单 name/type/qos 三键 + 消息总数 + 起止时间），任一主题 `type` 空串（旧格式 bag）整体拒播（有意偏离参考实现的告警跳过，同 6.9 恢复口径的取舍）；分片收集与编号升序同 6.9 口径，分片内主题不在清单的（分片与元信息不一致）告警一次跳过
+- **QoS 快照恢复**：`topic_metadata.qos` 串 `<Reliability>,<Durability>`（6.7 录制时落盘的 offered 快照）恢复为回放端 offered QoS；`qos` 键缺失/空串回退 `RELIABLE,VOLATILE`（显式逐字段设置，不依赖默认值）；未知拼写整体拒播（reliability：RELIABLE/BEST_EFFORT；durability：VOLATILE/TRANSIENT_LOCAL/TRANSIENT/PERSISTENT）
+- **匹配前丢样本**：offered durability 为 VOLATILE 时订阅端晚于消息发布建立的匹配必丢样本——先起订阅端再开播可保收满；快照为 TRANSIENT_LOCAL 时匹配建立后经 latched 补发可收满全场（writer history 深度固定为预读队列深度且对齐整场消息量）；参考实现的 `--delay` 延迟开播选项属后续轮
+- **读播解耦**：读线程逐条深拷贝入队（预读队列深度 1000，满则背压），播放线程消费定时发布；队列饿死仅致播放延迟不顺延时间轴
+- **时间轴还原**：首条消息立即发布，其后按录制 logTime 相对间隔定时发布（1x 速率）；暂停期间时间轴冻结，恢复后从断点重锚
+- **交互键**（tty 下）：p 或 SPACE 暂停（打印 `replay paused`）、r 恢复（打印 `replay resumed`），可反复切换；Ctrl+C 终止并按已播出数收尾统计（提前返回不报错）；非 tty（管道/重定向）自动跳过键盘监听，仅剩开始/停止两通道
+- **成功输出**：回执 StringArray 首行为 bag 目录名，其后每主题一行 `topic: N 条 / M 字节`（预扫清单序；Ctrl+C 提前停止时未播主题计 0）
+
+失败报错退出（exit 2）：
+
+| 错误文本 | 卡点 |
+|---|---|
+| `no bag dir given` | 缺 bag 目录位置参数（服务层前置） |
+| `bag node not created` | 未建 bag 节点（CLI 自动建删；宏直调须先 `YOMKRPC_BAG_NODE`；节点检查先于文件触达） |
+| `bag path [x] does not exist` / `must specify a bag directory` | 路径不存在 / 路径是文件非目录 |
+| `could not find metadata.json in bag directory [x]` | 目录缺元信息文件 |
+| `parse metadata.json failed: ...` / `invalid metadata.json: ...` | 元信息非 JSON / 必需键缺失或形态错误 |
+| `topic [x] has no type info (legacy bag), cannot replay` | 旧格式 bag 拒播 |
+| `topic [x] invalid qos string [x]` | qos 串缺逗号 / 多逗号 / 未知枚举拼写（原串随报错回显） |
+| `no topics found in metadata.json` | 元信息主题清单为空 |
+| `no bag files found for playing` | 有元信息但无匹配分片 |
+| `create publisher failed` / `create topic [x] failed` / `create datawriter [x] failed` | 发布侧 DDS 实体创建失败 |
+| 分片读流失败（底层原因回显） | 运行期读失败（已读消息照常播完，随后整体报错） |
+
+工具经 `YomkRpcBagService` bag 服务 `/bag_play` 端点实现，等价的用户代码（`YOMKRPC_BAG_PLAY` 宏定义于 `YomkRpcAPI.h`；无 domainId 参数——节点模型先 `YOMKRPC_BAG_NODE` 建 bag 节点，同 `YOMKRPC_BAG_RECORD` 裁定）：
+
+```cpp
+YOMK_INIT();
+YOMK_NEW_SERVICE(YomkRpcBagService);
+if (YOMKRPC_BAG_NODE(0).m_status == YomkResponse::eOk)
+{
+    auto resp = YOMKRPC_BAG_PLAY("bag_in");   // 长驻阻塞：回放至播毕或 Ctrl+C
+    if (resp.m_status == YomkResponse::eOk)
+    {
+        // StringArray：首行 bag 目录名 + 逐主题统计行 "topic: N 条 / M 字节"
+        YomkUnPackPkg(resp.m_data, StringArray, lines);
+        if (lines != nullptr)
+        {
+            for (const auto &line : lines->d) { std::cout << line << "\n"; }
+        }
+    }  // eNo 时 m_msg 携带上表原因
+    YOMKRPC_BAG_DEL_NODE();                   // 退出前清理 bag 节点
+}
 ```
 
 ## 7 测试

@@ -4,14 +4,18 @@
  *
  * 范围：契约测试（DDS-free）刻意豁免的 /create_node 成功路径（经 setDomainId 创建真实
  *       participant）、/bag_record 完整录制链路（校验通过 → 透传订阅 → mcap 落盘 →
- *       bagRecordStop 收尾 → StringArray 统计回执）与 /delete_node 析构清理。节点层校验
- *       分支归 TestFastDDSBagNodeValidation，落盘内容断言归 TestFastDDSBagNodeRecord。
+ *       bagRecordStop 收尾 → StringArray 统计回执）、/bag_play 完整回放链路与 /delete_node
+ *       析构清理。节点层校验分支归 TestFastDDSBagNodeValidation，落盘内容与回放对账细节归
+ *       TestFastDDSBagNodeRecord/Play。
  * 覆盖：
  *   L1 生命周期：创建 → 重复创建拒绝 → record 空清单 eNo → record 无端点主题 eNo（m_msg
  *      含主题名，校验失败不落盘）→ 完整录制（远端 MString 发布者 + 停止线程模拟 Ctrl+C →
  *      eOk + StringArray 首行 bag 目录 + 统计行）→ 定格后重复 record 拒绝 → 删除 →
  *      重复删除拒绝 → 删除后 record 拒绝 → 重建 → 重复创建拒绝 → delete 收尾；
  *   L2 停止标志契约：录制经 yomk::bagRecordStop 置位收尾（模拟 SIGINT 处理函数行为）；
+ *   L3 /bag_play 端点（重建节点后）：负载往返保真（路径不存在 → 错误文本回显 bagDir）+
+ *      最小 bag 真实回放（mcap writer + 手写 metadata.json 造 2 条 @100ms bag → eOk +
+ *      StringArray 回执：首行 bagDir + 统计行，与 record 回执形态同构）；
  *   L0 解耦契约：/bag_info 纯文件读、/bag_reindex 纯文件操作与节点生命周期无关（未建/
  *      已建节点均可调，路径不存在报文件层错误而非 bag node not created）。
  *
@@ -29,6 +33,9 @@
 
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（完整录制用例的远端发布端）
 
+#include <mcap/writer.hpp>      // L3 造最小 mcap 分片（MCAP_IMPLEMENTATION 单译元在被测库内）
+#include <nlohmann/json.hpp>    // L3 手写 metadata.json（record 组装同款键集）
+
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
@@ -39,6 +46,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -185,6 +194,77 @@ int main()
     CHECK(dupCreate2.m_status == YomkResponse::eNo &&
               dupCreate2.m_msg.find("bag node already exists") != std::string::npos,
           "重建后重复创建仍拒绝（单节点模型全程生效）");
+
+    // ---- L3：/bag_play 端点（重建节点在场）：负载往返保真 + 最小 bag 真实回放 ----
+    std::error_code ec;
+    // 造最小 bag：mcap writer 单分片 + 手写 metadata.json（record 组装同款键集；2 条
+    // @100ms 时间轴 ~200ms 快速播完，无订阅端——write 不依赖匹配，回执对账为准）
+    const std::string playBagDir = "play_svc_l3";
+    std::filesystem::remove_all(playBagDir, ec);
+    CHECK(std::filesystem::create_directory(playBagDir, ec), "L3 前置：bag 目录创建成功");
+    {
+        mcap::McapWriter writer;
+        mcap::McapWriterOptions options("");
+        options.compression = mcap::Compression::None;
+        CHECK(writer.open(playBagDir + "/bag_0.mcap", options).ok(), "L3 前置：mcap 分片打开成功");
+        mcap::Channel channel("/rt/bag_svc_play", "cdr", 0,
+            mcap::KeyValueMap{{"type", "YomkRpc::MString"}, {"qos", "RELIABLE,TRANSIENT_LOCAL"}});
+        writer.addChannel(channel);
+        const std::string payload(5, 'x');
+        for (uint32_t i = 0; i < 2; ++i)
+        {
+            mcap::Message msg;
+            msg.channelId = channel.id;
+            msg.sequence = i;
+            msg.logTime = 1700000000000000000ULL + i * 100000000ULL;
+            msg.publishTime = msg.logTime;
+            // uint8_t 与 std::byte 同为单字节原始存储，别名转换安全（mcap 接口要求数据指针）
+            msg.data = reinterpret_cast<const std::byte *>(payload.data()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+            msg.dataSize = payload.size();
+            CHECK(writer.write(msg).ok(), "L3 前置：mcap 消息写入成功");
+        }
+        writer.close();
+
+        nlohmann::json info;
+        info["version"] = 1;
+        info["storage_identifier"] = "mcap";
+        info["relative_file_paths"] = nlohmann::json::array({"bag_0.mcap"});
+        info["starting_time"] = {{"nanoseconds_since_epoch", 1700000000000000000ULL},
+                                 {"nanoseconds_since_epoch_format", "manual"}};
+        info["duration"] = {{"nanoseconds", 100000000ULL}, {"nanoseconds_format", "manual"}};
+        info["message_count"] = 2;
+        info["topics_with_message_count"] = nlohmann::json::array({{
+            {"topic_metadata",
+                {{"name", "/rt/bag_svc_play"}, {"type", "YomkRpc::MString"},
+                    {"qos", "RELIABLE,TRANSIENT_LOCAL"}}},
+            {"message_count", 2}}});
+        std::ofstream out(playBagDir + "/metadata.json");
+        out << info.dump(4) << "\n";
+    }
+    CHECK(std::filesystem::exists(playBagDir + "/metadata.json", ec), "L3 前置：metadata.json 落盘");
+
+    // a) 负载往返保真：路径不存在 → eNo 且错误文本回显 bagDir（解包字段无损证明）
+    auto playMiss = svc->invoke("/bag_play", YomkMkPtr(DDSBagPlay, DDSBagPlay{"play_svc_l3_miss"}));
+    CHECK(playMiss.m_status == YomkResponse::eNo &&
+              playMiss.m_msg.find("bag path [play_svc_l3_miss] does not exist") != std::string::npos,
+          "/bag_play 负载往返：错误文本回显 bagDir（解包字段保真）");
+
+    // b) 真实回放：eOk + StringArray 回执（首行 bagDir + 统计行，对齐 record 回执形态）
+    auto playOk = svc->invoke("/bag_play", YomkMkPtr(DDSBagPlay, DDSBagPlay{playBagDir}));
+    CHECK(playOk.m_status == YomkResponse::eOk, "/bag_play 真实 bag 回放 → eOk");
+    YomkUnPackPkg(playOk.m_data, StringArray, playLines);
+    CHECK(playLines != nullptr && playLines->d.size() == 2,
+          "play 回执可解包为 2 行 StringArray（bag 目录 + 统计行）");
+    if (playLines != nullptr && playLines->d.size() == 2)
+    {
+        CHECK(playLines->d[0] == playBagDir, "回执首行 bag 目录名");
+        CHECK(playLines->d[1].find("/rt/bag_svc_play") != std::string::npos &&
+                  playLines->d[1].find("2 条 / ") != std::string::npos &&
+                  playLines->d[1].find(" 字节") != std::string::npos,
+              "统计行形如 topic: 2 条 / N 字节");
+    }
+    std::filesystem::remove_all(playBagDir, ec);  // 回放输入用例收尾自清理
+
     CHECK(svc->invoke("/delete_node").m_status == YomkResponse::eOk, "退出前显式删除（清理不变式）");
 
     // 远端发布端清理

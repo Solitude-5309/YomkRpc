@@ -38,13 +38,15 @@
 #   5. 全部结束后复查一次 /dev/shm 残留：无进程持有的残留清理并计为失败，
 #      被活跃进程持有的条目仅提示跳过（非本次测试泄漏），不计失败
 #
-# 写磁盘操作审计（2026-09 逐文件核对，bag 七例新增时更新）：
-#   - 除 bag 七例外，其余测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress
+# 写磁盘操作审计（2026-09 逐文件核对，bag 八例新增时更新）：
+#   - 除 bag 八例外，其余测试程序与被测源码 src/*.cpp 均无写盘操作；唯一文件 IO 是 stress
 #     两例只读 /proc/self/status 与 /proc/self/fd 的资源采样器（VmRSS/Threads/fd）。
-#   - bag 七例的写盘（均落在运行时临时工作目录）：TestYomkRpcBagServiceLifecycle 与
+#   - bag 八例的写盘（均落在运行时临时工作目录）：TestYomkRpcBagServiceLifecycle 与
 #     TestFastDDSBagNodeRecord 经真实 DDS 录制产 bag 目录；TestYomkRpcBagServiceContract
 #     （T7-T9）与 TestFastDDSBagNodeInfo/Reindex/Convert 经 mcap::McapWriter 造输入分片与
-#     info/重建/转换产物；仅 TestFastDDSBagNodeValidation 校验失败路径不建任何文件。
+#     info/重建/转换产物；TestFastDDSBagNodePlay 经 mcap::McapWriter + 手写 metadata.json
+#     造回放输入 bag（固定命名目录，用例收尾 remove_all 自清理）；仅
+#     TestFastDDSBagNodeValidation 校验失败路径不建任何文件。
 #   - 唯一运行时"磁盘"产物来自 FastDDS 3.6.1 默认 SHM 传输: /dev/shm 下
 #     fastdds_* / fastdds_port* / sem.fastdds_port*_mutex / fast_datasharing_*，
 #     正常销毁 participant 时自清；进程被 kill/崩溃/超时则遗留（本脚本接管清理）。
@@ -68,10 +70,10 @@ SAN_RUNNER=()
 SAN_LIST=()
 
 # 测试清单：快→慢，stress 压尾（与 test/CMakeLists.txt 注册的目标一一对应）
-# bag 七例：契约（DDS-free 快）→ 生命周期（含 ~3s 校验窗与 ~5s 录制）→ 节点层三快测
-# （info/reindex/convert：McapWriter 造输入直测静态函数，DDS-free 毫秒级）→ 节点校验
-# （3 个 ~3s 收敛窗）→ 节点录制收尾（~5s 录制 + mcap 读回）；bag 产物写在各自临时工作
-# 目录，随 cleanup_workdir 清理
+# bag 八例：契约（DDS-free 快）→ 生命周期（含 ~3s 校验窗与 ~5s 录制 + ~0.2s 回放）→
+# 节点层三快测（info/reindex/convert：McapWriter 造输入直测静态函数，DDS-free 毫秒级）→
+# 节点校验（3 个 ~3s 收敛窗）→ 节点录制收尾（~5s 录制 + mcap 读回）→ 节点回放对账
+# （~6s 时间轴 + 订阅端收数等待）；bag 产物写在各自临时工作目录（Play 用例自清理）
 ALL_TESTS=(
     TestHarnessSmoke
     TestYomkRpcServiceContract
@@ -85,6 +87,7 @@ ALL_TESTS=(
     TestFastDDSBagNodeConvert
     TestFastDDSBagNodeValidation
     TestFastDDSBagNodeRecord
+    TestFastDDSBagNodePlay
     TestYomkRpcNodeLifecycle
     TestYomkRpcTopic
     TestYomkRpcLoan

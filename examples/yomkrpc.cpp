@@ -24,6 +24,8 @@
  *   yomkrpc bag info <bag-path>
  *   yomkrpc bag reindex <bag-path>
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
+ *   yomkrpc bag play <bag-path>
+ *           交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，Ctrl+C 停止
  *   yomkrpc -h | --help
  *
  * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
@@ -47,6 +49,7 @@
  *   yomkrpc bag info bag_2026-01-01_12-00-00_000
  *   yomkrpc bag reindex bag_2026-01-01_12-00-00_000
  *   yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json
+ *   yomkrpc bag play bag_2026-01-01_12-00-00_000
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -151,6 +154,7 @@ static void onSignal(int)
     g_stop.store(true);
     yomk::debugPubStop(); // topic pub -r 持续发布：无锁置位（async-signal-safe），节点层发布循环读它退出
     yomk::bagRecordStop(); // bag record：无锁置位（async-signal-safe），节点层录制循环读它收尾退出
+    yomk::bagPlayStop();   // bag play：无锁置位（async-signal-safe），节点层回放循环读它收尾退出
 }
 
 static void printUsage(std::ostream &os)
@@ -177,6 +181,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag info <bag-path>\n"
           "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
+          "  yomkrpc bag play <bag-path>\n"
+          "          交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
@@ -266,6 +272,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag info bag_2026-01-01_12-00-00_000\n"
           "  yomkrpc bag reindex bag_2026-01-01_12-00-00_000\n"
           "  yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json\n"
+          "  yomkrpc bag play bag_2026-01-01_12-00-00_000\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -520,6 +527,107 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     }
 
     // 5. 退出前显式删除 bag 节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理
+    resp = YOMKRPC_BAG_DEL_NODE();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "delete bag node failed: ", resp.m_msg);
+        return 1;
+    }
+    return 0;
+}
+
+// bag play 子命令：回放 bag 目录（预扫 metadata.json 后按录制时间轴重建透传发布），服务端
+// 长驻阻塞至全部消息播毕或 SIGINT 停止；tty 下额外起键盘监听线程：p/SPACE 暂停、r 继续
+// （操作 yomk::g_bagPlayPaused 全局原子，播放线程冻结时间轴、恢复后重锚），Ctrl+C 经
+// yomk::bagPlayStop 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，
+// 仅剩开始/停止两通道
+static int runBagPlay(uint32_t domainId, const std::string &bagDir)
+{
+    YOMK_INIT();
+    YOMK_NEW_SERVICE(YomkRpcBagService);
+
+    // 1. 复位双标志（防上次会话残留置位导致秒退/开播即冻）后创建 bag 节点（单节点模型）
+    yomk::bagPlayReset();
+    auto resp = YOMKRPC_BAG_NODE(domainId);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "create bag node failed: ", resp.m_msg);
+        return 1;
+    }
+
+    // 2. 监听 Ctrl+C：处理函数经 yomk::bagPlayStop 无锁置位，节点层回放循环读它收尾
+    std::signal(SIGINT, onSignal);
+    YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
+                  std::to_string(domainId), ", press p to pause, r to resume, Ctrl+C to stop");
+
+    // 3. 键盘监听线程（tty 下生效）：p/SPACE=pause，r=resume，Ctrl+C 退出
+    //    poll() 100ms 超时轮询：每次超时后检查 g_bagPlayStop，Ctrl+C 后最多 100ms 内干净
+    //    退出并还原终端；非 tty（管道/重定向）时 tcgetattr 失败直接 return，仅剩开始/
+    //    停止两通道（同 record 主流程/键盘分工）
+    std::thread([]()
+    {
+        termios oldt {};
+        if (tcgetattr(STDIN_FILENO, &oldt) != 0)
+        {
+            return; // 非 tty：跳过键盘处理
+        }
+        termios raw = oldt;
+        raw.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        while (!yomk::g_bagPlayStop.load(std::memory_order_relaxed))
+        {
+            struct pollfd pfd {STDIN_FILENO, POLLIN, 0};
+            if (poll(&pfd, 1, 100) <= 0)
+            {
+                continue; // 超时或错误：继续轮询（同时检查停止标志）
+            }
+            char ch = 0;
+            if (read(STDIN_FILENO, &ch, 1) != 1)
+            {
+                break;
+            }
+            if (ch == 'r')
+            {
+                if (yomk::g_bagPlayPaused.load(std::memory_order_relaxed))
+                {
+                    yomk::bagPlayResume();
+                    std::cout << "replay resumed" << std::endl;
+                }
+            }
+            else if (ch == 'p' || ch == ' ')
+            {
+                if (!yomk::g_bagPlayPaused.load(std::memory_order_relaxed))
+                {
+                    yomk::bagPlayPause();
+                    std::cout << "replay paused" << std::endl;
+                }
+            }
+            // 其他键忽略
+        }
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // 还原终端（Ctrl+C 后干净退出）
+    }).detach();
+
+    // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
+    //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
+    resp = YOMKRPC_BAG_PLAY(bagDir);
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
+        YOMKRPC_BAG_DEL_NODE(); // 失败路径同样须清理已建 bag 节点
+        return 2;
+    }
+
+    // 5. 输出统计：首行 bag 目录，其后每主题一行 "topic: N 条 / M 字节"
+    YomkUnPackPkg(resp.m_data, StringArray, lines);
+    if (lines != nullptr)
+    {
+        for (const auto &line : lines->d)
+        {
+            std::cout << line << std::endl;
+        }
+    }
+
+    // 6. 退出前显式删除 bag 节点，确保 DDS 实体在 FastDDS 静态资源销毁前清理
     resp = YOMKRPC_BAG_DEL_NODE();
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1801,6 +1909,10 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "reindex" && !pos[2].empty())
     {
         return runBagReindex(pos[2]);
+    }
+    if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
+    {
+        return runBagPlay(domainId, pos[2]);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

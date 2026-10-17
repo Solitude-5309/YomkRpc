@@ -1,0 +1,700 @@
+/**
+ * @file TestFastDDSBagNodePlay.cpp
+ * @brief FastDDSBagNode 节点层回放测试（真实 DDS 端到端：构造 bag → play → 透传订阅端对账）
+ *
+ * 范围：play 全链路——预扫 metadata.json（type/qos 解析与非法输入拒播）→ 读线程逐条预读 →
+ *       播放线程按录制时间轴经透传 writer 发布 → 订阅端精确收数对账。bag 由 mcap writer +
+ *       手写 metadata.json 构造（makeBag，写侧同款落盘形态：每分片自含 Channel 声明、
+ *       metadata 键集同 record 组装），不依赖 record 产物。暂停/恢复（bagPlayPause/Resume
+ *       的播放侧联动）与 10 项 play 选项归后续轮；服务层端点契约归
+ *       TestYomkRpcBagServiceContract。
+ * 覆盖：
+ *   P5 预扫输入校验（失败快速返回不建任何 DDS 实体，节点可继续复用）：目录不存在 /
+ *      路径是文件 / 缺 metadata.json / metadata 非 JSON / topics 空清单 / 有元信息无
+ *      分片 / qos 串非法枚举名 / 多逗号 → play false 且 error 明确；
+ *   P2 旧格式 bag 拒播（type 空串 → error 命中 "has no type info (legacy bag)"，有意
+ *      偏离参考实现告警跳过的既有裁定）；
+ *   P1 双主题基础回放对账：双主题各 30 条 @200ms（6s 时间轴）→ qos 快照
+ *      RELIABLE,TRANSIENT_LOCAL 恢复发布 → 预先在场的 TRANSIENT_LOCAL 订阅端（writer
+ *      history depth 1000 支持匹配建立后 latched 补发）精确收 30+30；stats 契约（预扫
+ *      清单序 / type 透传 / count 精确 / bytes == count×5）；
+ *   P3a QoS 快照恢复正向（reliability）：RELIABLE,TRANSIENT_LOCAL bag → BEST_EFFORT
+ *      订阅端（request ≤ offered 匹配）与 RELIABLE 订阅端均可 latched 补发精确收满；
+ *   P3b QoS 快照恢复负向：BEST_EFFORT,VOLATILE bag → RELIABLE 订阅端收 0（request
+ *      RELIABLE > offered BEST_EFFORT，匹配不建立；短回放窗先于匹配完成，非匹配期丢样本
+ *      即为收 0 的唯一可能路径）；
+ *   P3c QoS 快照恢复正向（durability）：BEST_EFFORT,TRANSIENT_LOCAL bag → BEST_EFFORT
+ *      订阅端 latched 补发精确收满（若 durability 误恢复 VOLATILE 则匹配建立前的样本
+ *      全部丢失，16 条无法凑满——以收数反向钉死 durability 快照恢复）；
+ *   P4 Ctrl+C 停止：播放中途 yomk::bagPlayStop 置位（模拟 CLI SIGINT onSignal 路径）→
+ *      play 提前返回 true、stats 部分计数（1.5s @100ms 双主题远小于 80 条总量）、订阅端
+ *      收数 ≤ 播出数（writer 已删，无补发窗口）；
+ *   P6 多分片回放守恒：双分片 bag（bag_0/bag_1 各 10 条，时间轴连续）→ 跨分片升序游标
+ *      回放 → 订阅端精确收 20、stats 守恒。
+ *
+ * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
+ * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
+ * 时间戳目录，无运行后残留）。
+ *
+ * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
+ */
+
+#include "TestCheck.h"
+#include "FastDDSBagNode.h"     // 被测节点（直测，不经服务层）
+#include "YomkRpcBagService.h"  // yomk::bagPlayStop/bagPlayReset（停止标志读写端）
+
+#include <mcap/writer.hpp>      // makeBag 造分片（MCAP_IMPLEMENTATION 单译元在被测库内）
+#include <nlohmann/json.hpp>    // makeBag 手写 metadata.json（record 组装同款键集）
+
+#include <fastdds/dds/domain/DomainParticipant.hpp>
+#include <fastdds/dds/domain/DomainParticipantFactory.hpp>
+#include <fastdds/dds/subscriber/DataReader.hpp>
+#include <fastdds/dds/subscriber/DataReaderListener.hpp>
+#include <fastdds/dds/subscriber/Subscriber.hpp>
+#include <fastdds/dds/subscriber/SampleInfo.hpp>
+#include <fastdds/dds/topic/Topic.hpp>
+#include <fastdds/dds/topic/TopicDataType.hpp>
+#include <fastdds/dds/topic/TypeSupport.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstring> // memcpy（PlayPassthroughType::serialize）
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace
+{
+    // 匿名空间别名（与 main 内局部别名同路径，目标实体符号完整性经探测程序验证）：遮蔽
+    // 全局 using-directive 注入的前向声明子集实体（缺 DataReader/Topic/SampleInfo/
+    // RETCODE_OK/QoS 常量）——helper 内 dds:: 于匿名空间层单候选解析，main 内另有同路径
+    // 局部别名（Record 先例同款），两处同路径同目标实体、类型互通
+    namespace dds = eprosima::fastdds::dds;
+
+    constexpr uint32_t TEST_DOMAIN = 203;    // 独立域，避开其他测试用例
+    // bag 构造基准时间戳（固定值不依赖墙钟——回放时间轴只消费相对差值）
+    constexpr uint64_t kBaseLogTimeNs = 1700000000000000000ULL;
+    constexpr int kWaitTimeoutMs = 12000;    // 订阅端收数等待上限（SPDP+EDP 1~3s + 回放窗）
+    constexpr int kJoinTimeoutMs = 10000;    // play 线程 join 前完成标志轮询上限
+    constexpr std::size_t kPayloadSize = 5;  // 每条消息字节数（对齐 Convert 先例；bytes 断言基数）
+
+    // 回放 bag 目录常量（固定命名 + 用例收尾 remove_all 自清理，无时间戳目录残留）
+    const std::string kP1Bag = "play_test_p1";
+    const std::string kP3aBag = "play_test_p3a";
+    const std::string kP3bBag = "play_test_p3b";
+    const std::string kP3cBag = "play_test_p3c";
+    const std::string kP4Bag = "play_test_p4";
+    const std::string kP6Bag = "play_test_p6";
+    const std::string kP5Missing = "play_p5_miss";      // 不创建（目录不存在）
+    const std::string kP5IsFile = "play_p5_isfile";     // 路径是文件
+    const std::string kP5NoMeta = "play_p5_nometa";     // 缺 metadata.json
+    const std::string kP5BadJson = "play_p5_badjson";   // metadata 非 JSON
+    const std::string kP5NoTopics = "play_p5_notopics"; // topics 空清单
+    const std::string kP5NoShard = "play_p5_noshard";   // 有元信息无分片
+    const std::string kP5BadEnum = "play_p5_badenum";   // qos 非法枚举名
+    const std::string kP5MultiComma = "play_p5_multicomma"; // qos 多逗号
+    const std::string kP5Legacy = "play_p5_legacy";     // 旧格式（type 空串，P2）
+
+    // bag 主题构造单条目（type 空串 = 旧格式；qos 空串 = metadata 不写 qos 键）
+    struct BagTopicSpec
+    {
+        std::string topic;
+        std::string type;
+        std::string qos;
+        std::size_t messageCount;
+    };
+
+    // 造多主题多分片 bag（mcap 分片 + 手写 metadata.json，写侧同款 open/Channel/addChannel/
+    // write/close，对齐 record 落盘形态）：
+    //   分片：bag_0.mcap..bag_{S-1}.mcap 各自 open(None 压缩)，每分片对全部主题 addChannel
+    //   （分片自含 Channel 声明，同 record）；
+    //   时间轴：全局消息序按主题轮转交错（模拟并发录制到达序），logTime = 基准 + 全局序 ×
+    //   stepNs（全局单调递增，回放游标跨主题升序归并）；消息按全局序连续切分到分片（前段
+    //   bag_0 后段 bag_1，模拟 -b 切分的连续时间轴）；
+    //   metadata：record 组装同款键集（starting_time/duration 的 _format 伴生键占位——
+    //   play 预扫只读数值键）
+    bool makeBag(const std::string &dir, const std::vector<BagTopicSpec> &topics,
+                 std::uint64_t stepNs, std::size_t shardCount = 1)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        std::uint64_t total = 0;
+        for (const auto &t : topics)
+        {
+            total += t.messageCount;
+        }
+        if (total == 0)
+        {
+            return false;
+        }
+
+        // 分片 writer 与各主题 channel（channel.id 分片内独立——分片自含声明同 record）
+        const std::string payload(kPayloadSize, 'x'); // 任意非空透传载荷（字节内容不参与断言）
+        std::vector<std::vector<mcap::ChannelId>> channelIds(shardCount,
+            std::vector<mcap::ChannelId>(topics.size(), 0));
+        std::vector<std::unique_ptr<mcap::McapWriter>> writers;
+        for (std::size_t s = 0; s < shardCount; ++s)
+        {
+            auto writer = std::make_unique<mcap::McapWriter>();
+            mcap::McapWriterOptions options("");
+            options.compression = mcap::Compression::None;
+            if (!writer->open(dir + "/bag_" + std::to_string(s) + ".mcap", options).ok())
+            {
+                return false;
+            }
+            for (std::size_t j = 0; j < topics.size(); ++j)
+            {
+                mcap::KeyValueMap metadata;
+                if (!topics[j].type.empty())
+                {
+                    metadata.emplace("type", topics[j].type);
+                }
+                if (!topics[j].qos.empty())
+                {
+                    metadata.emplace("qos", topics[j].qos);
+                }
+                mcap::Channel channel(topics[j].topic, "cdr", 0, metadata);
+                writer->addChannel(channel);
+                channelIds[s][j] = channel.id;
+            }
+            writers.push_back(std::move(writer));
+        }
+
+        // 全局消息序轮转交错写入（第 r 轮依次写各主题一条，主题耗尽跳过），分片按全局序
+        // 连续切分（k×S/total）
+        std::uint64_t k = 0;
+        for (std::uint64_t round = 0; k < total; ++round)
+        {
+            for (std::size_t j = 0; j < topics.size() && k < total; ++j)
+            {
+                if (round >= topics[j].messageCount)
+                {
+                    continue; // 该主题已写完
+                }
+                const std::size_t shard = static_cast<std::size_t>(k * shardCount / total);
+                mcap::Message msg;
+                msg.channelId = channelIds[shard][j];
+                msg.sequence = static_cast<std::uint32_t>(round);
+                msg.logTime = kBaseLogTimeNs + k * stepNs;
+                msg.publishTime = msg.logTime;
+                // uint8_t 与 std::byte 同为单字节原始存储，别名转换安全（mcap 接口要求数据指针）
+                msg.data = reinterpret_cast<const std::byte *>(payload.data()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                msg.dataSize = payload.size();
+                if (!writers[shard]->write(msg).ok())
+                {
+                    return false;
+                }
+                ++k;
+            }
+        }
+        for (auto &writer : writers)
+        {
+            writer->close();
+        }
+
+        // metadata.json：record 组装同款键集（record 收尾全键，_format 伴生键占位——play
+        // 预扫只读数值键）
+        std::vector<std::string> shardNames;
+        for (std::size_t s = 0; s < shardCount; ++s)
+        {
+            shardNames.emplace_back("bag_" + std::to_string(s) + ".mcap");
+        }
+        const std::uint64_t spanNs = (total > 1) ? (total - 1) * stepNs : 0;
+        nlohmann::json topicsWithCount = nlohmann::json::array();
+        for (const auto &t : topics)
+        {
+            nlohmann::json meta = {{"name", t.topic}, {"type", t.type}};
+            if (!t.qos.empty())
+            {
+                meta["qos"] = t.qos;
+            }
+            topicsWithCount.push_back({{"topic_metadata", meta}, {"message_count", t.messageCount}});
+        }
+        nlohmann::json info;
+        info["version"] = 1;
+        info["storage_identifier"] = "mcap";
+        info["relative_file_paths"] = shardNames;
+        info["starting_time"] = {{"nanoseconds_since_epoch", kBaseLogTimeNs},
+                                 {"nanoseconds_since_epoch_format", "manual-made"}};
+        info["duration"] = {{"nanoseconds", spanNs}, {"nanoseconds_format", "manual-made"}};
+        info["message_count"] = total;
+        info["topics_with_message_count"] = topicsWithCount;
+        std::ofstream metaFile(dir + "/metadata.json");
+        metaFile << info.dump(4) << "\n";
+        return metaFile.good();
+    }
+
+    // 透传接收类型（照抄被测库 PassthroughPubSubType 形态：不解析数据，deserialize 原样
+    // 字节拷贝；类型名与 bag 内 type 一致使 EDP 按名匹配——DDS 匹配只比主题名 + 类型名
+    // 字符串 + QoS 兼容）。测试 TU 独立定义（匿名命名空间，与库内同名类型无符号冲突）。
+    struct PlayBlob
+    {
+        std::string bytes;
+    };
+
+    class PlayPassthroughType : public dds::TopicDataType
+    {
+    public:
+        explicit PlayPassthroughType(const std::string &typeName)
+        {
+            set_name(typeName);
+            // 上限仅约束本端 serialize 的预判（订阅端不发布不触达）；接收侧按实际
+            // payload.length 拷贝不受限。64KB 覆盖常规消息
+            max_serialized_type_size = 64 * 1024;
+            is_compute_key_provided = false;
+        }
+        ~PlayPassthroughType() override = default;
+
+        bool serialize(const void *const data, eprosima::fastdds::rtps::SerializedPayload_t &payload,
+                       dds::DataRepresentationId_t data_representation) override
+        {
+            static_cast<void>(data_representation);
+            const auto *blob = static_cast<const PlayBlob *>(data);
+            if (payload.max_size < blob->bytes.size())
+            {
+                return false;
+            }
+            std::memcpy(payload.data, blob->bytes.data(), blob->bytes.size());
+            payload.length = static_cast<uint32_t>(blob->bytes.size());
+            return true;
+        }
+        bool deserialize(eprosima::fastdds::rtps::SerializedPayload_t &payload, void *data) override
+        {
+            auto *blob = static_cast<PlayBlob *>(data);
+            // 全量透传（含 encapsulation header）：与 play 发布端写入口径对称
+            blob->bytes.assign(payload.data,
+                    payload.data + payload.length);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+            return true;
+        }
+        std::uint32_t calculate_serialized_size(const void *const data,
+                                                dds::DataRepresentationId_t data_representation) override
+        {
+            static_cast<void>(data);
+            static_cast<void>(data_representation);
+            return max_serialized_type_size;
+        }
+        bool compute_key(eprosima::fastdds::rtps::SerializedPayload_t &payload,
+                         eprosima::fastdds::rtps::InstanceHandle_t &ihandle, bool force_md5) override
+        {
+            static_cast<void>(payload);
+            static_cast<void>(ihandle);
+            static_cast<void>(force_md5);
+            return true;  // 无键类型：不做实例归属
+        }
+        bool compute_key(const void *const data, eprosima::fastdds::rtps::InstanceHandle_t &ihandle,
+                         bool force_md5) override
+        {
+            static_cast<void>(data);
+            static_cast<void>(ihandle);
+            static_cast<void>(force_md5);
+            return true;
+        }
+        void *create_data() override
+        {
+            return new PlayBlob();
+        }
+        void delete_data(void *data) override
+        {
+            delete static_cast<PlayBlob *>(data);
+        }
+    };
+
+    // 订阅端计数 listener：take 全部样本只计数（透传语义不解码内容——对账维度为条数）。
+    // 其余回调沿用基类默认空实现（FastDDS 3.x 各回调均非纯虚）
+    class PlayCountListener : public dds::DataReaderListener
+    {
+    public:
+        std::atomic<std::uint64_t> count{0};
+
+        void on_data_available(dds::DataReader *reader) override
+        {
+            if (reader == nullptr)
+            {
+                return;
+            }
+            PlayBlob blob;
+            dds::SampleInfo info;
+            while (reader->take_next_sample(&blob, &info) == dds::RETCODE_OK)
+            {
+                if (info.valid_data)
+                {
+                    ++count;
+                }
+            }
+        }
+    };
+
+    // 订阅端 topic 一次性搭建（透传类型注册幂等 + create_topic；每主题名只调用一次，
+    // 供多 reader 共用）
+    dds::Topic *makePlayTopic(dds::DomainParticipant *participant, const std::string &topicName,
+                              const std::string &typeName)
+    {
+        dds::TypeSupport type(new PlayPassthroughType(typeName));
+        type.register_type(participant);
+        return participant->create_topic(topicName, type.get_type_name(), dds::TOPIC_QOS_DEFAULT);
+    }
+
+    // 订阅端 reader 搭建（QoS 入参指定 reliability/durability 口径；history depth 与
+    // resource limits 显式 1000 对齐 play writer 侧口径——防 FastDDS 默认
+    // max_samples_per_instance=100 触发 QoS 一致性拒绝，play 实现同款防御）
+    dds::DataReader *makePlayReader(dds::Subscriber *subscriber, dds::Topic *topic,
+                                    PlayCountListener *listener,
+                                    dds::ReliabilityQosPolicyKind reliability,
+                                    dds::DurabilityQosPolicyKind durability)
+    {
+        dds::DataReaderQos rqos;
+        rqos.reliability().kind = reliability;
+        rqos.durability().kind = durability;
+        rqos.history().depth = 1000;
+        rqos.resource_limits().max_samples_per_instance = 1000;
+        rqos.resource_limits().max_samples = 1000;
+        return subscriber->create_datareader(topic, rqos, listener);
+    }
+
+    // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读）
+    std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
+                                std::vector<FastDDSBagNode::BagTopicStat> &stats,
+                                std::string &error, bool &ok, std::atomic<bool> &done)
+    {
+        return std::thread([&node, &bagDir, &stats, &error, &ok, &done]()
+        {
+            ok = node.play(bagDir, stats, &error);
+            done.store(true);
+        });
+    }
+
+    // play 线程收尾（轮询完成标志后 join，超时兜底防悬挂——ctest 300s 总超时最终兜底）
+    void joinPlay(std::thread &playThread, const std::atomic<bool> &done,
+                  int timeoutMs = kJoinTimeoutMs)
+    {
+        for (int waited = 0; waited < timeoutMs && !done.load(); waited += 100)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        playThread.join();
+    }
+
+    // 订阅端收数等待（每 50ms 轮询至 expect 条或超时；返回是否收满）
+    bool waitForCount(const std::atomic<std::uint64_t> &counter, std::uint64_t expect,
+                      int timeoutMs = kWaitTimeoutMs)
+    {
+        for (int waited = 0; waited < timeoutMs && counter.load() < expect; waited += 50)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return counter.load() >= expect;
+    }
+} // namespace
+
+int main()
+{
+    namespace fs = std::filesystem;
+    // main 作用域别名（Record 先例同款）：遮蔽全局注入的 dds 命名空间名——某 FastDDS 头经
+    // using-directive 注入的 dds 实体缺 QoS 常量（RELIABLE_RELIABILITY_QOS 等），真层
+    // eprosima::fastdds::dds 符号完整（探测程序已证）
+    namespace dds = eprosima::fastdds::dds;
+    std::error_code ec;
+
+    // 被测节点：域 203，全程单实例（play 预扫失败不建实体可重复调用；播完实体全清可重复回放）
+    FastDDSBagNode node;
+    const bool nodeCreated = node.setDomainId(TEST_DOMAIN);
+    CHECK(nodeCreated, "setDomainId(203) 成功（回放节点域号独立）");
+    if (!nodeCreated)
+    {
+        return testReport("TestFastDDSBagNodePlay");
+    }
+
+    // 订阅端：单 participant 贯穿全程（与回放节点同域对账；每用例独立 reader，主题名互异）
+    auto *participant = dds::DomainParticipantFactory::get_instance()->create_participant(
+        TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+    auto *subscriber =
+        (participant != nullptr) ? participant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT)
+                                 : nullptr;
+    CHECK(participant != nullptr && subscriber != nullptr, "订阅端 participant/subscriber 创建成功");
+
+    // 收尾清理（提前 return 与正常路径共用：显式删除订阅端规避静态析构序问题 + bag 目录清单）
+    const auto cleanup = [&]()
+    {
+        if (participant != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(participant);
+        }
+        for (const std::string &dir : {kP1Bag, kP3aBag, kP3bBag, kP3cBag, kP4Bag, kP6Bag,
+                 kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard, kP5BadEnum, kP5MultiComma,
+                 kP5Legacy})
+        {
+            fs::remove_all(dir, ec);
+        }
+        fs::remove(kP5IsFile, ec);
+    };
+    if (participant == nullptr || subscriber == nullptr)
+    {
+        cleanup();
+        return testReport("TestFastDDSBagNodePlay");
+    }
+
+    // ---- P5：预扫输入校验（fail 快速返回不建任何 DDS 实体，节点可继续复用） ----
+    yomk::bagPlayReset();  // 复位残留停止/暂停标志（对齐 CLI runBagPlay 的发起前置）
+    std::vector<FastDDSBagNode::BagTopicStat> stats;
+    std::string error;
+
+    // P5.1 目录不存在
+    CHECK(!node.play(kP5Missing, stats, &error) &&
+              error.find("bag path [" + kP5Missing + "] does not exist") != std::string::npos,
+          "P5.1 目录不存在 → false + 路径错误文本");
+    // P5.2 路径是文件（非目录）
+    {
+        std::ofstream touchFile(kP5IsFile);
+        touchFile << "x";
+    }
+    CHECK(!node.play(kP5IsFile, stats, &error) &&
+              error.find("must specify a bag directory") != std::string::npos,
+          "P5.2 路径是文件 → false + 目录类型错误文本");
+    // P5.3 缺 metadata.json（空目录）
+    CHECK(fs::create_directory(kP5NoMeta, ec), "P5.3 前置：空目录创建成功");
+    CHECK(!node.play(kP5NoMeta, stats, &error) &&
+              error.find("could not find metadata.json in bag directory") != std::string::npos,
+          "P5.3 缺 metadata.json → false + 元信息缺失错误文本");
+    // P5.4 metadata 非 JSON
+    CHECK(fs::create_directory(kP5BadJson, ec), "P5.4 前置：坏 JSON 目录创建成功");
+    {
+        std::ofstream out(kP5BadJson + "/metadata.json");
+        out << "{ not json";
+    }
+    CHECK(!node.play(kP5BadJson, stats, &error) &&
+              error.find("parse metadata.json failed") != std::string::npos,
+          "P5.4 metadata 非 JSON → false + 解析失败错误文本");
+    // P5.5 topics 空清单
+    CHECK(fs::create_directory(kP5NoTopics, ec), "P5.5 前置：空清单目录创建成功");
+    {
+        nlohmann::json info = {{"storage_identifier", "mcap"}, {"message_count", 0},
+            {"topics_with_message_count", nlohmann::json::array()}};
+        std::ofstream out(kP5NoTopics + "/metadata.json");
+        out << info.dump(4) << "\n";
+    }
+    CHECK(!node.play(kP5NoTopics, stats, &error) &&
+              error.find("no topics found in metadata.json") != std::string::npos,
+          "P5.5 topics 空清单 → false + 空清单错误文本");
+    // P5.6 有元信息无分片（metadata 完整但目录无 bag_*.mcap）
+    CHECK(fs::create_directory(kP5NoShard, ec), "P5.6 前置：无分片目录创建成功");
+    {
+        nlohmann::json info = {{"storage_identifier", "mcap"},
+            {"relative_file_paths", nlohmann::json::array({"bag_0.mcap"})},
+            {"starting_time", {{"nanoseconds_since_epoch", kBaseLogTimeNs}}},
+            {"duration", {{"nanoseconds", 100}}},
+            {"message_count", 2},
+            {"topics_with_message_count", nlohmann::json::array({{
+                 {"topic_metadata",
+                     {{"name", "/rt/x"}, {"type", "YomkRpc::MString"},
+                         {"qos", "RELIABLE,TRANSIENT_LOCAL"}}},
+                 {"message_count", 2}}})}};
+        std::ofstream out(kP5NoShard + "/metadata.json");
+        out << info.dump(4) << "\n";
+    }
+    CHECK(!node.play(kP5NoShard, stats, &error) &&
+              error.find("no bag files found for playing") != std::string::npos,
+          "P5.6 有元信息无分片 → false + 无分片错误文本");
+    // P5.7 qos 非法枚举名（reliability 段合法、durability 段拼写错误——注意 TRANSIENT/
+    // PERSISTENT 是标准 DDS durability 合法档位，parseDurabilityKindName 全档支持）
+    CHECK(makeBag(kP5BadEnum,
+              {{"/rt/x", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCALL", 2}}, 1000000000ULL),
+          "P5.7 前置：非法枚举名 bag 构造成功");
+    CHECK(!node.play(kP5BadEnum, stats, &error) &&
+              error.find("invalid qos string [RELIABLE,TRANSIENT_LOCALL]") != std::string::npos,
+          "P5.7 qos 非法枚举名 → false + invalid qos string（含原串）");
+    // P5.8 qos 多逗号（三段串整体拒绝）
+    CHECK(makeBag(kP5MultiComma,
+              {{"/rt/x", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL,X", 2}}, 1000000000ULL),
+          "P5.8 前置：多逗号 qos bag 构造成功");
+    CHECK(!node.play(kP5MultiComma, stats, &error) &&
+              error.find("invalid qos string") != std::string::npos,
+          "P5.8 qos 多逗号 → false + invalid qos string");
+
+    // ---- P2：旧格式 bag 拒播（type 空串，有意偏离参考实现告警跳过的既有裁定） ----
+    CHECK(makeBag(kP5Legacy, {{"/rt/x", "", "", 2}}, 1000000000ULL),
+          "P2 前置：旧格式 bag（type 空串）构造成功");
+    CHECK(!node.play(kP5Legacy, stats, &error) &&
+              error.find("has no type info (legacy bag), cannot replay") != std::string::npos,
+          "P2 旧格式 bag → false + 拒播错误文本（error 命中 type）");
+
+    // ---- P1：双主题基础回放对账（时间轴 6s；TRANSIENT_LOCAL 订阅端先建在场） ----
+    CHECK(makeBag(kP1Bag,
+              {{"/rt/play_a", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 30},
+                  {"/rt/play_b", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 30}},
+              200 * 1000000ULL),
+          "P1 前置：双主题 bag 构造成功");
+    PlayCountListener listenA;
+    PlayCountListener listenB;
+    auto *topicA = makePlayTopic(participant, "/rt/play_a", "YomkRpc::MString");
+    auto *topicB = makePlayTopic(participant, "/rt/play_b", "YomkRpc::MString");
+    auto *readerA = makePlayReader(subscriber, topicA, &listenA,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    auto *readerB = makePlayReader(subscriber, topicB, &listenB,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicA != nullptr && topicB != nullptr && readerA != nullptr && readerB != nullptr,
+          "P1 前置：双主题订阅端 reader 先建在场");
+
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p1Stats;
+    std::string p1Error;
+    std::atomic<bool> p1Done{false};
+    bool p1Ok = false;
+    std::thread p1Thread = startPlayThread(node, kP1Bag, p1Stats, p1Error, p1Ok, p1Done);
+
+    CHECK(waitForCount(listenA.count, 30) && waitForCount(listenB.count, 30),
+          "P1 双订阅端精确收满（writer depth 1000 匹配后 latched 补发 + 实时回放）");
+    joinPlay(p1Thread, p1Done);  // play 6s 时间轴自然结束
+    CHECK(p1Ok, "P1 play 全程完成返回 true（不设定格，可重复调用）");
+    if (!p1Ok)
+    {
+        std::cerr << "P1 play error: " << p1Error << std::endl;
+    }
+    CHECK(p1Stats.size() == 2, "P1 stats 双主题两项");
+    if (p1Stats.size() == 2)
+    {
+        CHECK(p1Stats[0].topic == "/rt/play_a" && p1Stats[1].topic == "/rt/play_b",
+              "P1 stats 预扫清单序（metadata 主题序）");
+        CHECK(p1Stats[0].type == "YomkRpc::MString" && p1Stats[1].type == "YomkRpc::MString",
+              "P1 stats.type 透传 bag 内类型名");
+        CHECK(p1Stats[0].count == 30 && p1Stats[1].count == 30,
+              "P1 stats 精确条数（时间轴全播）");
+        CHECK(p1Stats[0].bytes == 30 * kPayloadSize && p1Stats[1].bytes == 30 * kPayloadSize,
+              "P1 stats.bytes == count×5（透传字节数）");
+    }
+
+    // ---- P3a：QoS 快照恢复正向（reliability）——RELIABLE,TRANSIENT_LOCAL bag 双口径订阅端 ----
+    CHECK(makeBag(kP3aBag,
+              {{"/rt/play_qos_tl", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 20}},
+              150 * 1000000ULL),
+          "P3a 前置：RELIABLE,TRANSIENT_LOCAL bag 构造成功");
+    PlayCountListener tlBest;
+    PlayCountListener tlRel;
+    auto *topicTl = makePlayTopic(participant, "/rt/play_qos_tl", "YomkRpc::MString");
+    auto *readerTlBest = makePlayReader(subscriber, topicTl, &tlBest,
+        dds::BEST_EFFORT_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    auto *readerTlRel = makePlayReader(subscriber, topicTl, &tlRel,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicTl != nullptr && readerTlBest != nullptr && readerTlRel != nullptr,
+          "P3a 前置：双口径 reader 先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p3aStats;
+    std::string p3aError;
+    std::atomic<bool> p3aDone{false};
+    bool p3aOk = false;
+    std::thread p3aThread = startPlayThread(node, kP3aBag, p3aStats, p3aError, p3aOk, p3aDone);
+    CHECK(waitForCount(tlBest.count, 20),
+          "P3a BEST_EFFORT 订阅端收满（request ≤ offered 匹配 + latched 补发）");
+    CHECK(waitForCount(tlRel.count, 20), "P3a RELIABLE 订阅端收满");
+    joinPlay(p3aThread, p3aDone);
+    CHECK(p3aOk, "P3a play 全程完成返回 true");
+
+    // ---- P3b：QoS 快照恢复负向——BEST_EFFORT,VOLATILE bag → RELIABLE 订阅端不匹配 ----
+    CHECK(makeBag(kP3bBag,
+              {{"/rt/play_qos_be", "YomkRpc::MString", "BEST_EFFORT,VOLATILE", 8}},
+              20 * 1000000ULL),
+          "P3b 前置：BEST_EFFORT,VOLATILE 短回放 bag 构造成功");
+    PlayCountListener beRel;
+    auto *topicBe = makePlayTopic(participant, "/rt/play_qos_be", "YomkRpc::MString");
+    auto *readerBeRel = makePlayReader(subscriber, topicBe, &beRel,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicBe != nullptr && readerBeRel != nullptr, "P3b 前置：RELIABLE 订阅端先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p3bStats;
+    std::string p3bError;
+    std::atomic<bool> p3bDone{false};
+    bool p3bOk = false;
+    std::thread p3bThread = startPlayThread(node, kP3bBag, p3bStats, p3bError, p3bOk, p3bDone);
+    joinPlay(p3bThread, p3bDone);  // 160ms 短回放自然结束
+    CHECK(p3bOk, "P3b play 短回放完成返回 true");
+    std::this_thread::sleep_for(std::chrono::seconds(2));  // 否定窗口：若误匹配早已可见
+    CHECK(beRel.count.load() == 0,
+          "P3b RELIABLE 订阅端收 0（request RELIABLE > offered BEST_EFFORT 匹配不建立）");
+
+    // ---- P3c：QoS 快照恢复正向（durability）——BEST_EFFORT,TRANSIENT_LOCAL bag →
+    //      BEST_EFFORT 订阅端 latched 补发精确收满（若 durability 误恢复 VOLATILE 则
+    //      匹配建立前的样本全部丢失，16 条无法凑满——以收数反向钉死快照恢复） ----
+    CHECK(makeBag(kP3cBag,
+              {{"/rt/play_qos_dtl", "YomkRpc::MString", "BEST_EFFORT,TRANSIENT_LOCAL", 16}},
+              250 * 1000000ULL),
+          "P3c 前置：BEST_EFFORT,TRANSIENT_LOCAL bag 构造成功");
+    PlayCountListener dtlBest;
+    auto *topicDtl = makePlayTopic(participant, "/rt/play_qos_dtl", "YomkRpc::MString");
+    auto *readerDtl = makePlayReader(subscriber, topicDtl, &dtlBest,
+        dds::BEST_EFFORT_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicDtl != nullptr && readerDtl != nullptr, "P3c 前置：BEST_EFFORT 订阅端先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p3cStats;
+    std::string p3cError;
+    std::atomic<bool> p3cDone{false};
+    bool p3cOk = false;
+    std::thread p3cThread = startPlayThread(node, kP3cBag, p3cStats, p3cError, p3cOk, p3cDone);
+    CHECK(waitForCount(dtlBest.count, 16), "P3c BEST_EFFORT 订阅端 latched 补发收满（durability 快照恢复）");
+    joinPlay(p3cThread, p3cDone);
+    CHECK(p3cOk, "P3c play 全程完成返回 true");
+
+    // ---- P4：Ctrl+C 停止（播放中途 bagPlayStop 置位 → 提前返回 + 部分计数） ----
+    CHECK(makeBag(kP4Bag,
+              {{"/rt/play_stop_a", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 40},
+                  {"/rt/play_stop_b", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 40}},
+              100 * 1000000ULL),
+          "P4 前置：双主题 8s 时间轴 bag 构造成功");
+    PlayCountListener stopA;
+    PlayCountListener stopB;
+    auto *topicSa = makePlayTopic(participant, "/rt/play_stop_a", "YomkRpc::MString");
+    auto *topicSb = makePlayTopic(participant, "/rt/play_stop_b", "YomkRpc::MString");
+    auto *readerSa = makePlayReader(subscriber, topicSa, &stopA,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    auto *readerSb = makePlayReader(subscriber, topicSb, &stopB,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicSa != nullptr && topicSb != nullptr && readerSa != nullptr && readerSb != nullptr,
+          "P4 前置：双订阅端 reader 先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p4Stats;
+    std::string p4Error;
+    std::atomic<bool> p4Done{false};
+    bool p4Ok = false;
+    std::thread p4Thread = startPlayThread(node, kP4Bag, p4Stats, p4Error, p4Ok, p4Done);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // 播放中途
+    yomk::bagPlayStop();  // 模拟 CLI SIGINT onSignal 的 async-signal-safe 置位
+    joinPlay(p4Thread, p4Done);
+    CHECK(p4Ok, "P4 bagPlayStop 置位后 play 提前返回 true");
+    CHECK(p4Stats.size() == 2, "P4 stats 双主题两项");
+    const std::uint64_t playedSum =
+        (p4Stats.size() == 2) ? (p4Stats[0].count + p4Stats[1].count) : 0;
+    CHECK(playedSum > 0 && playedSum < 80,
+          "P4 stats 部分计数（1.5s @100ms 双主题远小于 80 条总量）");
+    CHECK(stopA.count.load() + stopB.count.load() <= playedSum,
+          "P4 订阅端收数 ≤ 播出数（writer 已删，无补发窗口）");
+
+    // ---- P6：多分片回放守恒（bag_0/bag_1 各 10 条，时间轴连续跨分片衔接） ----
+    CHECK(makeBag(kP6Bag,
+              {{"/rt/play_shard", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 20}},
+              200 * 1000000ULL, 2),
+          "P6 前置：双分片 bag 构造成功");
+    CHECK(fs::exists(kP6Bag + "/bag_0.mcap", ec) && fs::exists(kP6Bag + "/bag_1.mcap", ec),
+          "P6 前置：双分片落盘");
+    PlayCountListener shardListen;
+    auto *topicShard = makePlayTopic(participant, "/rt/play_shard", "YomkRpc::MString");
+    auto *readerShard = makePlayReader(subscriber, topicShard, &shardListen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicShard != nullptr && readerShard != nullptr, "P6 前置：订阅端 reader 先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p6Stats;
+    std::string p6Error;
+    std::atomic<bool> p6Done{false};
+    bool p6Ok = false;
+    std::thread p6Thread = startPlayThread(node, kP6Bag, p6Stats, p6Error, p6Ok, p6Done);
+    CHECK(waitForCount(shardListen.count, 20), "P6 跨分片回放订阅端精确收 20（总数守恒）");
+    joinPlay(p6Thread, p6Done);
+    CHECK(p6Ok, "P6 play 全程完成返回 true");
+    CHECK(p6Stats.size() == 1 && p6Stats[0].count == 20 && p6Stats[0].bytes == 20 * kPayloadSize,
+          "P6 stats 守恒（跨分片计数与字节对账）");
+
+    cleanup();
+    return testReport("TestFastDDSBagNodePlay");
+}
