@@ -25,7 +25,7 @@
  *   yomkrpc bag reindex <bag-path>
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
  *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]
- *           [-l | --loop] [--start-offset SEC] <bag-path>
+ *           [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>] <bag-path>
  *           交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，+/- 调节回放
  *           速率（±10%），Ctrl+C 停止
  *   yomkrpc -h | --help
@@ -57,6 +57,7 @@
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-paused   # 暂停态启动，SPACE 开始回放
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --loop   # 循环回放，到尾回开头无限播放
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-offset 5   # 从第 5 秒起播，跳过前段
+ *   yomkrpc bag play bag_2026-01-01_12-00-00_000 -d 3   # 开播前先等 3 秒，等订阅端就绪
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -189,7 +190,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
           "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]\n"
-          "          [-l | --loop] [--start-offset SEC] <bag-path>\n"
+          "          [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>] <bag-path>\n"
                     "          交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，\n"
           "          +/- 调节回放速率（±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
@@ -224,6 +225,9 @@ static void printUsage(std::ostream &os)
           "                      Ctrl+C 停止\n"
           "  --start-offset SEC  起始偏移秒（仅 bag play 生效）：从 bag 内第 SEC 秒开始播\n"
           "                      （读侧跳过前段消息，支持小数，须 >= 0）\n"
+          "  -d, --delay SEC     开播延迟秒（仅 bag play 生效）：每次开播（含每轮循环）\n"
+          "                      前先睡 SEC 秒等订阅端匹配就绪，支持小数，须 > 0；record\n"
+          "                      语境的 -d 仍为分片时长（短名语境分流同 -r）\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -575,14 +579,18 @@ static std::string formatRate(double rate)
 // and plays indefinitely"：到尾即回开头无限播放，回显附 ", looping" 后缀，收尾统计为
 // 各轮累计）；startOffsetSec 起始偏移秒（对齐 ros2 --start-offset：从 bag 开始第 SEC
 // 秒起播，读侧跳过前段消息不入队不计收尾统计，回显附 ", offset=<值>" 后缀——仅非零
-// 时显示，负值由主解析层报错退出）；
+// 时显示，负值由主解析层报错退出）；playDelaySec 开播延迟秒（对齐 ros2 -d/--delay
+// "Will delay at the beginning of each loop"：播放线程在每轮轮边界（首轮首条与每轮
+// 回卷轮）重锚前先睡 SEC 秒再播出——读播解耦下延迟落播放侧才能挡住每轮播出起点，
+// sleep 期间发布实体已建为订阅端留匹配窗口，回显附 ", delay=<值>" 后缀——仅非零
+// 时显示，<=0 由主解析层报错退出——0 也拒对齐 ros2 positive_float）；
 // tty 下额外起键盘监听线程：SPACE 从暂停态开始回放、p 暂停、r 继续（与 record 键位
 // 一致）、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
 // 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
 // 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，仅剩开始/停止两通道
 static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate,
         const std::vector<std::string> &topics, bool startPaused, bool loop,
-        double startOffsetSec)
+        double startOffsetSec, double playDelaySec)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -616,12 +624,19 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     {
         offsetNote = ", offset=" + formatRate(startOffsetSec);
     }
+    // 开播延迟非 0 时附 delay=<g>（-d/--delay 显式传入的可见性；%g 风格去尾零复用）
+    std::string delayNote;
+    if (playDelaySec > 0.0)
+    {
+        delayNote = ", delay=" + formatRate(playDelaySec);
+    }
     const char *startSuffix = startPaused
         ? ", started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop"
         : ", press p to pause, r to resume, +/- rate, Ctrl+C to stop";
     const char *loopNote = loop ? ", looping" : "";
     YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
-                  std::to_string(domainId), rateNote, offsetNote, loopNote, startSuffix);
+                  std::to_string(domainId), rateNote, offsetNote, delayNote, loopNote,
+                  startSuffix);
 
     // 3. 键盘监听线程（tty 下生效）：SPACE=start（仅暂停态），p=pause（仅运行态），
     //    r=resume（仅暂停态，与 record 键位一致），+/-=rate ±10%，Ctrl+C 退出
@@ -697,7 +712,8 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
 
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
     //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
-    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffsetSec);
+    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffsetSec,
+                            playDelaySec);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1686,6 +1702,7 @@ int main(int argc, char *argv[])
     bool startPaused = false; // 暂停态启动（--start-paused；bag record/play 生效）
     bool playLoop = false;   // 循环回放（-l/--loop；仅 bag play 生效）
     double startOffsetSec = 0.0;  // 起始偏移秒（--start-offset；仅 bag play 生效，>=0 支持小数）
+    double playDelaySec = 0.0;  // 开播延迟秒（-d/--delay；仅 bag play 生效，>0 支持小数）
     uint64_t maxBagSize = 0;  // 单分片最大字节数（-b/--max-bag-size；仅 bag record 生效，0=不分片）
     uint64_t maxBagDurationSec = 0;  // 单分片最大时长秒（--max-bag-duration；仅 bag record，0=不分片）
     uint64_t maxCacheSize = 100 * 1024 * 1024;  // 写缓存双缓冲字节数（-c/--max-cache-size；仅
@@ -1959,8 +1976,51 @@ int main(int argc, char *argv[])
             maxBagSize = value;
             continue;
         }
-        if (arg == "-d" || arg == "--max-bag-duration")
+        if (arg == "-d" || arg == "--delay" || arg == "--max-bag-duration")
         {
+            // 短名 -d 语境分流（-r 复用判定先例同款）：pos 已含 "bag play" 即开播延迟
+            // 语境（对齐 ros2 -d/--delay），否则为 bag record 的单分片时长语境；两长名
+            // 语境专属，错误语境传入报错退出
+            const bool bagPlayCtx =
+                pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play";
+            if ((bagPlayCtx && arg == "--max-bag-duration") ||
+                (!bagPlayCtx && arg == "--delay"))
+            {
+                std::cerr << "yomkrpc: " << arg
+                          << (bagPlayCtx ? " 仅 bag record 生效" : " 仅 bag play 生效")
+                          << "\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (bagPlayCtx)
+            {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "yomkrpc: " << arg << " 缺少延迟参数\n";
+                    printUsage(std::cerr);
+                    return 2;
+                }
+                // 数值解析与校验对齐 -r 回放语境形态；0 也拒对齐 ros2 positive_float
+                // （CLI 层报错拒绝，服务/节点层报 invalid delay 只拒负值快速拦截）
+                char *end = nullptr;
+                const double value = std::strtod(argv[++i], &end);
+                if (end == argv[i] || *end != '\0')
+                {
+                    std::cerr << "yomkrpc: 非法延迟 \"" << argv[i]
+                              << "\"（须为数值，>0，单位秒）\n";
+                    printUsage(std::cerr);
+                    return 2;
+                }
+                if (value <= 0.0)
+                {
+                    // <=0：文案对齐 ros2 check_positive_float（0 也拒）
+                    std::cerr << "yomkrpc: " << value
+                              << " is not in the valid range (> 0.0)\n";
+                    return 2;
+                }
+                playDelaySec = value;
+                continue;
+            }
             if (i + 1 >= argc)
             {
                 std::cerr << "yomkrpc: " << arg << " 缺少分片时长参数\n";
@@ -2104,7 +2164,7 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
         return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused, playLoop,
-                          startOffsetSec);
+                          startOffsetSec, playDelaySec);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

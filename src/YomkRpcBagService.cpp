@@ -244,6 +244,14 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
         YOMK_ERROR_TAG("YomkRpcBagService::bagPlay", "invalid start offset");
         return YomkResponse(YomkResponse::eNo, "invalid start offset");
     }
+    // delay 校验锁外前置（同上先例）；只拒负值——0 为合法缺省不延迟。有意偏离 ros2
+    // API 层负值告警忽略按 0 播（RCLCPP_WARN "Delay is disabled."）：对齐 rate/
+    // startOffset 快速拦截先例，失败快速暴露拼写错误
+    if (p->msg.delay < 0.0)
+    {
+        YOMK_ERROR_TAG("YomkRpcBagService::bagPlay", "invalid delay");
+        return YomkResponse(YomkResponse::eNo, "invalid delay");
+    }
 
     std::lock_guard<std::mutex> lock(mtx_);
     if (node_ == nullptr)
@@ -263,7 +271,7 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
     if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate, p->msg.topics,
-                         p->msg.loop, p->msg.startOffset))
+                         p->msg.loop, p->msg.startOffset, p->msg.delay))
     {
         if (error.empty())
         {

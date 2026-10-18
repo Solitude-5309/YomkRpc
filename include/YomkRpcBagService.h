@@ -180,6 +180,9 @@ struct DDSBagPlay
     double startOffset = 0.0;  // 起始偏移秒（对齐 ros2 --start-offset：从 bag 开始第 SEC 秒
                                // 起播，读侧跳过前段消息不入队不计收尾统计；负值非法；尾部
                                // 缺省字段，旧调用方零改动）
+    double delay = 0.0;  // 开播延迟秒（对齐 ros2 -d/--delay "Will delay at the beginning of
+                         // each loop"：每次开播含每轮回卷前先睡 SEC 秒等订阅端匹配就绪；
+                         // 负值非法；尾部缺省字段，旧调用方零改动）
 };
 
 // clang-format off

@@ -2480,6 +2480,7 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
 // ---- bag play 专属辅助(行为语义见 FastDDSBagNode.h play 声明注释) ----
 constexpr size_t kPlayReadAheadQueueSize = 1000;  // 预读队列深度(对齐参考实现预读队列默认值)
 constexpr uint32_t kPlayPausePollMs = 20;         // 暂停标志轮询间隔(短于录制轮询,暂停/恢复更跟手)
+constexpr uint32_t kPlayDelayPollMs = 50;         // 延迟窗停止标志轮询间隔(分段睡防大延迟卡 join)
 
 // 读线程 → 播放线程单条消息(深拷贝所有权转移;eos 哨兵标志读毕;loopStart 轮边界哨兵——
 // 第二轮起每轮首条置位,播放线程据此重锚时间轴)
@@ -2568,7 +2569,7 @@ private:
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
         std::string* error, double playbackRate, const std::vector<std::string>& topics,
-        bool loop, double startOffset)
+        bool loop, double startOffset, double delay)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2601,6 +2602,14 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     if (startOffset < 0.0)
     {
         return fail("invalid start offset");
+    }
+
+    // 开播延迟入参校验（同上快速返回路径，不建任何 DDS 实体）；只拒负值——0 为合法
+    // 缺省不延迟（有意偏离 ros2 API 层负值告警忽略按 0 播，对齐 rate/startOffset
+    // 快速拦截先例）；错误文案对齐服务层锁外校验
+    if (delay < 0.0)
+    {
+        return fail("invalid delay");
     }
 
     // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
@@ -2815,7 +2824,9 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     //      游标重新预读无限循环(每轮一次 open 开销;读流错误不循环——错误语义保留),
     //      第二轮起每轮首条置 loopStart 轮边界标记供播放线程重锚。--start-offset 读侧
     //      跳过:logTime 早于全场首条(过滤前基准)+偏移的消息不入队不计统计不告警,每轮
-    //      回卷同阈值即每轮保持偏移(对齐 ros2 每轮回 seek 偏移点)
+    //      回卷同阈值即每轮保持偏移(对齐 ros2 每轮回 seek 偏移点)。--delay 播放侧
+    //      每轮轮边界延迟(见播放线程):读侧全速预读不设门——读播解耦下读侧睡不挡
+    //      队列积压消息的轮边界播出(第二轮在首轮播放期间已入队)
     std::thread readThread([&]()
     {
         uint32_t loopRound = 0;
@@ -2894,12 +2905,33 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         uint64_t t0 = 0;
         bool anchored = false;
         double rate = 1.0;
+        // --delay 每轮轮边界延迟秒→纳秒(入口已校验>=0,0=不延迟):读播解耦下读侧全速
+        // 预读入队,延迟须落在播放侧才能真正挡住每轮播出起点——首轮首条(!anchored)与
+        // 每轮回卷轮边界(loopStart 哨兵)重锚前分段轮询睡 SEC(50ms 粒度轮询停止标志,
+        // 大延迟下 Ctrl+C/stop 即退不卡 join);sleep 期间发布实体已建,首条发出不早于
+        // 实体建立+SEC——订阅匹配窗口(根治 VOLATILE 匹配前必丢首条先例);对齐 ros2
+        // do-while 循环体开头 "Will delay at the beginning of each loop"(读播一体下
+        // sleep 天然挡播放,本仓解耦架构等价落点在播放侧轮边界)
+        const int64_t delayNs = std::llround(delay * 1e9);
         PlayMsg msg;
         while (!stopped() && queue.pop(msg))
         {
             if (msg.eos)
             {
                 break;  // 读毕哨兵:正常结束
+            }
+            if (delayNs > 0 && (!anchored || msg.loopStart))
+            {
+                const auto delayDeadline = std::chrono::steady_clock::now() +
+                                           std::chrono::nanoseconds(delayNs);
+                while (!stopped() && std::chrono::steady_clock::now() < delayDeadline)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kPlayDelayPollMs));
+                }
+                if (stopped())
+                {
+                    break;  // 延迟窗内停止:退出播放(与 eos break 同路径收尾)
+                }
             }
             if (!anchored)
             {

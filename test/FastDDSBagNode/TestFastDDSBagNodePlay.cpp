@@ -68,6 +68,18 @@
  *      速度浮动故不设上界；回卷从零的错误形态每轮 6 条被 span 2500ms 节拍反压、
  *      5s 收 ≤12 条越下界）；P11.4 负值启动
  *      （false + invalid start offset + stats 清空，对齐 P7.5 rate 校验用例形态）。
+ *   P12 开播延迟（-d/--delay，对齐 ros2 语义 "Sleep before play. Negative durations
+ *      invalid. Will delay at the beginning of each loop."——播放线程在每轮轮边界
+ *      （首轮首条与每轮回卷轮）重锚前先睡 SEC 秒再播出——读播解耦下读侧全速预读入队，
+ *      延迟须落播放侧才能挡住每轮播出起点；sleep 期间发布实体已建为订阅端留匹配窗口；
+ *      节点层只拒负值，0 为合法缺省不延迟）：P12.1 单轮延迟（kP8Bag delay=1.0s——启动后 500ms 窗双
+ *      订阅端零增量钉住 delay 窗零发出（未生效形态已发 ~5 条即拒）；waitForCount
+ *      双主题各 20 收满；自然播毕耗时含 delay 窗 [2600,4200]ms，未生效形态
+ *      ≈2.15-2.65s 越下界）；P12.2 loop×delay 每轮开头生效（delay=0.5s 3s 窗收数
+ *      [15,20]——首轮 0.5s 窗+span 1.95s+开销 ≈2.65-2.95s 播毕、第二轮回卷后轮边界
+ *      再睡 0.5s 首条 ≈3.2s 未开始，上界 20 钉住"每轮开头延迟"，delay 仅首轮生效
+ *      形态第二轮 ≈2.65s 即播 3s 窗收 ≥21 越上界）；P12.3 负值启动（false +
+ *      invalid delay + stats 清空，对齐 P11.4 形态）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -398,19 +410,22 @@ namespace
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
     // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false、startOffsetSec
-    // 缺省 0.0 透传节点层入口——P7 速率/P8 过滤/P10 循环/P11 偏移用例经尾参传入；topics
-    // 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
+    // 缺省 0.0、delaySec 缺省 0.0 透传节点层入口——P7 速率/P8 过滤/P10 循环/P11 偏移/
+    // P12 延迟用例经尾参传入；topics 按值捕获：调用点 {"..."} 初始化列表临时在语句尾
+    // 销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
                                 double playbackRate = 1.0,
                                 const std::vector<std::string> &topics = {},
-                                bool loop = false, double startOffsetSec = 0.0)
+                                bool loop = false, double startOffsetSec = 0.0,
+                                double delaySec = 0.0)
     {
         return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
-                            loop, startOffsetSec]()
+                            loop, startOffsetSec, delaySec]()
         {
-            ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec);
+            ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec,
+                           delaySec);
             done.store(true);
         });
     }
@@ -1175,6 +1190,74 @@ int main()
               p114Error.find("invalid start offset") != std::string::npos,
           "P11.4 offset=-0.5 启动 → false + invalid start offset");
     CHECK(p114Stats.empty(), "P11.4 stats 清空（失败即未播放）");
+
+    // ---- P12：-d/--delay 开播延迟（库层形态，对齐 ros2 语义 "Sleep before play.
+    // Negative durations invalid. Will delay at the beginning of each loop."：读线程
+    // 每轮循环体开头先睡 SEC 秒再读播；节点层只拒负值，0 为合法缺省不延迟） ----
+    // P12.1 单轮延迟零发出+播毕：kP8Bag delay=1.0s——启动后 500ms 窗双订阅端零增量
+    //（delay 窗零发出；未生效形态 500ms 已发 ~5 条即拒）；waitForCount 双主题各 20
+    // 收满；自然播毕耗时 = delay 窗 1000 + span 1950 + 开销（未生效形态 ≈2.15-2.65s
+    // 越下界 2600，第二重区分）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p121Stats;
+    std::string p121Error;
+    std::atomic<bool> p121Done{false};
+    bool p121Ok = false;
+    const auto p121aBase = p8aListen.count.load();
+    const auto p121bBase = p8bListen.count.load();
+    const auto p121Start = std::chrono::steady_clock::now();
+    std::thread p121Thread = startPlayThread(node, kP8Bag, p121Stats, p121Error, p121Ok,
+        p121Done, 1.0, {}, false, 0.0, 1.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(p8aListen.count.load() == p121aBase && p8bListen.count.load() == p121bBase,
+          "P12.1 delay 窗 500ms 双订阅端零增量（delay 窗零发出；未生效形态已发 ~5 条）");
+    CHECK(waitForCount(p8aListen.count, p121aBase + 20) &&
+              waitForCount(p8bListen.count, p121bBase + 20),
+          "P12.1 双订阅端收满各 20（delay 窗后首条立即播、全场按时间轴播毕）");
+    const double p121ElapsedMs = joinPlayElapsedMs(p121Thread, p121Done, p121Start);
+    CHECK(p121Ok, "P12.1 delay=1.0s 自然播毕返回 true");
+    CHECK(p121Stats.size() == 2 && p121Stats[0].count == 20 && p121Stats[1].count == 20,
+          "P12.1 stats 双主题各 20（延迟不改变收尾统计口径）");
+    CHECK(p121ElapsedMs >= 2600.0 && p121ElapsedMs <= 4200.0,
+          "P12.1 耗时 ∈ [2600,4200]ms（delay 窗 1000 + span 1950 + 开销；未生效形态 "
+          "≈2.15-2.65s 越下界）");
+
+    // P12.2 loop×delay 每轮开头生效：delay=0.5s 3s 窗——首轮 0.5s 窗+span 1950ms+开销
+    // ≈2.65-2.95s 播毕全收；第二轮回卷重建游标后轮开头再睡 0.5s → 第二轮首条 ≈3.2s
+    // 未开始，3s 窗收 20。上界 20 钉住"每轮开头延迟"——delay 仅首轮生效形态第二轮
+    // ≈2.65s 即播、3s 窗收 ≥21 越上界；下界 15 防首轮匹配/调度开销吞条误伤
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p122Stats;
+    std::string p122Error;
+    std::atomic<bool> p122Done{false};
+    bool p122Ok = false;
+    const auto p122aBase = p8aListen.count.load();
+    const auto p122bBase = p8bListen.count.load();
+    std::thread p122Thread = startPlayThread(node, kP8Bag, p122Stats, p122Error, p122Ok,
+        p122Done, 1.0, {}, true, 0.0, 0.5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    yomk::bagPlayStop();
+    joinPlay(p122Thread, p122Done);
+    CHECK(p122Ok, "P12.2 stop 路径 play 返回 true");
+    const auto p122aGot = p8aListen.count.load() - p122aBase;
+    CHECK(p122aGot >= 15 && p122aGot <= 20,
+          "P12.2 loop×delay 收数 [15,20]（首轮播毕全收 + 第二轮轮开头再睡未开始——"
+          "上界 20 钉住每轮开头延迟，仅首轮生效形态 3s 窗收 ≥21 越上界，实测 " +
+          std::to_string(p122aGot) + " 条）");
+    CHECK(p122Stats.size() == 2 && p122Stats[0].count >= 15 && p122Stats[0].count <= 20,
+          "P12.2 stats 双主题 [15,20]（与订阅端收数同口径）");
+    CHECK(p8bListen.count.load() - p122bBase >= 15,
+          "P12.2 p8b 同口径 ≥15（双主题时间轴一致）");
+
+    // P12.3 负值启动：入口校验拒绝快速返回（不建任何 DDS 实体），stats 清空——错误
+    // 文案对齐 P11.4 先例（invalid delay；节点层只拒负值，0 合法缺省）
+    std::vector<FastDDSBagNode::BagTopicStat> p123Stats;
+    std::string p123Error;
+    p123Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约（失败=未播放）
+    CHECK(!node.play(kP8Bag, p123Stats, &p123Error, 1.0, {}, false, 0.0, -0.5) &&
+              p123Error.find("invalid delay") != std::string::npos,
+          "P12.3 delay=-0.5 启动 → false + invalid delay");
+    CHECK(p123Stats.empty(), "P12.3 stats 清空（失败即未播放）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

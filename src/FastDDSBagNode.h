@@ -156,10 +156,17 @@ public:
     // 后续按录制时间轴差值顺延；与 loop 叠加每轮回卷同阈值即每轮保持偏移（对齐 ros2 每
     // 轮 seek 回偏移点）；负值报 "invalid start offset" 快速返回 false（不建任何 DDS
     // 实体）；超全场时长则零消息播出正常播毕返回 true
+    // delay 开播延迟秒（对齐 ros2 -d/--delay "Will delay at the beginning of each loop"）：
+    // 播放线程在每轮轮边界（首轮首条 + 每轮回卷的 loopStart 哨兵）重锚前分段轮询睡
+    // SEC 秒——读播解耦下读侧全速预读入队，延迟须落播放侧才能真正挡住每轮播出起点
+    // （读侧睡不挡队列积压消息的轮边界播出）；分段轮询 stopped() 使大延迟下
+    // Ctrl+C/stop 即退不卡 join；sleep 期间发布实体已建，首条发出不早于实体建立+SEC
+    // （订阅端匹配窗口，规避 VOLATILE 匹配前丢首条）；与 loop 叠加每轮保持延迟；
+    // 负值报 "invalid delay" 快速返回 false（不建任何 DDS 实体）；0 不延迟恒等现行为
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
             const std::vector<std::string>& topics = {}, bool loop = false,
-            double startOffset = 0.0);
+            double startOffset = 0.0, double delay = 0.0);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行
