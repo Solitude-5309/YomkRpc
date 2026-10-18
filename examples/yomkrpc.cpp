@@ -24,7 +24,8 @@
  *   yomkrpc bag info <bag-path>
  *   yomkrpc bag reindex <bag-path>
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
- *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused] <bag-path>
+ *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]
+ *           [-l | --loop] <bag-path>
  *           交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，+/- 调节回放
  *           速率（±10%），Ctrl+C 停止
  *   yomkrpc -h | --help
@@ -54,6 +55,7 @@
   *   yomkrpc bag play -r 2.0 bag_2026-01-01_12-00-00_000   # 2 倍速回放
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --topics hello_world   # 只回放指定主题
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-paused   # 暂停态启动，SPACE 开始回放
+ *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --loop   # 循环回放，到尾回开头无限播放
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -185,7 +187,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag info <bag-path>\n"
           "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
-          "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused] <bag-path>\n"
+          "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]\n"
+          "          [-l | --loop] <bag-path>\n"
                     "          交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，\n"
           "          +/- 调节回放速率（±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
@@ -215,6 +218,8 @@ static void printUsage(std::ostream &os)
           "  --start-paused      暂停态启动（bag record/play 生效）：record 为订阅与发现\n"
           "                      照常、收到的消息丢弃不写入；play 为读线程照常预读、播放\n"
           "                      挂起零发出；交互键（tty 下）：SPACE 开始，p 暂停，r 继续，\n"
+          "                      Ctrl+C 停止\n"
+          "  -l, --loop          循环回放（仅 bag play 生效）：到尾即回开头无限播放，\n"
           "                      Ctrl+C 停止\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
@@ -563,12 +568,15 @@ static std::string formatRate(double rate)
 // 对齐 ros2 --topics 缺省语义；精确项须在 bag 清单否则报错，通配项经服务端按 bag 清单
 // 展开，语义同 YOMKRPC_BAG_PLAY 注释）；startPaused 暂停态启动（对齐 ros2
 // --start-paused 与 record 同名选项：读线程照常预读、播放挂起零发出，SPACE 开始）；
+// loop 循环回放（对齐 ros2 -l/--loop "starts back at the beginning on reaching the end
+// and plays indefinitely"：到尾即回开头无限播放，回显附 ", looping" 后缀，收尾统计为
+// 各轮累计）；
 // tty 下额外起键盘监听线程：SPACE 从暂停态开始回放、p 暂停、r 继续（与 record 键位
 // 一致）、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
 // 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
 // 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，仅剩开始/停止两通道
 static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate,
-        const std::vector<std::string> &topics, bool startPaused)
+        const std::vector<std::string> &topics, bool startPaused, bool loop)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -599,8 +607,9 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     const char *startSuffix = startPaused
         ? ", started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop"
         : ", press p to pause, r to resume, +/- rate, Ctrl+C to stop";
+    const char *loopNote = loop ? ", looping" : "";
     YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
-                  std::to_string(domainId), rateNote, startSuffix);
+                  std::to_string(domainId), rateNote, loopNote, startSuffix);
 
     // 3. 键盘监听线程（tty 下生效）：SPACE=start（仅暂停态），p=pause（仅运行态），
     //    r=resume（仅暂停态，与 record 键位一致），+/-=rate ±10%，Ctrl+C 退出
@@ -676,7 +685,7 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
 
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
     //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
-    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics);
+    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1663,6 +1672,7 @@ int main(int argc, char *argv[])
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     bool startPaused = false; // 暂停态启动（--start-paused；bag record/play 生效）
+    bool playLoop = false;   // 循环回放（-l/--loop；仅 bag play 生效）
     uint64_t maxBagSize = 0;  // 单分片最大字节数（-b/--max-bag-size；仅 bag record 生效，0=不分片）
     uint64_t maxBagDurationSec = 0;  // 单分片最大时长秒（--max-bag-duration；仅 bag record，0=不分片）
     uint64_t maxCacheSize = 100 * 1024 * 1024;  // 写缓存双缓冲字节数（-c/--max-cache-size；仅
@@ -1712,6 +1722,11 @@ int main(int argc, char *argv[])
         if (arg == "--start-paused")
         {
             startPaused = true;
+            continue;
+        }
+        if (arg == "-l" || arg == "--loop")
+        {
+            playLoop = true;
             continue;
         }
         if (arg == "-f" || arg == "--file")
@@ -2047,7 +2062,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
-        return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused);
+        return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused, playLoop);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

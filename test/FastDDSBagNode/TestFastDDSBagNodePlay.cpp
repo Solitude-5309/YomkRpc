@@ -51,6 +51,12 @@
  *      ——全局 span 1950ms（40 条 @50ms 交错），病态泄入表现为恢复后瞬间追发
  *      （总耗时塌缩到暂停窗内）；P9.2 暂停态与 --topics 过滤叠加（恢复后仅入选
  *      主题补播，被过滤主题双条件下仍零收）。
+ *   P10 循环回放（-l/--loop，对齐 ros2 语义 "starts back at the beginning on reaching
+ *      the end and plays indefinitely"——到尾回开头无限播放）：P10.1 循环两轮不倾泻
+ *      （2.5s 窗收数 [21,35]——第二轮按录制时间轴节拍推进，轮边界不重锚的倾泻形态
+ *      2.5s 内 40 条全发越上界；总耗时 ≥1900ms 钉住第一轮完整节拍）；P10.2 与
+ *      --topics 叠加（回卷轮过滤仍生效）；P10.3 与暂停态启动叠加（暂停窗零增量
+ *      语义 loop 下保持，跨暂停累计两轮起步）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -379,17 +385,20 @@ namespace
     }
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
-    // playbackRate 缺省 1.0、topics 缺省空（不过滤）透传节点层入口——P7 速率/P8 过滤用例
-    // 经尾参传入；topics 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
+    // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false 透传节点层入口——
+    // P7 速率/P8 过滤/P10 循环用例经尾参传入；topics 按值捕获：调用点 {"..."} 初始化列表
+    // 临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
                                 double playbackRate = 1.0,
-                                const std::vector<std::string> &topics = {})
+                                const std::vector<std::string> &topics = {},
+                                bool loop = false)
     {
-        return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics]()
+        return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
+                            loop]()
         {
-            ok = node.play(bagDir, stats, &error, playbackRate, topics);
+            ok = node.play(bagDir, stats, &error, playbackRate, topics, loop);
             done.store(true);
         });
     }
@@ -976,6 +985,89 @@ int main()
           "P9.2 stats 仅 p8b 行（暂停态与 --topics 叠加正确）");
     CHECK(p8aListen.count.load() == p92aBase,
           "P9.2 p8a 全程零收（被过滤 + 暂停态双条件）");
+
+    // ---- P10：-l/--loop 循环回放（库层形态，对齐 ros2 语义：到尾回开头无限播放） ----
+    // P10.1 循环两轮不倾泻：后台 play(loop=true) → 2.5s 窗（第一轮 span 1950ms 完 +
+    // 第二轮 ~550ms）→ bagPlayStop → 收数 [21,35]：下界 20+1 钉住轮边界重锚后第二轮
+    // 首条立即播出，上界 20+15 钉住第二轮按录制时间轴节拍推进（回卷后不重锚的倾泻
+    // 形态会把第二轮 20 条瞬间全发，2.5s 内收满 40 越上界）；总耗时 ≥1900ms 钉住
+    // 第一轮完整节拍
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p101Stats;
+    std::string p101Error;
+    std::atomic<bool> p101Done{false};
+    bool p101Ok = false;
+    const auto p101aBase = p8aListen.count.load();
+    const auto p101bBase = p8bListen.count.load();
+    const auto p101Start = std::chrono::steady_clock::now();
+    std::thread p101Thread = startPlayThread(node, kP8Bag, p101Stats, p101Error, p101Ok,
+        p101Done, 1.0, {}, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    yomk::bagPlayStop();
+    const double p101ElapsedMs = joinPlayElapsedMs(p101Thread, p101Done, p101Start);
+    CHECK(p101Ok, "P10.1 stop 路径 play 返回 true");
+    const auto p101aGot = p8aListen.count.load() - p101aBase;
+    const auto p101bGot = p8bListen.count.load() - p101bBase;
+    CHECK(p101aGot >= 21 && p101aGot <= 35,
+          "P10.1 p8a 两轮收数 [21,35]（第一轮 20 + 第二轮 1~15 按节拍推进，倾泻形态"
+          " 2.5s 内 40 条全发越上界）");
+    CHECK(p101bGot >= 21 && p101bGot <= 35,
+          "P10.1 p8b 两轮收数 [21,35]（双主题同款）");
+    CHECK(p101ElapsedMs >= 1900.0,
+          "P10.1 总耗时 ≥ 1900ms（第一轮完整节拍 1950ms span）");
+    CHECK(p101Stats.size() == 2 && p101Stats[0].count >= 21 && p101Stats[1].count >= 21,
+          "P10.1 stats 双主题各 ≥21（第二轮起步累计）");
+
+    // P10.2 loop 与 --topics 叠加：仅 p8a 入选 + loop → 回卷轮过滤仍生效（p8a 两轮
+    // 累计 ≥21、p8b 全程零收）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p102Stats;
+    std::string p102Error;
+    std::atomic<bool> p102Done{false};
+    bool p102Ok = false;
+    const auto p102aBase = p8aListen.count.load();
+    const auto p102bBase = p8bListen.count.load();
+    std::thread p102Thread = startPlayThread(node, kP8Bag, p102Stats, p102Error, p102Ok,
+        p102Done, 1.0, {"/rt/p8a"}, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    yomk::bagPlayStop();
+    joinPlay(p102Thread, p102Done);
+    CHECK(p102Ok, "P10.2 stop 路径 play 返回 true");
+    CHECK(p8aListen.count.load() - p102aBase >= 21,
+          "P10.2 p8a 两轮累计 ≥21（loop 回卷轮起步）");
+    CHECK(p8bListen.count.load() == p102bBase,
+          "P10.2 p8b 全程零收（回卷轮过滤仍生效）");
+    CHECK(p102Stats.size() == 1 && p102Stats[0].topic == "/rt/p8a" &&
+              p102Stats[0].count >= 21,
+          "P10.2 stats 仅 p8a 行且 ≥21");
+
+    // P10.3 loop 与暂停态启动叠加：预置 bagPlayPause → play(loop=true) → 700ms 暂停窗
+    // 零增量（P9 语义 loop 下保持）→ resume → 2.4s（第一轮剩余 ~1250ms + 调度开销余量
+    // ——P9.1 实测开销可达数百 ms，窗口过短第二轮首条来不及播出 → 第二轮 ~800ms 节拍
+    // 推进）→ stop → 收数 [21,35]（下界 20+1 钉跨暂停两轮起步，上界防倾泻同 P10.1 口径）
+    yomk::bagPlayReset();
+    yomk::bagPlayPause();
+    std::vector<FastDDSBagNode::BagTopicStat> p103Stats;
+    std::string p103Error;
+    std::atomic<bool> p103Done{false};
+    bool p103Ok = false;
+    const auto p103aBase = p8aListen.count.load();
+    const auto p103bBase = p8bListen.count.load();
+    std::thread p103Thread = startPlayThread(node, kP8Bag, p103Stats, p103Error, p103Ok,
+        p103Done, 1.0, {}, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    CHECK(p8aListen.count.load() == p103aBase && p8bListen.count.load() == p103bBase,
+          "P10.3 暂停窗 700ms 双订阅端零增量（P9 语义 loop 下保持）");
+    yomk::bagPlayResume();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2400));
+    yomk::bagPlayStop();
+    joinPlay(p103Thread, p103Done);
+    CHECK(p103Ok, "P10.3 stop 路径 play 返回 true");
+    const auto p103aGot = p8aListen.count.load() - p103aBase;
+    CHECK(p103aGot >= 21 && p103aGot <= 35,
+          "P10.3 p8a 跨暂停累计 [21,35]（第一轮播毕 + 第二轮起步按节拍推进）");
+    CHECK(p103Stats.size() == 2 && p103Stats[0].count >= 21,
+          "P10.3 stats 双主题累计 ≥21");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

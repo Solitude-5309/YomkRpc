@@ -175,6 +175,8 @@ struct DDSBagPlay
     std::vector<std::string> topics;  // 只回放清单内主题（空=全部，对齐 ros2 --topics 缺省；
                                       // 精确项须在 bag 清单否则报错；元素含一个 '*' 为通配，
                                       // 按 bag 内主题清单匹配展开，对齐 convert topics 语义）
+    bool loop = false;  // 循环回放（对齐 ros2 -l/--loop：到尾即回开头无限播放，Ctrl+C 终止；
+                        // 尾部缺省字段，旧调用方零改动）
 };
 
 // clang-format off

@@ -254,7 +254,8 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
     // m_msg 携带原因
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
-    if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate, p->msg.topics))
+    if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate, p->msg.topics,
+                         p->msg.loop))
     {
         if (error.empty())
         {

@@ -2480,13 +2480,15 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
 constexpr size_t kPlayReadAheadQueueSize = 1000;  // 预读队列深度(对齐参考实现预读队列默认值)
 constexpr uint32_t kPlayPausePollMs = 20;         // 暂停标志轮询间隔(短于录制轮询,暂停/恢复更跟手)
 
-// 读线程 → 播放线程单条消息(深拷贝所有权转移;eos 哨兵标志读毕)
+// 读线程 → 播放线程单条消息(深拷贝所有权转移;eos 哨兵标志读毕;loopStart 轮边界哨兵——
+// 第二轮起每轮首条置位,播放线程据此重锚时间轴)
 struct PlayMsg
 {
     std::string topic;
     uint64_t logTime = 0;
     std::vector<uint8_t> data;
     bool eos = false;
+    bool loopStart = false;
 };
 
 // 预扫主题项(metadata.json name/type/qos 三键 + qos 解析产物发布配置)
@@ -2564,7 +2566,8 @@ private:
 
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
-        std::string* error, double playbackRate, const std::vector<std::string>& topics)
+        std::string* error, double playbackRate, const std::vector<std::string>& topics,
+        bool loop)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2800,42 +2803,56 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
 
     // ---- ②读线程:分片升序逐条预读深拷贝入队(满则背压);清单外主题告警一次跳过;
     //      读流失败记错误(已读消息照常播完,play 返回 false);循环出口统一推 EOS 哨兵
-    //      (停止时 push 内部弃推,播放线程由停止谓词退出)
+    //      (停止时 push 内部弃推,播放线程由停止谓词退出)。loop 循环回放:读毕回卷重建
+    //      游标重新预读无限循环(每轮一次 open 开销;读流错误不循环——错误语义保留),
+    //      第二轮起每轮首条置 loopStart 轮边界标记供播放线程重锚
     std::thread readThread([&]()
     {
-        BagConvertCursor cursor(dirPath, bagFiles);
-        std::set<std::string> warnedTopics;
+        uint32_t loopRound = 0;
+        std::set<std::string> warnedTopics;  // 整场一次(跨轮回卷不重复告警)
         while (!stopped())
         {
-            std::string stepError;
-            const BagConvertCursor::Step step = cursor.advance(&stepError);
-            if (step == BagConvertCursor::Step::kError)
+            BagConvertCursor cursor(dirPath, bagFiles);  // 回卷=重新打开分片(每轮一次 open)
+            bool firstInLoop = true;
+            while (!stopped())
             {
-                readFailed = true;
-                readErrorMsg = stepError;
-                break;
-            }
-            if (step == BagConvertCursor::Step::kExhausted)
-            {
-                break;  // 正常读毕
-            }
-            if (topicIndex.count(cursor.topic()) == 0)
-            {
-                // 分片内主题不在播放清单:被 --topics 过滤(仍在 bag 清单)静默跳过;不在
-                // bag 清单(分片与元信息不一致)告警一次跳过
-                if (bagListedTopics.count(cursor.topic()) == 0 &&
-                    warnedTopics.insert(cursor.topic()).second)
+                std::string stepError;
+                const BagConvertCursor::Step step = cursor.advance(&stepError);
+                if (step == BagConvertCursor::Step::kError)
                 {
-                    std::cout << "play: topic [" << cursor.topic()
-                              << "] not listed in metadata.json, skipped" << std::endl;
+                    readFailed = true;
+                    readErrorMsg = stepError;
+                    break;
                 }
-                continue;
+                if (step == BagConvertCursor::Step::kExhausted)
+                {
+                    break;  // 本轮读毕(回卷点)
+                }
+                if (topicIndex.count(cursor.topic()) == 0)
+                {
+                    // 分片内主题不在播放清单:被 --topics 过滤(仍在 bag 清单)静默跳过;不在
+                    // bag 清单(分片与元信息不一致)告警一次跳过
+                    if (bagListedTopics.count(cursor.topic()) == 0 &&
+                        warnedTopics.insert(cursor.topic()).second)
+                    {
+                        std::cout << "play: topic [" << cursor.topic()
+                                  << "] not listed in metadata.json, skipped" << std::endl;
+                    }
+                    continue;
+                }
+                PlayMsg msg;
+                msg.topic = cursor.topic();
+                msg.logTime = cursor.logTime();
+                msg.data = cursor.data();  // 深拷贝(cursor 内部缓冲随推进复用)
+                msg.loopStart = loop && loopRound > 0 && firstInLoop;
+                firstInLoop = false;
+                queue.push(std::move(msg));
             }
-            PlayMsg msg;
-            msg.topic = cursor.topic();
-            msg.logTime = cursor.logTime();
-            msg.data = cursor.data();  // 深拷贝(cursor 内部缓冲随推进复用)
-            queue.push(std::move(msg));
+            if (readFailed || !loop)
+            {
+                break;  // 读流错误不循环(错误语义保留)/单轮模式读毕
+            }
+            ++loopRound;  // 回卷下一轮
         }
         PlayMsg eosMsg;
         eosMsg.eos = true;
@@ -2868,6 +2885,15 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 anchor = std::chrono::steady_clock::now();
                 t0 = msg.logTime;
                 anchored = true;
+                rate = yomk::g_bagPlayRate.load(std::memory_order_relaxed);
+            }
+            else if (msg.loopStart)
+            {
+                // 轮边界重锚(loop 循环回放):回卷后 logTime 重回小值,既有锚定公式会把
+                // deadline 落在过去导致整轮瞬间倾泻——新轮从当前时刻重新起锚,当前条
+                // 立即播、后续按 bag 差值顺延(对齐暂停恢复重锚形态);倍率取轮边界最新值
+                anchor = std::chrono::steady_clock::now();
+                t0 = msg.logTime;
                 rate = yomk::g_bagPlayRate.load(std::memory_order_relaxed);
             }
             // bag 偏移(乱序防御:logTime 早于锚点 bag 时间按 0 延迟立即播——录制侧单调,

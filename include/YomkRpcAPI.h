@@ -302,13 +302,15 @@
 // 否则报 "not found in bag"；元素含一个 '*' 为通配，按 bag 内主题清单匹配展开，未命中
 // 报 "matched no bag topic"、双 '*' 报错，对齐 convert topics 语义；入选集合 = 精确 ∪
 // 通配命中，回显/发布实体/收尾统计只含入选主题）。
+// loop 循环回放（对齐 ros2 -l/--loop：到尾即回开头无限播放——读线程每轮回卷重新预读、
+// 播放线程轮边界重锚无倾泻；收尾统计为各轮累计；Ctrl+C 终止）。
 // 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
 // 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics) \
+#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop) \
     YOMK_REQUEST("/YomkRpcBagService/bag_play", \
-        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics)}))
+        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

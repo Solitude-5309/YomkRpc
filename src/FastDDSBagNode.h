@@ -145,9 +145,14 @@ public:
     // 清单否则报 "not found in bag"；模式项恰一个 '*' 按 bag 清单展开（对齐 convert
     // topics 语义），未命中报 "matched no bag topic"、双 '*' 报错——入选集合 = 精确 ∪
     // 通配命中（去重升序），回显/发布实体/读线程入队/收尾统计只含入选主题
+    // loop 循环回放（对齐 ros2 -l/--loop 语义 "starts back at the beginning on reaching
+    // the end and plays indefinitely"）：读线程到尾回卷重新预读入队（第二轮起每轮首条经
+    // 队列哨兵标记轮边界），播放线程轮边界重锚——新轮首条立即播、后续按录制时间轴差值
+    // 顺延，轮间衔接无倾泻无跳变；收尾统计为各轮累计；Ctrl+C 随时终止；与
+    // playbackRate/topics/startPaused 正交叠加
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
-            const std::vector<std::string>& topics = {});
+            const std::vector<std::string>& topics = {}, bool loop = false);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行
