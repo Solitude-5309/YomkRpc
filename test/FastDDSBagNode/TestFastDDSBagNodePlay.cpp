@@ -45,6 +45,12 @@
  *      项去重（stats 升序各 20）；P8.3 通配展开（*p8a 单主题 / /rt/p8* 双主题）；P8.4
  *      精确项不存在（false + not found in bag + stats 清空）；P8.5 模式未命中
  *      （matched no bag topic）与双 '*'（record 惯例文案）。
+ *   P9 暂停态启动（--start-paused，库层形态：bagPlayPause 预置 + 播放挂起；对齐
+ *      record 同名选项先例与 ros2 --start-paused 语义）：P9.1 暂停窗订阅端零增量 +
+ *      恢复全量补播 + 总耗时 ≈ 暂停窗 + 全局 span（暂停期不泄入时间轴，重锚语义）
+ *      ——全局 span 1950ms（40 条 @50ms 交错），病态泄入表现为恢复后瞬间追发
+ *      （总耗时塌缩到暂停窗内）；P9.2 暂停态与 --topics 过滤叠加（恢复后仅入选
+ *      主题补播，被过滤主题双条件下仍零收）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -915,6 +921,61 @@ int main()
     CHECK(!node.play(kP8Bag, p85Stats, &p85Error, 1.0, {"a*b*c"}) &&
               p85Error.find("'*' 出现多次") != std::string::npos,
           "P8.5 双 '*' → false + 出现多次（record 惯例）");
+
+    // ---- P9：--start-paused 暂停态启动（库层形态，对齐 record 先例与 ros2 语义） ----
+    // P9.1 暂停窗零发出 + 恢复全量补播 + 暂停期不泄入时间轴：预置 bagPlayPause → 后台
+    // play → 700ms 窗订阅端零增量（不依赖 P8 累计基数，只断言窗口内不动）→ resume →
+    // 补播收满；总耗时 ≈ 700 + 1950（全局 span）+开销，泄入病态会塌缩到暂停窗内
+    yomk::bagPlayReset();
+    yomk::bagPlayPause();  // 预置暂停意图（先于 play；节点层全程只 load 该原子）
+    std::vector<FastDDSBagNode::BagTopicStat> p91Stats;
+    std::string p91Error;
+    std::atomic<bool> p91Done{false};
+    bool p91Ok = false;
+    const auto p91aBase = p8aListen.count.load();
+    const auto p91bBase = p8bListen.count.load();
+    const auto p91Start = std::chrono::steady_clock::now();
+    std::thread p91Thread = startPlayThread(node, kP8Bag, p91Stats, p91Error, p91Ok,
+        p91Done);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    CHECK(p8aListen.count.load() == p91aBase && p8bListen.count.load() == p91bBase,
+          "P9.1 暂停窗 700ms 双订阅端零增量（播放挂起零发出）");
+    yomk::bagPlayResume();
+    CHECK(waitForCount(p8aListen.count, p91aBase + 20),
+          "P9.1 恢复后 p8a 补播收满（+20）");
+    const double p91ElapsedMs = joinPlayElapsedMs(p91Thread, p91Done, p91Start);
+    CHECK(p91Ok, "P9.1 play 全程完成返回 true");
+    CHECK(p91Stats.size() == 2 && p91Stats[0].count == 20 && p91Stats[1].count == 20,
+          "P9.1 stats 双主题各 20（恢复后全量补播）");
+    CHECK(p91ElapsedMs >= 2200.0 && p91ElapsedMs <= 3400.0,
+          "P9.1 总耗时 ≈ 暂停窗 700ms + span 1950ms（暂停期不泄入时间轴：泄入则恢复后"
+          "瞬间追发塌缩到暂停窗内，二次计入则超出 3350ms）");
+
+    // P9.2 暂停态与 --topics 过滤叠加：预置暂停 + topics 仅 p8b → 暂停窗双端零增量，
+    // 恢复后 p8b 补播 +20、p8a 仍零增量（stats 仅 p8b 行）
+    yomk::bagPlayReset();
+    yomk::bagPlayPause();
+    std::vector<FastDDSBagNode::BagTopicStat> p92Stats;
+    std::string p92Error;
+    std::atomic<bool> p92Done{false};
+    bool p92Ok = false;
+    const auto p92aBase = p8aListen.count.load();
+    const auto p92bBase = p8bListen.count.load();
+    std::thread p92Thread = startPlayThread(node, kP8Bag, p92Stats, p92Error, p92Ok,
+        p92Done, 1.0, {"/rt/p8b"});
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    CHECK(p8aListen.count.load() == p92aBase && p8bListen.count.load() == p92bBase,
+          "P9.2 暂停窗双订阅端零增量（过滤叠加暂停态）");
+    yomk::bagPlayResume();
+    CHECK(waitForCount(p8bListen.count, p92bBase + 20),
+          "P9.2 恢复后 p8b 补播收满（+20）");
+    joinPlay(p92Thread, p92Done);
+    CHECK(p92Ok, "P9.2 play 全程完成返回 true");
+    CHECK(p92Stats.size() == 1 && p92Stats[0].topic == "/rt/p8b" &&
+              p92Stats[0].count == 20,
+          "P9.2 stats 仅 p8b 行（暂停态与 --topics 叠加正确）");
+    CHECK(p8aListen.count.load() == p92aBase,
+          "P9.2 p8a 全程零收（被过滤 + 暂停态双条件）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

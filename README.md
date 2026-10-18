@@ -319,7 +319,7 @@ ExampleYomkRpcPub
 | `yomkrpc bag info <bag目录>` | 查看 bag 元信息（输出对齐 `ros2 bag info` 的多行文本，纯文件读不经 bag 节点，详见 6.8） |
 | `yomkrpc bag reindex <bag目录>` | 从 mcap 分片重建被删/损坏的 `metadata.json` 并无条件覆盖写出（行为对齐 `ros2 bag reindex`，纯文件操作不经 bag 节点，详见 6.9） |
 | `yomkrpc bag convert -i <bag目录> [-i <bag目录> ...] -o <配置文件>\|--output <配置文件>` | 按输出配置文件把一个或多个输入 bag 过滤/裁剪/合并写为新 bag（纯文件操作不经 bag 节点，详见 6.10） |
-| `yomkrpc bag play [-r <rate>] [--topics T1 T2 ...] <bag目录>` | 按录制时间轴把 bag 回放为真实 DDS 流量（预扫 metadata.json 后透传发布——QoS 按录制快照恢复，读播解耦按速率倍率定时发布，`-r/--rate` 倍率可调；交互键（tty 下）：p/SPACE 暂停、r 恢复、`+`/`-` 键 ±10% 动态调率，Ctrl+C 停止；`--topics` 只回放清单内主题（空格分隔多值，支持 record 同款通配，详见 6.11）；播毕收尾统计；CLI 自动建删 bag 节点，详见 6.11） |
+| `yomkrpc bag play [-r <rate>] [--topics T1 T2 ...] [--start-paused] <bag目录>` | 按录制时间轴把 bag 回放为真实 DDS 流量（预扫 metadata.json 后透传发布——QoS 按录制快照恢复，读播解耦按速率倍率定时发布，`-r/--rate` 倍率可调；交互键（tty 下）：SPACE 从暂停态开始、p 暂停、r 恢复、`+`/`-` 键 ±10% 动态调率，Ctrl+C 停止；`--topics` 只回放清单内主题（空格分隔多值，支持 record 同款通配）；`--start-paused` 暂停态启动（读线程照常预读、播放挂起零发出）；播毕收尾统计；CLI 自动建删 bag 节点，详见 6.11） |
 
 公共参数（各命令通用）：
 
@@ -1207,21 +1207,23 @@ if (resp.m_status == YomkResponse::eOk)
 
 ### 6.11 回放 bag（yomkrpc bag play）
 
-`yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] <bag目录>` 把录制 bag 按录制时间轴回放为真实 DDS 流量（命令形态对齐参考实现 `bag play [-r/--rate] <bag路径>`：单个位置参数，按速率倍率回放——`-r/--rate` 指定倍率，缺省 1.0，合法范围 >0，2.0 两倍速、0.5 半倍速，对齐参考实现 `--rate` 语义）。`--topics` 限定只回放清单内主题（空格分隔多值，缺省全部，语义见下方行为说明；参考实现同选项仅精确匹配，通配为本仓 record/convert 惯例扩展）。启动即开播（无开始键；与 record 不同，此处 SPACE 与 p 同为暂停键）；运行中交互键（tty 下）：p/SPACE 暂停、r 恢复、`+`/`-` ±10% 调率，Ctrl+C 停止（详见下方行为说明）。回放端预扫 `metadata.json` 后按主题按需重建透传发布实体——消息 CDR 原始字节直发不反序列化，发布 QoS 按录制快照恢复；读线程从分片逐条预读入有界内存队列（深度 1000，满则背压等待）、播放线程从队列取消息按消息 logTime 相对间隔定时发布（绝对锚定抗累积漂移），读播解耦同参考实现；全部消息播毕或 Ctrl+C 停止后清理全部发布实体。CLI 自动创建并在退出前删除 bag 节点（域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择，同其他命令）；播放期间服务端长驻阻塞，播毕即退出。
+`yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused] <bag目录>` 把录制 bag 按录制时间轴回放为真实 DDS 流量（命令形态对齐参考实现 `bag play [-r/--rate] <bag路径>`：单个位置参数，按速率倍率回放——`-r/--rate` 指定倍率，缺省 1.0，合法范围 >0，2.0 两倍速、0.5 半倍速，对齐参考实现 `--rate` 语义）。`--topics` 限定只回放清单内主题（空格分隔多值，缺省全部，语义见下方行为说明；参考实现同选项仅精确匹配，通配为本仓 record/convert 惯例扩展）。缺省启动即开播（SPACE 无操作）；`--start-paused` 暂停态启动（对齐 record 同名选项与参考实现 `-p/--start-paused` 语义：读线程照常预读、播放挂起零发出，暂停期不计入播放时间轴），按 SPACE 开始；运行中交互键（tty 下）：SPACE 从暂停态开始、p 暂停、r 恢复（与 record 键位一致）、`+`/`-` ±10% 调率，Ctrl+C 停止（详见下方行为说明）。回放端预扫 `metadata.json` 后按主题按需重建透传发布实体——消息 CDR 原始字节直发不反序列化，发布 QoS 按录制快照恢复；读线程从分片逐条预读入有界内存队列（深度 1000，满则背压等待）、播放线程从队列取消息按消息 logTime 相对间隔定时发布（绝对锚定抗累积漂移），读播解耦同参考实现；全部消息播毕或 Ctrl+C 停止后清理全部发布实体。CLI 自动创建并在退出前删除 bag 节点（域号经环境变量 `YOMKRPC_DDS_DOMAIN_ID` 选择，同其他命令）；播放期间服务端长驻阻塞，播毕即退出。
 
 ```bash
 yomkrpc bag play bag_in                    # 全主题 1x 按录制时间轴回放
 yomkrpc bag play -r 2.0 bag_in             # 2 倍速回放（0.5 半倍速慢放排查竞态）
 yomkrpc bag play bag_in --topics hello_world          # 只回放指定主题
 yomkrpc bag play bag_in --topics 'hello_*' /other     # 清单可混排通配与精确项
+yomkrpc bag play bag_in --start-paused                # 暂停态启动，SPACE 开始回放
 yomkrpc bag play ./bag_2026-10-08_09-52-22            # 回放指定录制产物目录
                                            # tty 下播放中按 +/- 键 ±10% 动态调率
 ```
 
-开播回显与收尾统计（开播首行打印交互键提示——tty 下 p/SPACE 暂停、r 恢复、`+`/`-` ±10% 调率，其后逐主题打印类型与恢复的 QoS 快照 + bag 元信息行；收尾按主题打印播出统计）：
+开播回显与收尾统计（开播首行打印交互键提示——tty 下 SPACE 从暂停态开始、p 暂停、r 恢复、`+`/`-` ±10% 调率；`--start-paused` 启动时后缀为 `started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop`，其后逐主题打印类型与恢复的 QoS 快照 + bag 元信息行；收尾按主题打印播出统计）：
 
 ```text
-replaying bag [ bag_in ] on domain 0 , rate=1 , press p to pause, r to resume, +/- rate, Ctrl+C to stop
+replaying bag [ bag_in ] on domain 0 , rate=1 , started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop   # --start-paused 启动行
+replaying bag [ bag_in ] on domain 0 , rate=1 , press p to pause, r to resume, +/- rate, Ctrl+C to stop                                # 缺省启动行
 replaying topic=/chatter type=YomkRpc::MString qos=RELIABLE,TRANSIENT_LOCAL
 replaying topic=/battery type=YomkRpc::MInt32 qos=RELIABLE,TRANSIENT_LOCAL
 replaying bag [bag_in]: 60 messages / duration 00-00-06_000-000-000 / start 2026-10-08_09-52-22_685-614-542
@@ -1238,7 +1240,8 @@ bag_in
 - **匹配前丢样本**：offered durability 为 VOLATILE 时订阅端晚于消息发布建立的匹配必丢样本——先起订阅端再开播可保收满；快照为 TRANSIENT_LOCAL 时匹配建立后经 latched 补发可收满全场（writer history 深度固定为预读队列深度且对齐整场消息量）；参考实现的 `--delay` 延迟开播选项属后续轮
 - **读播解耦**：读线程逐条深拷贝入队（预读队列深度 1000，满则背压），播放线程消费定时发布；队列饿死仅致播放延迟不顺延时间轴
 - **时间轴还原**：首条消息立即发布，其后按录制 logTime 相对间隔除以速率倍率定时发布（2.0 两倍速、0.5 半倍速，对齐参考实现 PlayerClock 语义）；暂停期间时间轴冻结，恢复后从断点按当前倍率重锚
-- **交互键**（tty 下）：p 或 SPACE 暂停（打印 `replay paused`）、r 恢复（打印 `replay resumed`），可反复切换；`+`/`-` 调节回放速率 ±10% 步进（对齐参考实现 ↑/↓ 键 Increase/Decrease Rate 10%，成功打印 `rate set to <值>`、≤0 拒绝打印 `failed to set rate to <值>`）；Ctrl+C 终止并按已播出数收尾统计（提前返回不报错）；非 tty（管道/重定向）自动跳过键盘监听，仅剩开始/停止两通道
+- **暂停态启动**（`--start-paused`，对齐 record 同名选项与参考实现 `-p/--start-paused` 语义）：开播即挂起——读线程照常预读入队、播放线程挂起零发出；SPACE（或 r）开始后按录制时间轴从首条重锚播出，暂停等待期不计入时间轴；库层等价形态为先 `yomk::bagPlayPause()` 预置再调 `YOMKRPC_BAG_PLAY`
+- **交互键**（tty 下，与 record 键位一致）：SPACE 从暂停态开始（打印 `replay started`，仅暂停态生效——缺省启动即开播，运行态按 SPACE 无操作）、p 暂停（打印 `replay paused`，仅运行态生效）、r 恢复（打印 `replay resumed`，仅暂停态生效），可反复切换；`+`/`-` 调节回放速率 ±10% 步进（对齐参考实现 ↑/↓ 键 Increase/Decrease Rate 10%，成功打印 `rate set to <值>`、≤0 拒绝打印 `failed to set rate to <值>`）；Ctrl+C 终止并按已播出数收尾统计（提前返回不报错）；非 tty（管道/重定向）自动跳过键盘监听，仅剩开始/停止两通道
 - **运行时动态调率**：键盘 `+`/`-` 与进程内 API `yomk::bagPlaySetRate(rate)` / `yomk::bagPlayGetRate()` 双入口同源（进程内原子量，不经 DDS 协议——对齐参考实现 `~/set_rate`、`~/get_rate` 服务的进程内等价形态）；`bagPlaySetRate` ≤0 拒绝返回 false 保持原值；换率即时生效于后续调度，已播 bag 进度经重锚保持连续（无跳发/重复）；`yomk::bagPlayReset()` 把倍率复位 1.0（防上次会话残留，CLI 每次播放前自动调用）
 - **成功输出**：回执 StringArray 首行为 bag 目录名，其后每主题一行 `topic: N 条 / M 字节`（预扫清单序；Ctrl+C 提前停止时未播主题计 0）
 
@@ -1304,7 +1307,7 @@ cmake --build test/build -j
 | FastDDSDebugNode (1) | TestFastDDSDebugNode（节点层守卫 + 发现→动态类型→订阅→JSON 输出端到端） |
 | YomkRpcDebugService (2) | TestYomkRpcDebugServiceContract（DDS-free 契约）、TestYomkRpcDebugServiceLifecycle（真实 DDS 生命周期） |
 | YomkRpcBagService (2) | TestYomkRpcBagServiceContract（DDS-free 契约）、TestYomkRpcBagServiceLifecycle（真实 DDS 录制生命周期） |
-| FastDDSBagNode (6) | TestFastDDSBagNodeValidation（启动校验与输入校验分支，含通配展开判定）、TestFastDDSBagNodeRecord（发布→录制→Ctrl+C 收尾→落盘断言端到端，含通配模式录制）、TestFastDDSBagNodeInfo（bag info 静态函数直测：输出全行断言 + 失败路径契约，DDS-free）、TestFastDDSBagNodeReindex（bag reindex 静态函数直测：编号序收集/多分片合并/全字段断言/覆盖重建/无 summary 回退扫描 + 失败路径契约，DDS-free）、TestFastDDSBagNodeConvert（bag convert 静态函数直测：全缺省合并/topics 精确与通配抽取/时段裁剪含边界/分片滚动/多输入 logTime 归并/旧格式拒转 + 失败路径契约，DDS-free）、TestFastDDSBagNodePlay（节点层回放端到端：预扫输入校验/旧格式拒播/双主题回放对账/QoS 快照恢复正反向/Ctrl+C 停止/多分片守恒/回放速率倍率全程与运行时动态调率/--topics 主题过滤精确与通配展开及清单对账报错） |
+| FastDDSBagNode (6) | TestFastDDSBagNodeValidation（启动校验与输入校验分支，含通配展开判定）、TestFastDDSBagNodeRecord（发布→录制→Ctrl+C 收尾→落盘断言端到端，含通配模式录制）、TestFastDDSBagNodeInfo（bag info 静态函数直测：输出全行断言 + 失败路径契约，DDS-free）、TestFastDDSBagNodeReindex（bag reindex 静态函数直测：编号序收集/多分片合并/全字段断言/覆盖重建/无 summary 回退扫描 + 失败路径契约，DDS-free）、TestFastDDSBagNodeConvert（bag convert 静态函数直测：全缺省合并/topics 精确与通配抽取/时段裁剪含边界/分片滚动/多输入 logTime 归并/旧格式拒转 + 失败路径契约，DDS-free）、TestFastDDSBagNodePlay（节点层回放端到端：预扫输入校验/旧格式拒播/双主题回放对账/QoS 快照恢复正反向/Ctrl+C 停止/多分片守恒/回放速率倍率全程与运行时动态调率/--topics 主题过滤精确与通配展开及清单对账报错/--start-paused 暂停态启动零发出与恢复补播及时间轴不泄入） |
 
 可选构建开关（CMake cache 变量）：
 
