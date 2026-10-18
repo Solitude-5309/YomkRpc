@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <cmath>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -2567,7 +2568,7 @@ private:
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
         std::string* error, double playbackRate, const std::vector<std::string>& topics,
-        bool loop)
+        bool loop, double startOffset)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2594,6 +2595,13 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         return fail("invalid playback rate");
     }
     yomk::g_bagPlayRate.store(playbackRate, std::memory_order_relaxed);
+
+    // 起始偏移入参校验（同上快速返回路径，不建任何 DDS 实体）；负值非法——错误文案
+    // 对齐服务层锁外校验
+    if (startOffset < 0.0)
+    {
+        return fail("invalid start offset");
+    }
 
     // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
     const std::filesystem::path dirPath(bagDir);
@@ -2805,11 +2813,15 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     //      读流失败记错误(已读消息照常播完,play 返回 false);循环出口统一推 EOS 哨兵
     //      (停止时 push 内部弃推,播放线程由停止谓词退出)。loop 循环回放:读毕回卷重建
     //      游标重新预读无限循环(每轮一次 open 开销;读流错误不循环——错误语义保留),
-    //      第二轮起每轮首条置 loopStart 轮边界标记供播放线程重锚
+    //      第二轮起每轮首条置 loopStart 轮边界标记供播放线程重锚。--start-offset 读侧
+    //      跳过:logTime 早于全场首条(过滤前基准)+偏移的消息不入队不计统计不告警,每轮
+    //      回卷同阈值即每轮保持偏移(对齐 ros2 每轮回 seek 偏移点)
     std::thread readThread([&]()
     {
         uint32_t loopRound = 0;
         std::set<std::string> warnedTopics;  // 整场一次(跨轮回卷不重复告警)
+        const int64_t startOffsetNs = std::llround(startOffset * 1e9);  // 秒→纳秒(入口已校验>=0)
+        int64_t bagBaseNs = -1;  // 全场首条(过滤前)logTime——偏移基准(对齐 ros2 metadata.starting_time)
         while (!stopped())
         {
             BagConvertCursor cursor(dirPath, bagFiles);  // 回卷=重新打开分片(每轮一次 open)
@@ -2827,6 +2839,15 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 if (step == BagConvertCursor::Step::kExhausted)
                 {
                     break;  // 本轮读毕(回卷点)
+                }
+                if (bagBaseNs < 0)
+                {
+                    // logTime 纳秒墙钟(~1.7e18)在 int64 值域内，显式窄化消除静态检查告警
+                    bagBaseNs = static_cast<int64_t>(cursor.logTime());  // 全场首条(过滤前)为偏移基准
+                }
+                if (static_cast<int64_t>(cursor.logTime()) < bagBaseNs + startOffsetNs)
+                {
+                    continue;  // --start-offset 读侧跳过(不入队不计统计不告警)
                 }
                 if (topicIndex.count(cursor.topic()) == 0)
                 {

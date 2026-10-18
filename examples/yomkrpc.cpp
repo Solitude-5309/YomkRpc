@@ -25,7 +25,7 @@
  *   yomkrpc bag reindex <bag-path>
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
  *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]
- *           [-l | --loop] <bag-path>
+ *           [-l | --loop] [--start-offset SEC] <bag-path>
  *           交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，+/- 调节回放
  *           速率（±10%），Ctrl+C 停止
  *   yomkrpc -h | --help
@@ -56,6 +56,7 @@
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --topics hello_world   # 只回放指定主题
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-paused   # 暂停态启动，SPACE 开始回放
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --loop   # 循环回放，到尾回开头无限播放
+ *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-offset 5   # 从第 5 秒起播，跳过前段
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -188,7 +189,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
           "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]\n"
-          "          [-l | --loop] <bag-path>\n"
+          "          [-l | --loop] [--start-offset SEC] <bag-path>\n"
                     "          交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，\n"
           "          +/- 调节回放速率（±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
@@ -221,6 +222,8 @@ static void printUsage(std::ostream &os)
           "                      Ctrl+C 停止\n"
           "  -l, --loop          循环回放（仅 bag play 生效）：到尾即回开头无限播放，\n"
           "                      Ctrl+C 停止\n"
+          "  --start-offset SEC  起始偏移秒（仅 bag play 生效）：从 bag 内第 SEC 秒开始播\n"
+          "                      （读侧跳过前段消息，支持小数，须 >= 0）\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -570,13 +573,16 @@ static std::string formatRate(double rate)
 // --start-paused 与 record 同名选项：读线程照常预读、播放挂起零发出，SPACE 开始）；
 // loop 循环回放（对齐 ros2 -l/--loop "starts back at the beginning on reaching the end
 // and plays indefinitely"：到尾即回开头无限播放，回显附 ", looping" 后缀，收尾统计为
-// 各轮累计）；
+// 各轮累计）；startOffsetSec 起始偏移秒（对齐 ros2 --start-offset：从 bag 开始第 SEC
+// 秒起播，读侧跳过前段消息不入队不计收尾统计，回显附 ", offset=<值>" 后缀——仅非零
+// 时显示，负值由主解析层报错退出）；
 // tty 下额外起键盘监听线程：SPACE 从暂停态开始回放、p 暂停、r 继续（与 record 键位
 // 一致）、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
 // 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
 // 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，仅剩开始/停止两通道
 static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate,
-        const std::vector<std::string> &topics, bool startPaused, bool loop)
+        const std::vector<std::string> &topics, bool startPaused, bool loop,
+        double startOffsetSec)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -604,12 +610,18 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     {
         rateNote = ", rate=" + formatRate(playbackRate);
     }
+    // 起始偏移非 0 时附 offset=<g>（--start-offset 显式传入的可见性；%g 风格去尾零复用）
+    std::string offsetNote;
+    if (startOffsetSec > 0.0)
+    {
+        offsetNote = ", offset=" + formatRate(startOffsetSec);
+    }
     const char *startSuffix = startPaused
         ? ", started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop"
         : ", press p to pause, r to resume, +/- rate, Ctrl+C to stop";
     const char *loopNote = loop ? ", looping" : "";
     YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
-                  std::to_string(domainId), rateNote, loopNote, startSuffix);
+                  std::to_string(domainId), rateNote, offsetNote, loopNote, startSuffix);
 
     // 3. 键盘监听线程（tty 下生效）：SPACE=start（仅暂停态），p=pause（仅运行态），
     //    r=resume（仅暂停态，与 record 键位一致），+/-=rate ±10%，Ctrl+C 退出
@@ -685,7 +697,7 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
 
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
     //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
-    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop);
+    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffsetSec);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1673,6 +1685,7 @@ int main(int argc, char *argv[])
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
     bool startPaused = false; // 暂停态启动（--start-paused；bag record/play 生效）
     bool playLoop = false;   // 循环回放（-l/--loop；仅 bag play 生效）
+    double startOffsetSec = 0.0;  // 起始偏移秒（--start-offset；仅 bag play 生效，>=0 支持小数）
     uint64_t maxBagSize = 0;  // 单分片最大字节数（-b/--max-bag-size；仅 bag record 生效，0=不分片）
     uint64_t maxBagDurationSec = 0;  // 单分片最大时长秒（--max-bag-duration；仅 bag record，0=不分片）
     uint64_t maxCacheSize = 100 * 1024 * 1024;  // 写缓存双缓冲字节数（-c/--max-cache-size；仅
@@ -1727,6 +1740,34 @@ int main(int argc, char *argv[])
         if (arg == "-l" || arg == "--loop")
         {
             playLoop = true;
+            continue;
+        }
+        if (arg == "--start-offset")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少偏移参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            // 数值解析与校验对齐 -r 形态；负值文案对齐 ros2 check_not_negative_float
+            // （CLI 层报错拒绝，服务/节点层报 invalid start offset 快速拦截）
+            char *end = nullptr;
+            const double value = std::strtod(argv[++i], &end);
+            if (end == argv[i] || *end != '\0')
+            {
+                std::cerr << "yomkrpc: 非法起始偏移 \"" << argv[i]
+                          << "\"（须为 >= 0 的数值，单位秒）\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (value < 0.0)
+            {
+                std::cerr << "yomkrpc: " << value
+                          << " is not in the valid range (>= 0.0)\n";
+                return 2;
+            }
+            startOffsetSec = value;
             continue;
         }
         if (arg == "-f" || arg == "--file")
@@ -2062,7 +2103,8 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
-        return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused, playLoop);
+        return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused, playLoop,
+                          startOffsetSec);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

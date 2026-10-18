@@ -150,9 +150,16 @@ public:
     // 队列哨兵标记轮边界），播放线程轮边界重锚——新轮首条立即播、后续按录制时间轴差值
     // 顺延，轮间衔接无倾泻无跳变；收尾统计为各轮累计；Ctrl+C 随时终止；与
     // playbackRate/topics/startPaused 正交叠加
+    // startOffset 起始偏移秒（对齐 ros2 --start-offset）：从 bag 开始第 SEC 秒起播——读
+    // 线程跳过 logTime 早于全场首条+偏移的消息（读侧跳过不入队不计收尾统计不告警；基准
+    // 取过滤前全场首条，即 bag 级偏移，不受 --topics 过滤影响）；首条播出消息立即播、
+    // 后续按录制时间轴差值顺延；与 loop 叠加每轮回卷同阈值即每轮保持偏移（对齐 ros2 每
+    // 轮 seek 回偏移点）；负值报 "invalid start offset" 快速返回 false（不建任何 DDS
+    // 实体）；超全场时长则零消息播出正常播毕返回 true
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
-            const std::vector<std::string>& topics = {}, bool loop = false);
+            const std::vector<std::string>& topics = {}, bool loop = false,
+            double startOffset = 0.0);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

@@ -57,6 +57,17 @@
  *      2.5s 内 40 条全发越上界；总耗时 ≥1900ms 钉住第一轮完整节拍）；P10.2 与
  *      --topics 叠加（回卷轮过滤仍生效）；P10.3 与暂停态启动叠加（暂停窗零增量
  *      语义 loop 下保持，跨暂停累计两轮起步）。
+ *   P11 起始偏移（--start-offset，对齐 ros2 语义 "Start the playback player this many
+ *      seconds into the bag file"——从 bag 开始第 SEC 秒起播，读侧跳过前段消息不入队
+ *      不计统计不告警，偏移基准=过滤前全场首条 logTime）：P11.1 单轮跳段节拍（kP8Bag
+ *      offset=1.0s 自然播毕，双主题各精确 10 条——播段 t≥1000/t≥1050 的后段 10 条；
+ *      总耗时 ≈ 播段 span 950ms，跳过失效倾泻形态越下界）；P11.2 offset 超全场时长
+ *      （零消息播出、播毕成功返回、快速返回）；P11.3 loop×offset 叠加（专用 kP11Bag
+ *      每轮仅末条可播，5s 窗收数 ≥15 钉住"每轮回卷保持偏移"——对齐 ros2 do-while
+ *      每轮 seek 回偏移点；跳过段读侧不被播放节拍反压、回卷全速空转，收数随读侧
+ *      速度浮动故不设上界；回卷从零的错误形态每轮 6 条被 span 2500ms 节拍反压、
+ *      5s 收 ≤12 条越下界）；P11.4 负值启动
+ *      （false + invalid start offset + stats 清空，对齐 P7.5 rate 校验用例形态）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -118,6 +129,7 @@ namespace
     const std::string kP6Bag = "play_test_p6";
     const std::string kP7Bag = "play_test_p7";
     const std::string kP8Bag = "play_test_p8";
+    const std::string kP11Bag = "play_test_p11";
     const std::string kP5Missing = "play_p5_miss";      // 不创建（目录不存在）
     const std::string kP5IsFile = "play_p5_isfile";     // 路径是文件
     const std::string kP5NoMeta = "play_p5_nometa";     // 缺 metadata.json
@@ -385,20 +397,20 @@ namespace
     }
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
-    // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false 透传节点层入口——
-    // P7 速率/P8 过滤/P10 循环用例经尾参传入；topics 按值捕获：调用点 {"..."} 初始化列表
-    // 临时在语句尾销毁，引用捕获悬垂）
+    // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false、startOffsetSec
+    // 缺省 0.0 透传节点层入口——P7 速率/P8 过滤/P10 循环/P11 偏移用例经尾参传入；topics
+    // 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
                                 double playbackRate = 1.0,
                                 const std::vector<std::string> &topics = {},
-                                bool loop = false)
+                                bool loop = false, double startOffsetSec = 0.0)
     {
         return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
-                            loop]()
+                            loop, startOffsetSec]()
         {
-            ok = node.play(bagDir, stats, &error, playbackRate, topics, loop);
+            ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec);
             done.store(true);
         });
     }
@@ -476,8 +488,8 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(participant);
         }
         for (const std::string &dir : {kP1Bag, kP3aBag, kP3bBag, kP3cBag, kP4Bag, kP6Bag,
-                 kP7Bag, kP8Bag, kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard, kP5BadEnum,
-                 kP5MultiComma, kP5Legacy})
+                 kP7Bag, kP8Bag, kP11Bag, kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard,
+                 kP5BadEnum, kP5MultiComma, kP5Legacy})
         {
             fs::remove_all(dir, ec);
         }
@@ -1068,6 +1080,101 @@ int main()
           "P10.3 p8a 跨暂停累计 [21,35]（第一轮播毕 + 第二轮起步按节拍推进）");
     CHECK(p103Stats.size() == 2 && p103Stats[0].count >= 21,
           "P10.3 stats 双主题累计 ≥21");
+
+    // ---- P11：--start-offset 起始偏移（库层形态，对齐 ros2 语义 "Start the playback
+    // player this many seconds into the bag file"：从 bag 开始第 SEC 秒起播，读侧跳过
+    // 前段消息不入队不计统计不告警；偏移基准=过滤前全场首条 logTime） ----
+    // P11.1 单轮跳段节拍：kP8Bag（全局交错 t=0..1950ms）offset=1.0s 自然播毕 → p8a
+    // 精确播 t≥1000ms 的 10 条、p8b 精确播 t≥1050ms 的 10 条；总耗时 ≈ 播段 span
+    // 950ms（首播条立即播出至末条按差值调度），跳过失效的倾泻形态（40 条全发）计数
+    // 与耗时双双越界
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p111Stats;
+    std::string p111Error;
+    std::atomic<bool> p111Done{false};
+    bool p111Ok = false;
+    const auto p111aBase = p8aListen.count.load();
+    const auto p111bBase = p8bListen.count.load();
+    const auto p111Start = std::chrono::steady_clock::now();
+    std::thread p111Thread = startPlayThread(node, kP8Bag, p111Stats, p111Error, p111Ok,
+        p111Done, 1.0, {}, false, 1.0);
+    const double p111ElapsedMs = joinPlayElapsedMs(p111Thread, p111Done, p111Start);
+    CHECK(p111Ok, "P11.1 offset=1.0s 自然播毕返回 true");
+    CHECK(p8aListen.count.load() - p111aBase == 10,
+          "P11.1 p8a 精确 10 条（t≥1000ms 后段，前 10 条读侧跳过不入队）");
+    CHECK(p8bListen.count.load() - p111bBase == 10,
+          "P11.1 p8b 精确 10 条（t≥1050ms 后段，跳过语义与时间轴对账一致）");
+    CHECK(p111Stats.size() == 2 && p111Stats[0].count == 10 && p111Stats[1].count == 10,
+          "P11.1 stats 双主题各 10（跳过段不计入收尾统计）");
+    CHECK(p111ElapsedMs >= 800.0 && p111ElapsedMs <= 1900.0,
+          "P11.1 总耗时 ≈ 播段 span 950ms + 开销（跳过段零等待；倾泻形态 <500ms 越下界）");
+
+    // P11.2 offset 超全场时长：offset=5.0s > span 1950ms → 零消息播出、正常播毕成功
+    // 返回（对齐 ros2 超界语义：不报错；stats 行仍按预扫清单回填、计数 0）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p112Stats;
+    std::string p112Error;
+    std::atomic<bool> p112Done{false};
+    bool p112Ok = false;
+    const auto p112aBase = p8aListen.count.load();
+    const auto p112bBase = p8bListen.count.load();
+    const auto p112Start = std::chrono::steady_clock::now();
+    std::thread p112Thread = startPlayThread(node, kP8Bag, p112Stats, p112Error, p112Ok,
+        p112Done, 1.0, {}, false, 5.0);
+    const double p112ElapsedMs = joinPlayElapsedMs(p112Thread, p112Done, p112Start);
+    CHECK(p112Ok, "P11.2 offset=5.0s 超全场 → 播毕成功返回 true（零消息不报错）");
+    CHECK(p8aListen.count.load() == p112aBase && p8bListen.count.load() == p112bBase,
+          "P11.2 双订阅端零收（全场消息均早于偏移点被跳过）");
+    CHECK(p112Stats.size() == 2 && p112Stats[0].count == 0 && p112Stats[1].count == 0,
+          "P11.2 stats 双主题行计 0（预扫清单回填、零播出=零计数）");
+    CHECK(p112ElapsedMs < 700.0,
+          "P11.2 总耗时 <700ms（零消息快速返回，无逐条等待）");
+
+    // P11.3 loop×offset 每轮保持偏移：专用 kP11Bag（单主题 6 条 @500ms，t=0..2500ms
+    // span 2500ms）offset=2.25s → 每轮仅末条 t=2500ms 可播（播后立即 EOS 回卷）。
+    // 收数推演（首跑实测校准）：正确形态每轮 1 条且跳过段读侧不被播放节拍反压 →
+    // 回卷全速空转（亚毫秒级/轮，首跑 5s 窗实测 ≈9.5 万条，随读侧速度浮动）——只设
+    // 下界钉语义不设上界；回卷从零的错误形态每轮 6 条被 span 2500ms 节拍反压 →
+    // 5s 恰 2 轮收 ≤12 条，远越下界 15
+    CHECK(makeBag(kP11Bag,
+              {{"/rt/p11", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 6}},
+              500 * 1000000ULL),
+          "P11.3 前置：单主题 6 条 @500ms bag 构造成功（span 2500ms）");
+    auto *topicP11 = makePlayTopic(participant, "/rt/p11", "YomkRpc::MString");
+    PlayCountListener p11Listen;
+    auto *readerP11 = makePlayReader(subscriber, topicP11, &p11Listen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicP11 != nullptr && readerP11 != nullptr,
+          "P11.3 前置：单主题 reader 先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p113Stats;
+    std::string p113Error;
+    std::atomic<bool> p113Done{false};
+    bool p113Ok = false;
+    const auto p113Base = p11Listen.count.load();
+    std::thread p113Thread = startPlayThread(node, kP11Bag, p113Stats, p113Error, p113Ok,
+        p113Done, 1.0, {}, true, 2.25);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    yomk::bagPlayStop();
+    joinPlay(p113Thread, p113Done);
+    CHECK(p113Ok, "P11.3 stop 路径 play 返回 true");
+    const auto p113Got = p11Listen.count.load() - p113Base;
+    CHECK(p113Got >= 15,
+          "P11.3 loop×offset 收数 ≥15（每轮回卷保持偏移、每轮仅末条播出——跳过段读侧"
+          "空转收数随读侧速度浮动不设上界；回卷从零形态被节拍反压 5s ≤12 条越下界，"
+          "实测 " + std::to_string(p113Got) + " 条）");
+    CHECK(p113Stats.size() == 1 && p113Stats[0].count >= 15,
+          "P11.3 stats 单主题累计 ≥15（与订阅端收数同口径）");
+
+    // P11.4 负值启动：入口校验拒绝快速返回（不建任何 DDS 实体），stats 清空——错误
+    // 文案对齐 P7.5 rate 校验双落点先例（invalid start offset）
+    std::vector<FastDDSBagNode::BagTopicStat> p114Stats;
+    std::string p114Error;
+    p114Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约（失败=未播放）
+    CHECK(!node.play(kP11Bag, p114Stats, &p114Error, 1.0, {}, false, -0.5) &&
+              p114Error.find("invalid start offset") != std::string::npos,
+          "P11.4 offset=-0.5 启动 → false + invalid start offset");
+    CHECK(p114Stats.empty(), "P11.4 stats 清空（失败即未播放）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");
