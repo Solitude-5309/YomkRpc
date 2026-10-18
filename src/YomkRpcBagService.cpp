@@ -250,10 +250,11 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
     yomk::g_bagPlayStop.store(false);
 
     // 长驻阻塞：回放至 EOS 或 SIGINT（yomk::g_bagPlayStop 置位）触发节点层收尾后返回；
-    // 预扫失败（目录不存在/旧 bag 拒播/qos 非法）快速返回 eNo，m_msg 携带原因
+    // 预扫失败（目录不存在/旧 bag 拒播/qos 非法/topics 清单未命中 bag 清单）快速返回 eNo，
+    // m_msg 携带原因
     std::string error;
     std::vector<FastDDSBagNode::BagTopicStat> stats;
-    if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate))
+    if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate, p->msg.topics))
     {
         if (error.empty())
         {

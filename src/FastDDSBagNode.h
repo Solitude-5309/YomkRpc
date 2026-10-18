@@ -141,8 +141,13 @@ public:
     // playbackRate 回放速率倍率：>0 生效（2.0 两倍速、0.5 半倍速，对齐 ros2 --rate），
     // <=0 报 "invalid playback rate" 快速返回 false（不建任何 DDS 实体，对齐预扫失败
     // 快速返回路径）
+    // topics 只回放清单内主题：空 = 全部（对齐 ros2 --topics 缺省语义）；精确项须在 bag
+    // 清单否则报 "not found in bag"；模式项恰一个 '*' 按 bag 清单展开（对齐 convert
+    // topics 语义），未命中报 "matched no bag topic"、双 '*' 报错——入选集合 = 精确 ∪
+    // 通配命中（去重升序），回显/发布实体/读线程入队/收尾统计只含入选主题
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
-            std::string* error = nullptr, double playbackRate = 1.0);
+            std::string* error = nullptr, double playbackRate = 1.0,
+            const std::vector<std::string>& topics = {});
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

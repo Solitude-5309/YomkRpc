@@ -24,7 +24,7 @@
  *   yomkrpc bag info <bag-path>
  *   yomkrpc bag reindex <bag-path>
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
- *   yomkrpc bag play [-r <rate> | --rate <rate>] <bag-path>
+ *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] <bag-path>
   *           交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，+/- 调节回放速率（±10%），
  *           Ctrl+C 停止
  *   yomkrpc -h | --help
@@ -52,6 +52,7 @@
  *   yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000
   *   yomkrpc bag play -r 2.0 bag_2026-01-01_12-00-00_000   # 2 倍速回放
+ *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --topics hello_world   # 只回放指定主题
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -183,7 +184,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag info <bag-path>\n"
           "  yomkrpc bag reindex <bag-path>\n"
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
-          "  yomkrpc bag play [-r <rate> | --rate <rate>] <bag-path>\n"
+          "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] <bag-path>\n"
                     "          交互键（tty 下生效）：p 或 SPACE 暂停，r 继续，+/- 调节回放速率\n"
           "          （±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
@@ -224,6 +225,9 @@ static void printUsage(std::ostream &os)
           "                      1Hz 持续发送。bag play 生效：回放速率倍率（>0，2.0 两倍速、\n"
           "                      0.5 半倍速，对齐 ros2 --rate；<=0 报 not in the valid range\n"
           "                      (> 0.0)；运行时 +/- 键 ±10% 步进动态调率）\n"
+          "  --topics T1 T2 ...  只回放指定主题（仅 bag play 生效，空格分隔多值，缺省全部）：\n"
+          "                      精确项须在 bag 内否则报错；项含一个 '*' 为通配，按 bag 内\n"
+          "                      主题清单展开（未命中/双 '*' 报错，对齐 record/convert 惯例）\n"
           "  -t, --times N       发布条数上限（仅 topic pub 发布模式生效，含首轮）：发满 N 条自动\n"
           "                      停止，排空 200ms 后退出并输出统计；省略则不限条数持续到 Ctrl+C。\n"
           "                      短名 -t 复用判定：下一参数为整数时视为条数（topic pub 语境），\n"
@@ -279,6 +283,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json\n"
           "  yomkrpc bag play bag_2026-01-01_12-00-00_000\n"
                     "  yomkrpc bag play -r 2.0 bag_2026-01-01_12-00-00_000   # 2 倍速回放\n"
+          "  yomkrpc bag play bag_2026-01-01_12-00-00_000 --topics hello_world   # 只回放指定主题\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
@@ -552,11 +557,14 @@ static std::string formatRate(double rate)
 
 // bag play 子命令：回放 bag 目录（预扫 metadata.json 后按录制时间轴重建透传发布），服务端
 // 长驻阻塞至全部消息播毕或 SIGINT 停止；playbackRate 回放速率倍率（>0，对齐 ros2 --rate：
-// 倍率缩放消息间调度间隔，<=0 由主解析层报错退出）；tty 下额外起键盘监听线程：p/SPACE
+// 倍率缩放消息间调度间隔，<=0 由主解析层报错退出）；topics 只回放清单内主题（空=全部，
+// 对齐 ros2 --topics 缺省语义；精确项须在 bag 清单否则报错，通配项经服务端按 bag 清单
+// 展开，语义同 YOMKRPC_BAG_PLAY 注释）；tty 下额外起键盘监听线程：p/SPACE
 // 暂停、r 继续、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
 // 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
 // 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，仅剩开始/停止两通道
-static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate)
+static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate,
+        const std::vector<std::string> &topics)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -647,7 +655,7 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
 
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
     //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
-    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate);
+    resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1644,6 +1652,9 @@ int main(int argc, char *argv[])
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     double pubRateHz = 1.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，缺省 1Hz 持续发送，Ctrl+C 停止）
     double playbackRate = 1.0;  // 回放速率倍率（-r/--rate；仅 bag play 生效，对齐 ros2 --rate，>0）
+        std::vector<std::string> playTopics;
+            // 只回放主题清单（--topics；仅 bag play 生效，空=全部，元素含一个 '*' 为通配，
+            // 按 bag 内主题清单展开，对齐 record/convert 惯例）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
     uint32_t pubMaxTimes = 0; // 发布条数上限（-t/--times；仅 topic pub 发布模式生效，含首轮，0=不限）
     std::vector<std::string> pos;
@@ -1746,6 +1757,33 @@ int main(int argc, char *argv[])
                     return 2;
                 }
                 pubRateHz = value;
+            }
+            continue;
+        }
+        if (arg == "--topics")
+        {
+            // 语境分流（对齐 -r bagPlayCtx 先例）：仅 bag play 子命令生效；贪吃多值解析
+            // （对齐 ros2 nargs='+' 空格分隔语义）：收集其后全部非 '-' 开头 token 至遇
+            // '-' 开头参数或参数序列结束；逐项语义校验在服务端预扫完成（节点层对账
+            // bag 清单，报 not found in bag / matched no bag topic / 双 '*' 报错）
+            if (!(pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play"))
+            {
+                std::cerr << "yomkrpc: --topics 仅 bag play 生效\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            ++i;
+            while (i < argc && std::string(argv[i]).rfind("-", 0) != 0)
+            {
+                playTopics.push_back(argv[i]);
+                ++i;
+            }
+            --i; // 回退到非选项 token/末尾，交回主循环步进（若已超界则循环步进后结束）
+            if (playTopics.empty())
+            {
+                std::cerr << "yomkrpc: --topics 缺少主题参数\n";
+                printUsage(std::cerr);
+                return 2;
             }
             continue;
         }
@@ -1988,7 +2026,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
-        return runBagPlay(domainId, pos[2], playbackRate);
+        return runBagPlay(domainId, pos[2], playbackRate, playTopics);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

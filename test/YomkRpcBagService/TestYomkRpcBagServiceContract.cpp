@@ -27,7 +27,8 @@
  *   T10 /bag_play 契约：bagDir 空校验锁外前置；节点检查先于文件触达（未建节点报
  *      "bag node not created" 而非文件层错误——与 /bag_info 纯文件读形态相反，
  *      bag_play 触 DDS 必经节点实例）；playbackRate<=0 锁外校验先于节点检查（报
- *      invalid playback rate），合法值放行至节点兑底拦截。
+ *      invalid playback rate），合法值放行至节点兑底拦截；topics 字段经 handler
+ *      直透节点层（无锁外校验，清单对账在服务端预扫完成）。
  * DDS-free 保证：T5 的越界校验在锁外返回；T6 的 topics 校验在锁外、node_ 空检查在触达节点层前返回；
  *   T10 的空目录校验在锁外、node_ 空检查在文件触达前返回；
  *   T7/T8/T9 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
@@ -390,6 +391,14 @@ namespace
         CHECK(rOkRate.m_status == YomkResponse::eNo &&
                   rOkRate.m_msg.find("bag node not created") != std::string::npos,
             "/bag_play rate=2.0 合法通过校验 → eNo bag node not created（节点兑底）");
+
+        // topics 字段经 handler 直透节点层（无锁外校验，清单对账在服务端预扫）：带
+        // 清单未建节点仍由节点检查兑底拦截
+        auto rTopics = svc->invoke("/bag_play",
+            YomkMkPtr(DDSBagPlay, DDSBagPlay{"play_svc_t10", 1.0, {"/t"}}));
+        CHECK(rTopics.m_status == YomkResponse::eNo &&
+                  rTopics.m_msg.find("bag node not created") != std::string::npos,
+            "/bag_play topics={/t} + 未建节点 → eNo bag node not created（topics 直透）");
     }
 } // namespace
 

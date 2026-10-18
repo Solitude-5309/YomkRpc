@@ -40,6 +40,11 @@
  *      节奏断言口径：play 长驻阻塞线程总耗时（start→done，轮询粒度 5ms）——订阅端
  *      TRANSIENT_LOCAL latched 补发到达时刻随匹配建立漂移不可作间隔证据，消息真实发出
  *      以 stats 精确计数钉死。
+ *   P8 主题过滤（--topics，对齐 convert topics 语义 + ros2 --topics 缺省语义）：P8.1
+ *      单主题过滤（stats 仅入选行、订阅端 p8a 收 20 / p8b 零收）；P8.2 双主题 + 重复
+ *      项去重（stats 升序各 20）；P8.3 通配展开（*p8a 单主题 / /rt/p8* 双主题）；P8.4
+ *      精确项不存在（false + not found in bag + stats 清空）；P8.5 模式未命中
+ *      （matched no bag topic）与双 '*'（record 惯例文案）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -100,6 +105,7 @@ namespace
     const std::string kP4Bag = "play_test_p4";
     const std::string kP6Bag = "play_test_p6";
     const std::string kP7Bag = "play_test_p7";
+    const std::string kP8Bag = "play_test_p8";
     const std::string kP5Missing = "play_p5_miss";      // 不创建（目录不存在）
     const std::string kP5IsFile = "play_p5_isfile";     // 路径是文件
     const std::string kP5NoMeta = "play_p5_nometa";     // 缺 metadata.json
@@ -367,15 +373,17 @@ namespace
     }
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
-    // playbackRate 缺省 1.0 透传节点层入口注入——P7 速率用例经尾参传入）
+    // playbackRate 缺省 1.0、topics 缺省空（不过滤）透传节点层入口——P7 速率/P8 过滤用例
+    // 经尾参传入；topics 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
-                                double playbackRate = 1.0)
+                                double playbackRate = 1.0,
+                                const std::vector<std::string> &topics = {})
     {
-        return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate]()
+        return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics]()
         {
-            ok = node.play(bagDir, stats, &error, playbackRate);
+            ok = node.play(bagDir, stats, &error, playbackRate, topics);
             done.store(true);
         });
     }
@@ -453,7 +461,7 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(participant);
         }
         for (const std::string &dir : {kP1Bag, kP3aBag, kP3bBag, kP3cBag, kP4Bag, kP6Bag,
-                 kP7Bag, kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard, kP5BadEnum,
+                 kP7Bag, kP8Bag, kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard, kP5BadEnum,
                  kP5MultiComma, kP5Legacy})
         {
             fs::remove_all(dir, ec);
@@ -810,6 +818,103 @@ int main()
               p75Error.find("invalid playback rate") != std::string::npos,
           "P7.5 rate=-1 启动 → false + invalid playback rate");
     CHECK(p75Stats.empty(), "P7.5 rate=-1 stats 清空");
+
+    // ---- P8：主题过滤（--topics，对齐 convert topics 语义 + ros2 --topics 缺省语义） ----
+    CHECK(makeBag(kP8Bag,
+              {{"/rt/p8a", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 20},
+                  {"/rt/p8b", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 20}},
+              50 * 1000000ULL),
+          "P8 前置：双主题各 20 条 @50ms bag 构造成功（span 950ms）");
+
+    // P8.1 单主题过滤：--topics 只含 /rt/p8a → stats 仅 p8a 行；双 reader 都在场对账：
+    // 入选主题收满、被过滤主题零收（过滤在发布侧，被过滤主题无任何发布实体）
+    auto *topicP8a = makePlayTopic(participant, "/rt/p8a", "YomkRpc::MString");
+    auto *topicP8b = makePlayTopic(participant, "/rt/p8b", "YomkRpc::MString");
+    PlayCountListener p8aListen;
+    PlayCountListener p8bListen;
+    auto *readerP8a = makePlayReader(subscriber, topicP8a, &p8aListen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    auto *readerP8b = makePlayReader(subscriber, topicP8b, &p8bListen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicP8a != nullptr && topicP8b != nullptr && readerP8a != nullptr &&
+              readerP8b != nullptr,
+          "P8 前置：双主题订阅端 reader 先建在场（对账过滤面）");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p81Stats;
+    std::string p81Error;
+    std::atomic<bool> p81Done{false};
+    bool p81Ok = false;
+    std::thread p81Thread = startPlayThread(node, kP8Bag, p81Stats, p81Error, p81Ok,
+        p81Done, 1.0, {"/rt/p8a"});
+    CHECK(waitForCount(p8aListen.count, 20), "P8.1 入选主题 p8a 订阅端精确收 20");
+    joinPlay(p81Thread, p81Done);
+    CHECK(p81Ok, "P8.1 play 全程完成返回 true");
+    CHECK(p81Stats.size() == 1 && p81Stats[0].topic == "/rt/p8a" &&
+              p81Stats[0].count == 20 && p81Stats[0].bytes == 20 * kPayloadSize,
+          "P8.1 stats 仅含入选主题 p8a（count/bytes 精确）");
+    CHECK(p8bListen.count.load() == 0, "P8.1 被过滤主题 p8b 订阅端零收（过滤在发布侧）");
+
+    // P8.2 双主题过滤 + 重复项 + 乱序清单：{"p8b","p8a","p8a"} → 入选集合去重，
+    // stats 仍预扫清单序（p8a/p8b 各 20），订阅端各收满
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p82Stats;
+    std::string p82Error;
+    std::atomic<bool> p82Done{false};
+    bool p82Ok = false;
+    std::thread p82Thread = startPlayThread(node, kP8Bag, p82Stats, p82Error, p82Ok,
+        p82Done, 1.0, {"/rt/p8b", "/rt/p8a", "/rt/p8a"});
+    CHECK(waitForCount(p8aListen.count, 40), "P8.2 p8a 订阅端累计收满 40（两轮回放）");
+    joinPlay(p82Thread, p82Done);
+    CHECK(p82Ok, "P8.2 play 全程完成返回 true");
+    CHECK(p82Stats.size() == 2 && p82Stats[0].topic == "/rt/p8a" &&
+              p82Stats[1].topic == "/rt/p8b" && p82Stats[0].count == 20 &&
+              p82Stats[1].count == 20,
+          "P8.2 stats 两行升序各 20（重复项去重、清单序不随 --topics 乱序）");
+    CHECK(p8bListen.count.load() == 20, "P8.2 p8b 订阅端精确收 20（第二轮回放）");
+
+    // P8.3 通配展开（同步 play，stats 为权威对账——writer 播毕即删无 latched 补发）：
+    // {"*p8a"} 前后缀夹逼仅命中 p8a；{"/rt/p8*"} 前缀通配双主题全命中
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p83Stats;
+    std::string p83Error;
+    std::atomic<bool> p83Done{false};
+    bool p83Ok = false;
+    std::thread p83Thread = startPlayThread(node, kP8Bag, p83Stats, p83Error, p83Ok,
+        p83Done, 1.0, {"*p8a"});
+    joinPlay(p83Thread, p83Done);
+    CHECK(p83Ok && p83Stats.size() == 1 && p83Stats[0].topic == "/rt/p8a" &&
+              p83Stats[0].count == 20,
+          "P8.3 前缀通配 *p8a 仅命中单主题（stats 1 行 count 20）");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p83bStats;
+    std::string p83bError;
+    std::atomic<bool> p83bDone{false};
+    bool p83bOk = false;
+    std::thread p83bThread = startPlayThread(node, kP8Bag, p83bStats, p83bError, p83bOk,
+        p83bDone, 1.0, {"/rt/p8*"});
+    joinPlay(p83bThread, p83bDone);
+    CHECK(p83bOk && p83bStats.size() == 2 && p83bStats[0].count == 20 &&
+              p83bStats[1].count == 20,
+          "P8.3 通配 /rt/p8* 命中双主题（stats 两行各 20）");
+
+    // P8.4 精确项不存在：清单对账 fail 快速返回（不建任何 DDS 实体），stats 清空
+    std::vector<FastDDSBagNode::BagTopicStat> p84Stats;
+    std::string p84Error;
+    p84Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约
+    CHECK(!node.play(kP8Bag, p84Stats, &p84Error, 1.0, {"/rt/nope"}) &&
+              p84Error.find("not found in bag") != std::string::npos,
+          "P8.4 精确项不在 bag 清单 → false + not found in bag");
+    CHECK(p84Stats.empty(), "P8.4 stats 清空（失败即未播放）");
+
+    // P8.5 模式项未命中与双 '*'：对齐 convert/record 惯例文案
+    std::vector<FastDDSBagNode::BagTopicStat> p85Stats;
+    std::string p85Error;
+    CHECK(!node.play(kP8Bag, p85Stats, &p85Error, 1.0, {"/rt/nope*"}) &&
+              p85Error.find("matched no bag topic") != std::string::npos,
+          "P8.5 通配未命中 → false + matched no bag topic");
+    CHECK(!node.play(kP8Bag, p85Stats, &p85Error, 1.0, {"a*b*c"}) &&
+              p85Error.find("'*' 出现多次") != std::string::npos,
+          "P8.5 双 '*' → false + 出现多次（record 惯例）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

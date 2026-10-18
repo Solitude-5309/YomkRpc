@@ -290,7 +290,7 @@
 #define YOMKRPC_BAG_CONVERT(inputs, cfgPath) \
     YOMK_REQUEST("/YomkRpcBagService/bag_convert", YomkMkPtr(DDSBagConvert, DDSBagConvert{(inputs), (cfgPath)}))
 
-// 回放 bag：打开 bag 目录预扫 metadata.json（主题 type/qos 快照）后按录制时间轴回放全部
+// 回放 bag：打开 bag 目录预扫 metadata.json（主题 type/qos 快照）后按录制时间轴回放入选
 // 主题（长驻阻塞：调用线程阻塞至全部消息播毕或 SIGINT 经 yomk::bagPlayStop 无锁置位后
 // 收尾返回；读播解耦——读线程逐条预读原始 CDR 字节入有界内存队列，播放线程按相邻时间
 // 戳差值定时发布，writer 按需创建，发布 QoS 按录制快照恢复，空串/缺失回退 RELIABLE+
@@ -298,13 +298,17 @@
 // bagPlayResume 键盘通道控制，不经协议传递）。playbackRate 回放速率倍率（>0：2.0 两倍速、
 // 0.5 半倍速，对齐 ros2 --rate；<=0 报 "invalid playback rate"；运行时经
 // yomk::bagPlaySetRate/bagPlayGetRate 动态调率，换率即时生效且已播进度连续）。
+// topics 只回放清单内主题（空=全部，对齐 ros2 --topics 缺省语义；精确项须在 bag 清单
+// 否则报 "not found in bag"；元素含一个 '*' 为通配，按 bag 内主题清单匹配展开，未命中
+// 报 "matched no bag topic"、双 '*' 报错，对齐 convert topics 语义；入选集合 = 精确 ∪
+// 通配命中，回显/发布实体/收尾统计只含入选主题）。
 // 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
 // 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_PLAY(bagDir, playbackRate) \
+#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics) \
     YOMK_REQUEST("/YomkRpcBagService/bag_play", \
-        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate)}))
+        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

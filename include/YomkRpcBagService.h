@@ -172,6 +172,9 @@ struct DDSBagPlay
     std::string bagDir;  // bag 目录名/路径（相对/绝对均可，须含 metadata.json）
     double playbackRate = 1.0;  // 回放速率倍率（>0；2.0 两倍速，0.5 半倍速，对齐 ros2 --rate；
                                 // 尾部缺省字段，旧调用方零改动）
+    std::vector<std::string> topics;  // 只回放清单内主题（空=全部，对齐 ros2 --topics 缺省；
+                                      // 精确项须在 bag 清单否则报错；元素含一个 '*' 为通配，
+                                      // 按 bag 内主题清单匹配展开，对齐 convert topics 语义）
 };
 
 // clang-format off

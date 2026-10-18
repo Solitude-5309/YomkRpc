@@ -2564,7 +2564,7 @@ private:
 
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
-        std::string* error, double playbackRate)
+        std::string* error, double playbackRate, const std::vector<std::string>& topics)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2668,6 +2668,62 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         return fail("no topics found in metadata.json");
     }
 
+    // bag 原始清单名集合(读线程区分:消息主题在清单内=被 --topics 过滤静默跳过;不在清单
+    // =分片与元信息不一致,告警一次跳过)
+    std::set<std::string> bagListedTopics;
+    for (const auto& pt : playTopics)
+    {
+        bagListedTopics.insert(pt.topic);
+    }
+
+    // 主题过滤(topics 尾参,对齐 convert topics 先例与 ros2 --topics 缺省语义):空=全部;
+    // 精确项须在 bag 清单否则报错;模式项恰一个 '*' 按 bag 清单展开(双 '*' 报错 record
+    // 惯例,未命中报错 convert 惯例);入选集合 = 精确 ∪ 通配命中(去重升序),此后回显/
+    // 发布实体/读线程入队/收尾统计只含入选主题。失败快速返回不建任何 DDS 实体
+    if (!topics.empty())
+    {
+        std::set<std::string> picked;
+        for (const auto& item : topics)
+        {
+            if (item.find('*') == std::string::npos)
+            {
+                if (bagListedTopics.count(item) == 0)
+                {
+                    return fail("topic [" + item + "] not found in bag");
+                }
+                picked.insert(item);
+                continue;
+            }
+            if (item.find('*') != item.rfind('*'))
+            {
+                return fail("topic pattern [" + item + "] 中 '*' 出现多次，仅支持单个通配");
+            }
+            bool matched = false;
+            for (const auto& pt : playTopics)
+            {
+                if (matchTopicPattern(item, pt.topic))
+                {
+                    picked.insert(pt.topic);
+                    matched = true;
+                }
+            }
+            if (!matched)
+            {
+                return fail("topic pattern [" + item + "] matched no bag topic");
+            }
+        }
+        std::vector<PlayTopic> filtered;
+        filtered.reserve(picked.size());
+        for (const auto& pt : playTopics)
+        {
+            if (picked.count(pt.topic) != 0)
+            {
+                filtered.push_back(pt);
+            }
+        }
+        playTopics = std::move(filtered);
+    }
+
     // 开播回显的 bag 元信息(缺键/类型不符容忍按 0 显示——回显辅助字段,不阻断回放)
     uint64_t metaMsgCount = 0;
     uint64_t metaStartNs = 0;
@@ -2765,8 +2821,10 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
             }
             if (topicIndex.count(cursor.topic()) == 0)
             {
-                // 分片内主题不在 metadata.json 清单(分片与元信息不一致):告警一次跳过
-                if (warnedTopics.insert(cursor.topic()).second)
+                // 分片内主题不在播放清单:被 --topics 过滤(仍在 bag 清单)静默跳过;不在
+                // bag 清单(分片与元信息不一致)告警一次跳过
+                if (bagListedTopics.count(cursor.topic()) == 0 &&
+                    warnedTopics.insert(cursor.topic()).second)
                 {
                     std::cout << "play: topic [" << cursor.topic()
                               << "] not listed in metadata.json, skipped" << std::endl;
