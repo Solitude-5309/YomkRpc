@@ -313,13 +313,19 @@
 // （首轮首条与每轮回卷轮）重锚前先睡 SEC 秒再播出；sleep 期间发布实体已建，首条发出
 // 不早于实体建立+SEC，为订阅端留匹配窗口；与 loop 叠加每轮保持延迟；负值报
 // "invalid delay"；0 不延迟）。
+// waitForAllAckedMs 退出前等全部 RELIABLE 订阅端确认收齐毫秒（对齐 ros2
+// --wait-for-all-acked MS：回放结束——自然播毕或 Ctrl+C 停止——后、销毁发布实体前，
+// 对每个 RELIABLE writer 等全部订阅端 ACK，BEST_EFFORT 跳过；RELIABLE 下保证
+// "播完"升级为"确认送达"，补齐大批量高速回放的退出语义；-1 不等待缺省恒等现行为，
+// 0 永等（Ctrl+C 可中断），>0 超时毫秒逐主题各计；超时/中断仅告警不改变返回值，
+// 对齐 ros2 WARN 继续）。
 // 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
 // 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay) \
+#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs) \
     YOMK_REQUEST("/YomkRpcBagService/bag_play", \
-        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay)}))
+        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

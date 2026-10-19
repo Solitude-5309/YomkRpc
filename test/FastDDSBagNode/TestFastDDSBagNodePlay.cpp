@@ -75,11 +75,23 @@
  *      节点层只拒负值，0 为合法缺省不延迟）：P12.1 单轮延迟（kP8Bag delay=1.0s——启动后 500ms 窗双
  *      订阅端零增量钉住 delay 窗零发出（未生效形态已发 ~5 条即拒）；waitForCount
  *      双主题各 20 收满；自然播毕耗时含 delay 窗 [2600,4200]ms，未生效形态
- *      ≈2.15-2.65s 越下界）；P12.2 loop×delay 每轮开头生效（delay=0.5s 3s 窗收数
- *      [15,20]——首轮 0.5s 窗+span 1.95s+开销 ≈2.65-2.95s 播毕、第二轮回卷后轮边界
- *      再睡 0.5s 首条 ≈3.2s 未开始，上界 20 钉住"每轮开头延迟"，delay 仅首轮生效
- *      形态第二轮 ≈2.65s 即播 3s 窗收 ≥21 越上界）；P12.3 负值启动（false +
+ *      ≈2.15-2.65s 越下界）；P12.2 loop×delay 每轮开头生效（delay=0.5s 2.7s 窗收数
+ *      [15,20]——首轮 0.5s 窗+span 1.95s+开销 ≈2.45-2.95s 播毕、第二轮回卷后轮边界
+ *      再睡 0.5s 首条 = 播毕+0.5 ≥2.95s 必不在 2.7s 窗内——上界 20 零竞态误报钉住
+ *      "每轮开头延迟"（3.0s 窗在空载时序下第二轮首条 2.95-3.0s 撞窗边界竞态实测
+ *      21 越上界，缩 2.7s 消除）；delay 仅首轮生效形态第二轮 ≈2.45s 即播 2.7s 窗
+ *      收 ≥21 越上界）；P12.3 负值启动（false +
  *      invalid delay + stats 清空，对齐 P11.4 形态）。
+ *   P13 退出确认等待（--wait-for-all-acked，对齐 ros2 语义 "退出前等全部 RELIABLE 订阅者
+ *      确认收齐（0=永等）"——播毕或停止后、销毁发布实体前逐 RELIABLE writer 分片等 ACK，
+ *      BEST_EFFORT 跳过；超时/中断仅告警不改变返回值）：P13.2 无订阅端永等不挂死
+ *      （kP13Bag waitAckedMs=0，无 matched RELIABLE reader → wait 立即通过——空集全确认，
+ *      ok=true 正常播毕；先于 P13.1 执行——P13.1 的 reader 在场会使"无订阅端"失真）；
+ *      P13.1 显式生效+播毕收满（双 RELIABLE 订阅端在线 waitAckedMs=2000，双主题各 20
+ *      收满正常播毕——进程内 ACK 快，wait 不 hang 不误报）；P13.3 BEST_EFFORT 跳过
+ *      （复用 kP3cBag，writer 侧 BEST_EFFORT 不参与 ackNack 直接跳过，waitAckedMs=100
+ *      快速播毕）；P13.4 超时不失败（waitAckedMs=1 极小片——进程内 ACK 毫秒级可能过
+ *      可能超时，两种结果都 ok=true，超时告警不改返回值不断言告警文本）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -142,6 +154,7 @@ namespace
     const std::string kP7Bag = "play_test_p7";
     const std::string kP8Bag = "play_test_p8";
     const std::string kP11Bag = "play_test_p11";
+    const std::string kP13Bag = "play_test_p13";
     const std::string kP5Missing = "play_p5_miss";      // 不创建（目录不存在）
     const std::string kP5IsFile = "play_p5_isfile";     // 路径是文件
     const std::string kP5NoMeta = "play_p5_nometa";     // 缺 metadata.json
@@ -410,22 +423,22 @@ namespace
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
     // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false、startOffsetSec
-    // 缺省 0.0、delaySec 缺省 0.0 透传节点层入口——P7 速率/P8 过滤/P10 循环/P11 偏移/
-    // P12 延迟用例经尾参传入；topics 按值捕获：调用点 {"..."} 初始化列表临时在语句尾
-    // 销毁，引用捕获悬垂）
+    // 缺省 0.0、delaySec 缺省 0.0、waitAckedMs 缺省 -1 透传节点层入口——P7 速率/P8 过滤/
+    // P10 循环/P11 偏移/P12 延迟/P13 退出确认等待用例经尾参传入；topics 按值捕获：调用点
+    // {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
                                 double playbackRate = 1.0,
                                 const std::vector<std::string> &topics = {},
                                 bool loop = false, double startOffsetSec = 0.0,
-                                double delaySec = 0.0)
+                                double delaySec = 0.0, int64_t waitAckedMs = -1)
     {
         return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
-                            loop, startOffsetSec, delaySec]()
+                            loop, startOffsetSec, delaySec, waitAckedMs]()
         {
             ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec,
-                           delaySec);
+                           delaySec, waitAckedMs);
             done.store(true);
         });
     }
@@ -503,8 +516,8 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(participant);
         }
         for (const std::string &dir : {kP1Bag, kP3aBag, kP3bBag, kP3cBag, kP4Bag, kP6Bag,
-                 kP7Bag, kP8Bag, kP11Bag, kP5NoMeta, kP5BadJson, kP5NoTopics, kP5NoShard,
-                 kP5BadEnum, kP5MultiComma, kP5Legacy})
+                 kP7Bag, kP8Bag, kP11Bag, kP13Bag, kP5NoMeta, kP5BadJson, kP5NoTopics,
+                 kP5NoShard, kP5BadEnum, kP5MultiComma, kP5Legacy})
         {
             fs::remove_all(dir, ec);
         }
@@ -1222,10 +1235,12 @@ int main()
           "P12.1 耗时 ∈ [2600,4200]ms（delay 窗 1000 + span 1950 + 开销；未生效形态 "
           "≈2.15-2.65s 越下界）");
 
-    // P12.2 loop×delay 每轮开头生效：delay=0.5s 3s 窗——首轮 0.5s 窗+span 1950ms+开销
-    // ≈2.65-2.95s 播毕全收；第二轮回卷重建游标后轮开头再睡 0.5s → 第二轮首条 ≈3.2s
-    // 未开始，3s 窗收 20。上界 20 钉住"每轮开头延迟"——delay 仅首轮生效形态第二轮
-    // ≈2.65s 即播、3s 窗收 ≥21 越上界；下界 15 防首轮匹配/调度开销吞条误伤
+    // P12.2 loop×delay 每轮开头生效：delay=0.5s 2.7s 窗——首轮 0.5s 窗+span 1950ms+开销
+    // ≈2.45-2.95s 播毕全收；第二轮回卷重建游标后轮开头再睡 0.5s → 第二轮首条 = 播毕+0.5
+    // ≥2.95s 必不在 2.7s 窗内，2.7s 窗收 20（3.0s 窗在空载时序下第二轮首条 2.95-3.0s
+    // 撞窗边界竞态实测 21 越上界，缩 2.7s 消除）。上界 20 钉住"每轮开头延迟"——delay
+    // 仅首轮生效形态第二轮 ≈2.45s 即播、2.7s 窗内再收数条（检出即 ≥21）越上界；下界
+    // 15 防首轮匹配/调度开销吞条误伤（开销 ≤1.5s 时首轮收窗 ≥700ms 收 ≥15）
     yomk::bagPlayReset();
     std::vector<FastDDSBagNode::BagTopicStat> p122Stats;
     std::string p122Error;
@@ -1235,14 +1250,14 @@ int main()
     const auto p122bBase = p8bListen.count.load();
     std::thread p122Thread = startPlayThread(node, kP8Bag, p122Stats, p122Error, p122Ok,
         p122Done, 1.0, {}, true, 0.0, 0.5);
-    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2700));
     yomk::bagPlayStop();
     joinPlay(p122Thread, p122Done);
     CHECK(p122Ok, "P12.2 stop 路径 play 返回 true");
     const auto p122aGot = p8aListen.count.load() - p122aBase;
     CHECK(p122aGot >= 15 && p122aGot <= 20,
           "P12.2 loop×delay 收数 [15,20]（首轮播毕全收 + 第二轮轮开头再睡未开始——"
-          "上界 20 钉住每轮开头延迟，仅首轮生效形态 3s 窗收 ≥21 越上界，实测 " +
+          "上界 20 钉住每轮开头延迟，仅首轮生效形态 2.7s 窗收 ≥21 越上界，实测 " +
           std::to_string(p122aGot) + " 条）");
     CHECK(p122Stats.size() == 2 && p122Stats[0].count >= 15 && p122Stats[0].count <= 20,
           "P12.2 stats 双主题 [15,20]（与订阅端收数同口径）");
@@ -1258,6 +1273,83 @@ int main()
               p123Error.find("invalid delay") != std::string::npos,
           "P12.3 delay=-0.5 启动 → false + invalid delay");
     CHECK(p123Stats.empty(), "P12.3 stats 清空（失败即未播放）");
+
+    // ---- P13：--wait-for-all-acked 退出确认等待（库层形态，对齐 ros2 语义"退出前等
+    // 全部 RELIABLE 订阅者确认收齐（0=永等）"：播毕或停止后、销毁发布实体前逐
+    // RELIABLE writer 分片等 ACK，BEST_EFFORT 跳过，超时/中断仅告警不改变返回值） ----
+    // P13 用例共用夹具：kP13Bag 双主题各 20 条 @50ms（RELIABLE,TRANSIENT_LOCAL 快照
+    // 同 P12 惯例；span 1950ms 同 kP8Bag 形态）
+    CHECK(makeBag(kP13Bag,
+              {{"/rt/p13a", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 20},
+                  {"/rt/p13b", "YomkRpc::MString", "RELIABLE,TRANSIENT_LOCAL", 20}},
+              50 * 1000000ULL),
+          "P13 前置：双主题各 20 条 @50ms RELIABLE bag 构造成功");
+
+    // P13.2 无订阅端永等不挂死（先于 P13.1 执行——P13.1 的 reader 在场会使"无订阅端"
+    // 失真）：waitAckedMs=0 永等，无 matched RELIABLE reader → wait 立即通过（空集
+    // 全确认），ok=true 正常播毕不挂死
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p132Stats;
+    std::string p132Error;
+    std::atomic<bool> p132Done{false};
+    bool p132Ok = false;
+    std::thread p132Thread = startPlayThread(node, kP13Bag, p132Stats, p132Error, p132Ok,
+        p132Done, 1.0, {}, false, 0.0, 0.0, 0);
+    joinPlay(p132Thread, p132Done);
+    CHECK(p132Ok, "P13.2 waitAckedMs=0 无订阅端 → wait 立即通过正常播毕返回 true（不挂死）");
+    CHECK(p132Stats.size() == 2 && p132Stats[0].count == 20 && p132Stats[1].count == 20,
+          "P13.2 stats 双主题各 20（确认等待不改变收尾统计口径）");
+
+    // P13.1 显式生效+播毕收满：双 RELIABLE 订阅端在线 → waitAckedMs=2000 收尾逐 writer
+    // 等 ACK（进程内 RELIABLE reader ACK 快，wait 立即通过——验证不 hang 不误报）
+    auto *topicP13a = makePlayTopic(participant, "/rt/p13a", "YomkRpc::MString");
+    auto *topicP13b = makePlayTopic(participant, "/rt/p13b", "YomkRpc::MString");
+    PlayCountListener p13aListen;
+    PlayCountListener p13bListen;
+    auto *readerP13a = makePlayReader(subscriber, topicP13a, &p13aListen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    auto *readerP13b = makePlayReader(subscriber, topicP13b, &p13bListen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicP13a != nullptr && topicP13b != nullptr && readerP13a != nullptr &&
+              readerP13b != nullptr,
+          "P13.1 前置：双 RELIABLE 订阅端 reader 先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p131Stats;
+    std::string p131Error;
+    std::atomic<bool> p131Done{false};
+    bool p131Ok = false;
+    std::thread p131Thread = startPlayThread(node, kP13Bag, p131Stats, p131Error, p131Ok,
+        p131Done, 1.0, {}, false, 0.0, 0.0, 2000);
+    CHECK(waitForCount(p13aListen.count, 20) && waitForCount(p13bListen.count, 20),
+          "P13.1 双订阅端收满各 20（确认等待不改变播放流程）");
+    joinPlay(p131Thread, p131Done);
+    CHECK(p131Ok, "P13.1 waitAckedMs=2000 自然播毕返回 true（wait 不 hang）");
+    CHECK(p131Stats.size() == 2 && p131Stats[0].count == 20 && p131Stats[1].count == 20,
+          "P13.1 stats 双主题各 20（确认级收尾统计精确）");
+
+    // P13.3 BEST_EFFORT 跳过：复用 kP3cBag（BEST_EFFORT,TRANSIENT_LOCAL 快照——writer
+    // 侧 BEST_EFFORT 不参与 ackNack）→ waitAckedMs=100 收尾跳过等待快速播毕
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p133Stats;
+    std::string p133Error;
+    std::atomic<bool> p133Done{false};
+    bool p133Ok = false;
+    std::thread p133Thread = startPlayThread(node, kP3cBag, p133Stats, p133Error, p133Ok,
+        p133Done, 1.0, {}, false, 0.0, 0.0, 100);
+    joinPlay(p133Thread, p133Done);
+    CHECK(p133Ok, "P13.3 waitAckedMs=100 BEST_EFFORT bag 播毕返回 true（等待路径跳过）");
+
+    // P13.4 超时不失败：kP13Bag waitAckedMs=1 极小片——进程内 ACK 毫秒级可能过可能
+    // 超时，两种结果都 ok=true（超时告警不改返回值；不断言告警文本）
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p134Stats;
+    std::string p134Error;
+    std::atomic<bool> p134Done{false};
+    bool p134Ok = false;
+    std::thread p134Thread = startPlayThread(node, kP13Bag, p134Stats, p134Error, p134Ok,
+        p134Done, 1.0, {}, false, 0.0, 0.0, 1);
+    joinPlay(p134Thread, p134Done);
+    CHECK(p134Ok, "P13.4 waitAckedMs=1 极小片 → ok=true（超时/通过两态都不改返回值）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

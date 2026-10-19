@@ -2481,6 +2481,7 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
 constexpr size_t kPlayReadAheadQueueSize = 1000;  // 预读队列深度(对齐参考实现预读队列默认值)
 constexpr uint32_t kPlayPausePollMs = 20;         // 暂停标志轮询间隔(短于录制轮询,暂停/恢复更跟手)
 constexpr uint32_t kPlayDelayPollMs = 50;         // 延迟窗停止标志轮询间隔(分段睡防大延迟卡 join)
+constexpr uint32_t kPlayAckWaitSliceMs = 200;     // 退出确认等待分片时长(片间轮询停止标志,永等可中断)
 
 // 读线程 → 播放线程单条消息(深拷贝所有权转移;eos 哨兵标志读毕;loopStart 轮边界哨兵——
 // 第二轮起每轮首条置位,播放线程据此重锚时间轴)
@@ -2502,11 +2503,13 @@ struct PlayTopic
     DataWriterQos qosCfg;
 };
 
-// 发布实体登记项(writer 按需创建;停止序列 delete_datawriter → delete_topic)
+// 发布实体登记项(writer 按需创建;停止序列 delete_datawriter → delete_topic;reliable
+// 供退出确认等待筛 RELIABLE writer——BEST_EFFORT 不参与 ackNack 直接跳过)
 struct PlayWriterEntry
 {
     Topic* topic = nullptr;
     DataWriter* writer = nullptr;
+    bool reliable = false;  // 发布 QoS 是否 RELIABLE(创建时从预扫 qosCfg 取,收尾等待用)
 };
 
 // 读播解耦有界队列:读线程 push(满则背压阻塞)、播放线程 pop(空则等待)。双侧等待均
@@ -2569,7 +2572,7 @@ private:
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
         std::string* error, double playbackRate, const std::vector<std::string>& topics,
-        bool loop, double startOffset, double delay)
+        bool loop, double startOffset, double delay, int64_t waitForAllAckedMs)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -3037,6 +3040,7 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 PlayWriterEntry entry;
                 entry.topic = topicHandle;
                 entry.writer = writer;
+                entry.reliable = (RELIABLE_RELIABILITY_QOS == pt.qosCfg.reliability().kind);
                 entryIt = writers.emplace(msg.topic, entry).first;
             }
             // write 原始 CDR 字节(Blob 透传,含 encapsulation header);失败告警继续不
@@ -3058,9 +3062,47 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     });
 
     // ---- ④停止序列:播放线程退出(stop 或 EOS)→ 读线程退出(等待处 100ms 内醒)→
-    //      join → 删除全部发布实体(类型注册幂等不注销,对齐 debugNode 先例)
+    //      join → 退出确认等待 → 删除全部发布实体(类型注册幂等不注销,对齐 debugNode 先例)
     playThread.join();
     readThread.join();
+
+    // --wait-for-all-acked 退出确认等待(对齐 ros2:回放结束后销毁发布实体前等全部
+    // RELIABLE 订阅端确认收齐——RELIABLE 下"播完"升级为"确认送达",补齐大批量高速
+    // 回放的退出语义;BEST_EFFORT 不参与 ackNack 跳过;逐 writer 各等 MS 对齐 ros2
+    // 逐 publisher 同 timeout)。0=永等统一分片实现:每片 200ms 阻塞等 ACK,片间查
+    // 停止标志——永等下 Ctrl+C 即退不卡收尾;超时/中断仅告警不改变返回值(对齐
+    // ros2 WARN 继续)
+    if (waitForAllAckedMs >= 0)
+    {
+        for (auto& kv : writers)
+        {
+            if (!kv.second.reliable)
+            {
+                continue;
+            }
+            int64_t remainingMs = waitForAllAckedMs;  // 0=永等(循环条件不设上限)
+            bool acked = false;
+            while (!stopped() && !acked && (waitForAllAckedMs == 0 || remainingMs > 0))
+            {
+                const int32_t sliceMs = (waitForAllAckedMs == 0 ||
+                        remainingMs > static_cast<int64_t>(kPlayAckWaitSliceMs))
+                    ? static_cast<int32_t>(kPlayAckWaitSliceMs)
+                    : static_cast<int32_t>(remainingMs);
+                if (RETCODE_OK == kv.second.writer->wait_for_acknowledgments(
+                        Duration_t(0, static_cast<int32_t>(sliceMs * kNsPerMs))))
+                {
+                    acked = true;
+                }
+                remainingMs -= sliceMs;
+            }
+            if (!acked)
+            {
+                std::cout << "play: not all subscribers acknowledged for [" << kv.first
+                          << "]" << std::endl;
+            }
+        }
+    }
+
     for (auto& kv : writers)
     {
         playPublisher->delete_datawriter(kv.second.writer);

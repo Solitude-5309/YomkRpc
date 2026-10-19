@@ -163,10 +163,16 @@ public:
     // Ctrl+C/stop 即退不卡 join；sleep 期间发布实体已建，首条发出不早于实体建立+SEC
     // （订阅端匹配窗口，规避 VOLATILE 匹配前丢首条）；与 loop 叠加每轮保持延迟；
     // 负值报 "invalid delay" 快速返回 false（不建任何 DDS 实体）；0 不延迟恒等现行为
+    // waitForAllAckedMs 退出前等全部 RELIABLE 订阅端确认收齐毫秒（对齐 ros2
+    // --wait-for-all-acked MS）：播毕或 Ctrl+C 停止后、销毁发布实体前，对每个
+    // RELIABLE writer 分片等 ACK——RELIABLE 下"播完"升级为"确认送达"；BEST_EFFORT
+    // 跳过；0 永等（分片实现片间查停止标志，Ctrl+C 可中断），>0 超时毫秒逐主题各计；
+    // 超时/中断仅告警不改变返回值（对齐 ros2 WARN 继续）；-1 不等待缺省恒等现行为
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
             const std::vector<std::string>& topics = {}, bool loop = false,
-            double startOffset = 0.0, double delay = 0.0);
+            double startOffset = 0.0, double delay = 0.0,
+            int64_t waitForAllAckedMs = -1);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

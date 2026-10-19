@@ -183,6 +183,9 @@ struct DDSBagPlay
     double delay = 0.0;  // 开播延迟秒（对齐 ros2 -d/--delay "Will delay at the beginning of
                          // each loop"：每次开播含每轮回卷前先睡 SEC 秒等订阅端匹配就绪；
                          // 负值非法；尾部缺省字段，旧调用方零改动）
+    int64_t waitForAllAckedMs = -1;  // 退出前等全部 RELIABLE 订阅端确认收齐毫秒（对齐 ros2
+                                     // --wait-for-all-acked MS：-1 不等待缺省恒等现行为，0 永等，
+                                     // >0 超时毫秒逐主题各计；尾部缺省字段，旧调用方零改动）
 };
 
 // clang-format off
