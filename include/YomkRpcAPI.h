@@ -319,13 +319,18 @@
 // "播完"升级为"确认送达"，补齐大批量高速回放的退出语义；-1 不等待缺省恒等现行为，
 // 0 永等（Ctrl+C 可中断），>0 超时毫秒逐主题各计；超时/中断仅告警不改变返回值，
 // 对齐 ros2 WARN 继续）。
+// topicRemaps 主题重映射规则（对齐 ros2 --remap/-m "list of topics to be remapped: in
+// the form old_topic1:=new_topic1"："old:=new" 原始串列表，发布主题名精确匹配映射——
+// old 经发布实体命名层精确比较（无通配），QoS/类型按 bag 快照照旧，--topics 过滤在
+// 读取层按原名先过滤后改名；old 不在 bag 清单则规则静默无效（对齐 ros2 rcl remap
+// 语义），空=不重映射恒等现行为）。
 // 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
 // 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs) \
+#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs, topicRemaps) \
     YOMK_REQUEST("/YomkRpcBagService/bag_play", \
-        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs)}))
+        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs), (topicRemaps)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

@@ -26,7 +26,7 @@
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
  *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]
  *           [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>]
- *           [--wait-for-all-acked MS] <bag-path>
+ *           [--wait-for-all-acked MS] [--remap old:=new ...] <bag-path>
  *           交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，+/- 调节回放
  *           速率（±10%），Ctrl+C 停止
  *   yomkrpc -h | --help
@@ -60,6 +60,7 @@
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-offset 5   # 从第 5 秒起播，跳过前段
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 -d 3   # 开播前先等 3 秒，等订阅端就绪
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --wait-for-all-acked 0   # 播毕等订阅端确认收齐再退出
+ *   yomkrpc bag play bag_in --remap /chatter:=hello_world   # 旧数据喂新主题名
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -193,7 +194,7 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
           "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]\n"
           "          [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>]\n"
-          "          [--wait-for-all-acked MS] <bag-path>\n"
+          "          [--wait-for-all-acked MS] [--remap old:=new ...] <bag-path>\n"
                     "          交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，\n"
           "          +/- 调节回放速率（±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
@@ -236,6 +237,11 @@ static void printUsage(std::ostream &os)
           "                      生效）：播毕或 Ctrl+C 停止后、销毁发布实体前逐 RELIABLE\n"
           "                      主题等待，0=永等，>0 超时毫秒（逐主题各计）；BEST_EFFORT\n"
           "                      主题跳过；超时仅告警不失败\n"
+          "  --remap old:=new ... | -m ...\n"
+          "                      主题重映射（仅 bag play 生效，空格分隔多值，对齐 ros2）：把 bag\n"
+          "                      里 old 主题的数据发到 new 主题——发布主题名精确匹配（无通配），\n"
+          "                      old 不在 bag 则规则静默无效；格式须为 old:=new（两侧非空，恒等\n"
+          "                      允许），old 重复报错退出\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -597,13 +603,18 @@ static std::string formatRate(double rate)
 // 分片等 ACK——RELIABLE 下"播完"升级为"确认送达"；0=永等可 Ctrl+C 中断，>0 超时
 // 逐主题各计，BEST_EFFORT 主题跳过，超时仅告警不失败；回显附 ", ack-wait=<值>"
 // 后缀——仅显式传参才显示含 0，负值由主解析层报错退出）；
+// playTopicRemaps 主题重映射规则（--remap/-m，对齐 ros2 "old_topic1:=new_topic1" 形态）：
+// 发布主题名精确匹配映射——bag 里 old 主题的数据发到 new 主题（旧数据喂新主题名的
+// 测试注入场景），透传 writer 本按需创建改名零额外成本；回显附 ", remap=<规则>" 后缀
+// （仅显式传参才显示）；空=不重映射恒等现行为；
 // tty 下额外起键盘监听线程：SPACE 从暂停态开始回放、p 暂停、r 继续（与 record 键位
 // 一致）、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
 // 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
 // 无锁置位不可逆整程退出；非 tty（管道/重定向）自动跳过键盘线程，仅剩开始/停止两通道
 static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate,
         const std::vector<std::string> &topics, bool startPaused, bool loop,
-        double startOffsetSec, double playDelaySec, int64_t playWaitAckedMs)
+        double startOffsetSec, double playDelaySec, int64_t playWaitAckedMs,
+        const std::vector<std::string> &playTopicRemaps)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -650,13 +661,27 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     {
         ackNote = ", ack-wait=" + std::to_string(playWaitAckedMs);
     }
+    // 主题重映射显式传参时附 remap=<old:=new,...>（--remap/-m 的可见性；规则逗号拼接）
+    std::string remapNote;
+    if (!playTopicRemaps.empty())
+    {
+        remapNote = ", remap=";
+        for (size_t ri = 0; ri < playTopicRemaps.size(); ++ri)
+        {
+            if (ri != 0)
+            {
+                remapNote += ",";
+            }
+            remapNote += playTopicRemaps[ri];
+        }
+    }
     const char *startSuffix = startPaused
         ? ", started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop"
         : ", press p to pause, r to resume, +/- rate, Ctrl+C to stop";
     const char *loopNote = loop ? ", looping" : "";
     YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
                   std::to_string(domainId), rateNote, offsetNote, delayNote, ackNote,
-                  loopNote, startSuffix);
+                  remapNote, loopNote, startSuffix);
 
     // 3. 键盘监听线程（tty 下生效）：SPACE=start（仅暂停态），p=pause（仅运行态），
     //    r=resume（仅暂停态，与 record 键位一致），+/-=rate ±10%，Ctrl+C 退出
@@ -733,7 +758,7 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
     //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
     resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffsetSec,
-                            playDelaySec, playWaitAckedMs);
+                            playDelaySec, playWaitAckedMs, playTopicRemaps);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1738,6 +1763,7 @@ int main(int argc, char *argv[])
         std::vector<std::string> playTopics;
             // 只回放主题清单（--topics；仅 bag play 生效，空=全部，元素含一个 '*' 为通配，
             // 按 bag 内主题清单展开，对齐 record/convert 惯例）
+    std::vector<std::string> playTopicRemaps;  // 主题重映射规则（--remap/-m；仅 bag play 生效）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
     uint32_t pubMaxTimes = 0; // 发布条数上限（-t/--times；仅 topic pub 发布模式生效，含首轮，0=不限）
     std::vector<std::string> pos;
@@ -2088,6 +2114,16 @@ int main(int argc, char *argv[])
             playWaitAckedMs = value;
             continue;
         }
+        if ((arg == "--remap" || arg == "-m") &&
+            !(pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play"))
+        {
+            // record 解析区语境拦截（-c 块相邻先于后续解析分支）：--remap/-m 语义专属
+            // bag play，其余语境（record/info/convert/topic 等）报错退出；bag play 语境
+            // 放行至后续解析分支
+            std::cerr << "yomkrpc: --remap 仅 bag play 生效\n";
+            printUsage(std::cerr);
+            return 2;
+        }
         if (arg == "-c" || arg == "--max-cache-size")
         {
             if (i + 1 >= argc)
@@ -2104,6 +2140,53 @@ int main(int argc, char *argv[])
                 return 2;
             }
             maxCacheSize = value;
+            continue;
+        }
+        if (arg == "--remap" || arg == "-m")
+        {
+            // 语境分流（对齐 --topics 先例；record 解析区已先行拦截非 play 语境，此处
+            // 判定为防御后备）：贪吃多值解析（对齐 ros2 nargs='+' 空格分隔语义）——收集
+            // 其后全部非 '-' 开头 token；逐项校验：首个 ":=" 切分两侧非空（恒等 old==new
+            // 允许）、old 查重——与节点层语义一致（对齐 ros2 rcl remap：精确匹配无通配，
+            // old 不在 bag 则规则静默无效）
+            if (!(pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play"))
+            {
+                std::cerr << "yomkrpc: --remap 仅 bag play 生效\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            ++i;
+            while (i < argc && std::string(argv[i]).rfind("-", 0) != 0)
+            {
+                const std::string rule = argv[i];
+                const auto sep = rule.find(":=");
+                if (sep == std::string::npos || sep == 0 || sep + 2 == rule.size())
+                {
+                    std::cerr << "yomkrpc: invalid remap rule '" << rule
+                              << "' (expected old:=new)\n";
+                    printUsage(std::cerr);
+                    return 2;
+                }
+                const std::string oldTopic = rule.substr(0, sep);
+                for (const auto &existing : playTopicRemaps)
+                {
+                    if (existing.substr(0, existing.find(":=")) == oldTopic)
+                    {
+                        std::cerr << "yomkrpc: duplicate remap rule '" << oldTopic << "'\n";
+                        printUsage(std::cerr);
+                        return 2;
+                    }
+                }
+                playTopicRemaps.push_back(rule);
+                ++i;
+            }
+            --i; // 回退到非选项 token/末尾，交回主循环步进（若已超界则循环步进后结束）
+            if (playTopicRemaps.empty())
+            {
+                std::cerr << "yomkrpc: --remap 缺少重映射规则参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
             continue;
         }
         pos.push_back(arg);
@@ -2215,7 +2298,7 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
         return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused, playLoop,
-                          startOffsetSec, playDelaySec, playWaitAckedMs);
+                          startOffsetSec, playDelaySec, playWaitAckedMs, playTopicRemaps);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {

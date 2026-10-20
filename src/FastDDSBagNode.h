@@ -168,11 +168,20 @@ public:
     // RELIABLE writer 分片等 ACK——RELIABLE 下"播完"升级为"确认送达"；BEST_EFFORT
     // 跳过；0 永等（分片实现片间查停止标志，Ctrl+C 可中断），>0 超时毫秒逐主题各计；
     // 超时/中断仅告警不改变返回值（对齐 ros2 WARN 继续）；-1 不等待缺省恒等现行为
+    // topicRemaps 主题重映射规则（"old:=new" 原始串列表，对齐 ros2 --remap/-m——ros2
+    // 经 rclcpp::NodeOptions.arguments 委托节点级 remap，本仓落发布层同语义）：发布
+    // 主题名精确映射（首个 ":=" 切分，两侧非空，old 重复报错；无通配），QoS/类型按
+    // bag 快照照旧，--topics 过滤按原名先过滤后改名；格式/重复校验失败报
+    // "invalid remap rule"/"duplicate remap rule" 快速返回 false 不建任何 DDS 实体；
+    // old 不在 bag 清单则规则静默无效（不命中即无效果，对齐 rcl remap 语义）；回显
+    // replaying topic= 行与收尾统计显示 remap 后新名（发布实体真实名）；BEST_EFFORT
+    // 照常参与回放；空=不重映射恒等现行为
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
             const std::vector<std::string>& topics = {}, bool loop = false,
             double startOffset = 0.0, double delay = 0.0,
-            int64_t waitForAllAckedMs = -1);
+            int64_t waitForAllAckedMs = -1,
+            const std::vector<std::string>& topicRemaps = {});
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

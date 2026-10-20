@@ -2510,6 +2510,7 @@ struct PlayWriterEntry
     Topic* topic = nullptr;
     DataWriter* writer = nullptr;
     bool reliable = false;  // 发布 QoS 是否 RELIABLE(创建时从预扫 qosCfg 取,收尾等待用)
+    std::string published;  // 发布主题名(bag 原名经 remap 映射后的真实发布名,收尾等待告警用)
 };
 
 // 读播解耦有界队列:读线程 push(满则背压阻塞)、播放线程 pop(空则等待)。双侧等待均
@@ -2572,7 +2573,8 @@ private:
 // 回放 bag 目录(实现见头注释)。
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
         std::string* error, double playbackRate, const std::vector<std::string>& topics,
-        bool loop, double startOffset, double delay, int64_t waitForAllAckedMs)
+        bool loop, double startOffset, double delay, int64_t waitForAllAckedMs,
+        const std::vector<std::string>& topicRemaps)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2613,6 +2615,32 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     if (delay < 0.0)
     {
         return fail("invalid delay");
+    }
+
+    // 主题重映射规则解析校验（同上快速返回路径，不建任何 DDS 实体）；对齐 ros2 --remap
+    // 语义（humble player.cpp 经 rclcpp::NodeOptions.arguments 委托节点级 remap）：
+    // "old:=new" 原始串按首个 ":=" 切分（两侧任一为空即格式非法——恒等 old==new 允许），
+    // old 重复报错（ros2 经 rclcpp 行为未定义，本仓快速拦截对齐 convert 重复目录拒绝
+    // 先例）；匹配规则为发布实体命名层精确比较（无通配），old 不在 bag 清单则规则
+    // 静默无效不报错（不命中即无效果）
+    std::vector<std::pair<std::string, std::string>> remapRules;
+    remapRules.reserve(topicRemaps.size());
+    for (const auto& rule : topicRemaps)
+    {
+        const auto sep = rule.find(":=");
+        if (sep == std::string::npos || sep == 0 || sep + 2 == rule.size())
+        {
+            return fail("invalid remap rule [" + rule + "] (expected old:=new)");
+        }
+        const std::string oldTopic = rule.substr(0, sep);
+        for (const auto& existing : remapRules)
+        {
+            if (existing.first == oldTopic)
+            {
+                return fail("duplicate remap rule [" + oldTopic + "]");
+            }
+        }
+        remapRules.emplace_back(oldTopic, rule.substr(sep + 2));
     }
 
     // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
@@ -2773,11 +2801,25 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         return fail("no bag files found for playing");
     }
 
+    // 主题重映射查询:bag 原名→发布新名(规则不命中返回原名——old 不在 bag 静默无效;
+    // 定义于线程创建前供回显/播放线程/收尾统计共用,播放线程按引用捕获全量局部量)
+    const auto remappedTopic = [&remapRules](const std::string& name)
+    {
+        for (const auto& rule : remapRules)
+        {
+            if (rule.first == name)
+            {
+                return rule.second;
+            }
+        }
+        return name;
+    };
+
     // 开播回显:逐主题 replaying 行(对齐 record 的 recording 行,qos 段为生效口径)+
-    // bag 元信息一行
+    // bag 元信息一行;显示 remap 后发布名(发布实体真实名,与 DDS 发现图一致)
     for (const auto& pt : playTopics)
     {
-        std::cout << "replaying topic=" << pt.topic << " type=" << pt.type
+        std::cout << "replaying topic=" << remappedTopic(pt.topic) << " type=" << pt.type
                   << " qos=" << pt.qos << std::endl;
     }
     std::cout << "replaying bag [" << bagDir << "]: " << metaMsgCount << " messages / duration "
@@ -3010,11 +3052,14 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 break;
             }
             // writer 按需创建:透传类型共享注册(同 record)+ create_topic +
-            // create_datawriter;失败置局部停止记错误,停止序列统一清理
+            // create_datawriter;失败置局部停止记错误,停止序列统一清理。create_topic
+            // 用 remap 后发布名(writers 键保持 bag 原名——播放线程按原名查表,发布
+            // 实体名与 DDS 发现图为新名)
             auto entryIt = writers.find(msg.topic);
             if (entryIt == writers.end())
             {
                 const PlayTopic& pt = playTopics[topicIndex.at(msg.topic)];
+                const std::string pubTopic = remappedTopic(msg.topic);
                 const auto typeIns =
                     playTypes.emplace(pt.type, TypeSupport(new PassthroughPubSubType(pt.type)));
                 if (typeIns.second)
@@ -3022,11 +3067,11 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                     typeIns.first->second.register_type(participant_);
                 }
                 Topic* topicHandle =
-                    participant_->create_topic(msg.topic, pt.type, TOPIC_QOS_DEFAULT);
+                    participant_->create_topic(pubTopic, pt.type, TOPIC_QOS_DEFAULT);
                 if (topicHandle == nullptr)
                 {
                     localStop.store(true, std::memory_order_relaxed);
-                    publishError = "create topic [" + msg.topic + "] failed";
+                    publishError = "create topic [" + pubTopic + "] failed";
                     break;
                 }
                 DataWriter* writer = playPublisher->create_datawriter(topicHandle, pt.qosCfg);
@@ -3034,13 +3079,14 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 {
                     participant_->delete_topic(topicHandle);
                     localStop.store(true, std::memory_order_relaxed);
-                    publishError = "create datawriter [" + msg.topic + "] failed";
+                    publishError = "create datawriter [" + pubTopic + "] failed";
                     break;
                 }
                 PlayWriterEntry entry;
                 entry.topic = topicHandle;
                 entry.writer = writer;
                 entry.reliable = (RELIABLE_RELIABILITY_QOS == pt.qosCfg.reliability().kind);
+                entry.published = pubTopic;
                 entryIt = writers.emplace(msg.topic, entry).first;
             }
             // write 原始 CDR 字节(Blob 透传,含 encapsulation header);失败告警继续不
@@ -3097,8 +3143,8 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
             }
             if (!acked)
             {
-                std::cout << "play: not all subscribers acknowledged for [" << kv.first
-                          << "]" << std::endl;
+                std::cout << "play: not all subscribers acknowledged for ["
+                          << kv.second.published << "]" << std::endl;
             }
         }
     }
@@ -3115,7 +3161,7 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
     for (const auto& pt : playTopics)
     {
         BagTopicStat stat;
-        stat.topic = pt.topic;
+        stat.topic = remappedTopic(pt.topic);  // 显示 remap 后发布名;played 聚合键仍为原名
         stat.type = pt.type;
         const auto statIt = played.find(pt.topic);
         if (statIt != played.end())

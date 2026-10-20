@@ -92,6 +92,15 @@
  *      （复用 kP3cBag，writer 侧 BEST_EFFORT 不参与 ackNack 直接跳过，waitAckedMs=100
  *      快速播毕）；P13.4 超时不失败（waitAckedMs=1 极小片——进程内 ACK 毫秒级可能过
  *      可能超时，两种结果都 ok=true，超时告警不改返回值不断言告警文本）。
+ *   P14 主题重映射（--remap old:=new ...，对齐 ros2 发布实体命名层精确匹配语义）：P14.1
+ *      单主题重映射（kP8Bag /rt/p8a:=/rt/remap_a——新名 reader 精确收 20、旧名 reader
+ *      零增量（数据迁新名无 matched）、未 remap 的 p8b 照常 20；stats 显示 remap 后
+ *      新名）；P14.2 多规则全 remap（双规则双主题全迁新名各收 20，stats 两行全新名，
+ *      旧名 reader 全零增量）；P14.3 与 --topics 叠加（过滤按旧名先过滤后 remap——
+ *      ra3 收 20、p8b 被过滤零发，stats 单行新名）；P14.4 非法格式+重复 old 拒播
+ *      （缺 ':=' → invalid remap rule、old 重复 → duplicate remap rule，均 false +
+ *      stats 清空，对齐 P12.3 形态）；P14.5 old 不在 bag 静默无效（规则不命中即无
+ *      效果——正常播毕、原名照常 +20，对齐 ros2 rcl remap 语义）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -424,21 +433,22 @@ namespace
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
     // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false、startOffsetSec
     // 缺省 0.0、delaySec 缺省 0.0、waitAckedMs 缺省 -1 透传节点层入口——P7 速率/P8 过滤/
-    // P10 循环/P11 偏移/P12 延迟/P13 退出确认等待用例经尾参传入；topics 按值捕获：调用点
-    // {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
+    // P10 循环/P11 偏移/P12 延迟/P13 退出确认等待/P14 重映射用例经尾参传入；topics/
+    // topicRemaps 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
                                 double playbackRate = 1.0,
                                 const std::vector<std::string> &topics = {},
                                 bool loop = false, double startOffsetSec = 0.0,
-                                double delaySec = 0.0, int64_t waitAckedMs = -1)
+                                double delaySec = 0.0, int64_t waitAckedMs = -1,
+                                const std::vector<std::string> &topicRemaps = {})
     {
         return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
-                            loop, startOffsetSec, delaySec, waitAckedMs]()
+                            loop, startOffsetSec, delaySec, waitAckedMs, topicRemaps]()
         {
             ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec,
-                           delaySec, waitAckedMs);
+                           delaySec, waitAckedMs, topicRemaps);
             done.store(true);
         });
     }
@@ -1350,6 +1360,126 @@ int main()
         p134Done, 1.0, {}, false, 0.0, 0.0, 1);
     joinPlay(p134Thread, p134Done);
     CHECK(p134Ok, "P13.4 waitAckedMs=1 极小片 → ok=true（超时/通过两态都不改返回值）");
+
+    // P14.1 单主题重映射：/rt/p8a:=/rt/remap_a → 数据发新名（发布实体真实名）；新名
+    // reader 精确收 20、旧名 reader 零增量（数据已迁新名无 matched）、未 remap 的 p8b
+    // 照常；stats 显示 remap 后新名（预扫清单序）
+    auto *topicRma = makePlayTopic(participant, "/rt/remap_a", "YomkRpc::MString");
+    PlayCountListener rmaListen;
+    auto *readerRma = makePlayReader(subscriber, topicRma, &rmaListen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicRma != nullptr && readerRma != nullptr,
+          "P14.1 前置：新名 /rt/remap_a reader 先建在场（RELIABLE,TL）");
+    const auto p8aBase141 = p8aListen.count.load();
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p141Stats;
+    std::string p141Error;
+    std::atomic<bool> p141Done{false};
+    bool p141Ok = false;
+    std::thread p141Thread = startPlayThread(node, kP8Bag, p141Stats, p141Error, p141Ok,
+        p141Done, 1.0, {}, false, 0.0, 0.0, -1, {"/rt/p8a:=/rt/remap_a"});
+    CHECK(waitForCount(rmaListen.count, 20), "P14.1 新名 /rt/remap_a 订阅端精确收 20");
+    joinPlay(p141Thread, p141Done);
+    CHECK(p141Ok, "P14.1 play 全程完成返回 true");
+    CHECK(p141Stats.size() == 2 && p141Stats[0].topic == "/rt/remap_a" &&
+              p141Stats[0].count == 20 && p141Stats[1].topic == "/rt/p8b" &&
+              p141Stats[1].count == 20,
+          "P14.1 stats 两行：remap 后新名 + 未 remap 原名（预扫清单序、count 精确）");
+    CHECK(p8aListen.count.load() == p8aBase141,
+          "P14.1 旧名 /rt/p8a reader 零增量（数据已迁新名，旧名无 matched writer）");
+
+    // P14.2 多规则全 remap：双规则双主题全迁新名（/rt/ra2 /rt/rb2）各收 20；旧名双
+    // reader 全零增量；stats 两行全新名
+    auto *topicRa2 = makePlayTopic(participant, "/rt/ra2", "YomkRpc::MString");
+    auto *topicRb2 = makePlayTopic(participant, "/rt/rb2", "YomkRpc::MString");
+    PlayCountListener ra2Listen;
+    PlayCountListener rb2Listen;
+    auto *readerRa2 = makePlayReader(subscriber, topicRa2, &ra2Listen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    auto *readerRb2 = makePlayReader(subscriber, topicRb2, &rb2Listen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicRa2 != nullptr && topicRb2 != nullptr && readerRa2 != nullptr &&
+              readerRb2 != nullptr,
+          "P14.2 前置：双新名 reader 先建在场（RELIABLE,TL）");
+    const auto p8aBase142 = p8aListen.count.load();
+    const auto p8bBase142 = p8bListen.count.load();
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p142Stats;
+    std::string p142Error;
+    std::atomic<bool> p142Done{false};
+    bool p142Ok = false;
+    std::thread p142Thread = startPlayThread(node, kP8Bag, p142Stats, p142Error, p142Ok,
+        p142Done, 1.0, {}, false, 0.0, 0.0, -1,
+        {"/rt/p8a:=/rt/ra2", "/rt/p8b:=/rt/rb2"});
+    CHECK(waitForCount(ra2Listen.count, 20) && waitForCount(rb2Listen.count, 20),
+          "P14.2 双新名订阅端各精确收 20");
+    joinPlay(p142Thread, p142Done);
+    CHECK(p142Ok, "P14.2 play 全程完成返回 true");
+    CHECK(p142Stats.size() == 2 && p142Stats[0].topic == "/rt/ra2" &&
+              p142Stats[0].count == 20 && p142Stats[1].topic == "/rt/rb2" &&
+              p142Stats[1].count == 20,
+          "P14.2 stats 两行全新名（多规则逐主题映射生效）");
+    CHECK(p8aListen.count.load() == p8aBase142 && p8bListen.count.load() == p8bBase142,
+          "P14.2 旧名双 reader 全零增量（双主题数据全迁新名）");
+
+    // P14.3 与 --topics 叠加（过滤按旧名先过滤后 remap）：只回放 p8a 并 remap →
+    // ra3 收 20、p8b 被过滤零发；stats 单行 remap 后新名
+    auto *topicRa3 = makePlayTopic(participant, "/rt/ra3", "YomkRpc::MString");
+    PlayCountListener ra3Listen;
+    auto *readerRa3 = makePlayReader(subscriber, topicRa3, &ra3Listen,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicRa3 != nullptr && readerRa3 != nullptr,
+          "P14.3 前置：新名 /rt/ra3 reader 先建在场（RELIABLE,TL）");
+    const auto p8bBase143 = p8bListen.count.load();
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p143Stats;
+    std::string p143Error;
+    std::atomic<bool> p143Done{false};
+    bool p143Ok = false;
+    std::thread p143Thread = startPlayThread(node, kP8Bag, p143Stats, p143Error, p143Ok,
+        p143Done, 1.0, {"/rt/p8a"}, false, 0.0, 0.0, -1, {"/rt/p8a:=/rt/ra3"});
+    CHECK(waitForCount(ra3Listen.count, 20), "P14.3 新名 /rt/ra3 订阅端精确收 20");
+    joinPlay(p143Thread, p143Done);
+    CHECK(p143Ok && p143Stats.size() == 1 && p143Stats[0].topic == "/rt/ra3" &&
+              p143Stats[0].count == 20,
+          "P14.3 stats 单行新名（--topics 过滤按旧名生效，入选集合只含 p8a）");
+    CHECK(p8bListen.count.load() == p8bBase143, "P14.3 p8b 被过滤零增量（过滤先于 remap）");
+
+    // P14.4 非法格式+重复 old 拒播：节点层校验失败快速返回（不建任何 DDS 实体），
+    // stats 清空——CLI 双层校验的节点层兜底（对齐 P12.3 同步快速失败形态）
+    std::vector<FastDDSBagNode::BagTopicStat> p144Stats;
+    std::string p144Error;
+    p144Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约
+    CHECK(!node.play(kP8Bag, p144Stats, &p144Error, 1.0, {}, false, 0.0, 0.0, -1,
+              {"/rt/p8a:/rt/bad"}) &&
+              p144Error.find("invalid remap rule") != std::string::npos &&
+              p144Stats.empty(),
+          "P14.4 缺 ':=' 格式非法 → false + invalid remap rule + stats 清空");
+    CHECK(!node.play(kP8Bag, p144Stats, &p144Error, 1.0, {}, false, 0.0, 0.0, -1,
+              {"/rt/a:=/rt/b", "/rt/a:=/rt/c"}) &&
+              p144Error.find("duplicate remap rule") != std::string::npos,
+          "P14.4 重复 old 规则 → false + duplicate remap rule");
+
+    // P14.5 old 不在 bag 静默无效：规则不命中即无效果（对齐 ros2 rcl remap 语义，
+    // 无匹配发生即无效果不报错）——正常播毕，数据照常发原名
+    const auto p8aBase145 = p8aListen.count.load();
+    const auto p8bBase145 = p8bListen.count.load();
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p145Stats;
+    std::string p145Error;
+    std::atomic<bool> p145Done{false};
+    bool p145Ok = false;
+    std::thread p145Thread = startPlayThread(node, kP8Bag, p145Stats, p145Error, p145Ok,
+        p145Done, 1.0, {}, false, 0.0, 0.0, -1, {"/rt/nonexistent:=/rt/whatever"});
+    joinPlay(p145Thread, p145Done);
+    CHECK(p145Ok, "P14.5 未命中规则不影响播放 → ok=true 正常播毕");
+    CHECK(p145Stats.size() == 2 && p145Stats[0].topic == "/rt/p8a" &&
+              p145Stats[0].count == 20 && p145Stats[1].topic == "/rt/p8b" &&
+              p145Stats[1].count == 20,
+          "P14.5 stats 原名照常（静默无效不改清单序与统计口径）");
+    CHECK(p8aListen.count.load() == p8aBase145 + 20 &&
+              p8bListen.count.load() == p8bBase145 + 20,
+          "P14.5 双 reader 各 +20（数据照常发原名）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

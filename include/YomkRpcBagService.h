@@ -186,6 +186,10 @@ struct DDSBagPlay
     int64_t waitForAllAckedMs = -1;  // 退出前等全部 RELIABLE 订阅端确认收齐毫秒（对齐 ros2
                                      // --wait-for-all-acked MS：-1 不等待缺省恒等现行为，0 永等，
                                      // >0 超时毫秒逐主题各计；尾部缺省字段，旧调用方零改动）
+    std::vector<std::string> topicRemaps;  // 主题重映射规则（"old:=new" 原始串，对齐 ros2
+                                           // --remap old:=new ...：发布主题名精确映射，QoS/类型
+                                           // 按 bag 快照照旧，--topics 过滤按原名；尾部缺省字段，
+                                           // 旧调用方零改动）
 };
 
 // clang-format off
