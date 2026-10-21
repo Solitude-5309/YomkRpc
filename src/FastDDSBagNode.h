@@ -64,6 +64,9 @@ public:
     // 参与者公告周期默认 3s，bag 节点与远端端点近同时上线时，校验窗必须覆盖 SPDP+EDP
     // 一整轮互通，否则"刚上线的发布者"会被误判为无端点——取 2 倍公告周期
     static constexpr uint32_t kMinValidateWindowMs = 6000;
+    // play 预读队列缺省深度（--read-ahead-queue-size 缺省，对齐参考实现同款默认；读侧
+    // PlayQueue 背压边界，writer QoS 独立常量不随其联动）
+    static constexpr size_t kPlayReadAheadQueueSizeDefault = 1000;
     // 单主题录制统计（record 出参单元）。
     struct BagTopicStat
     {
@@ -176,12 +179,21 @@ public:
     // old 不在 bag 清单则规则静默无效（不命中即无效果，对齐 rcl remap 语义）；回显
     // replaying topic= 行与收尾统计显示 remap 后新名（发布实体真实名）；BEST_EFFORT
     // 照常参与回放；空=不重映射恒等现行为
+    // readAheadQueueSize 预读内存队列深度（对齐 ros2 --read-ahead-queue-size N "size of
+    // message queue rosbag tries to hold in memory to help deterministic playback"）：读
+    // 侧吸收磁盘 IO 抖动保证确定性回放（大→占内存但防播放延迟）；<1 报 "invalid
+    // read-ahead queue size" 快速返回 false（0 容量队列 push 背压恒真死锁必拦；负值已由
+    // CLI 解析层拦，size_t 层仅余 0）；发布端 history/resource 上限为独立常量
+    // kPlayWriterHistorySize 不随其联动（按 ros2 语义该参数仅作用读侧内存队列）；队列空
+    // 致播放持续等待时打一次性 starved 告警（对齐参考实现 "Message queue starved...");
+    // 缺省 1000 恒等现行为
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
             const std::vector<std::string>& topics = {}, bool loop = false,
             double startOffset = 0.0, double delay = 0.0,
             int64_t waitForAllAckedMs = -1,
-            const std::vector<std::string>& topicRemaps = {});
+            const std::vector<std::string>& topicRemaps = {},
+            size_t readAheadQueueSize = kPlayReadAheadQueueSizeDefault);
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

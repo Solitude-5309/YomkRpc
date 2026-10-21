@@ -2478,7 +2478,13 @@ bool FastDDSBagNode::bagConvert(const std::vector<std::string>& inputs, const st
 }
 
 // ---- bag play 专属辅助(行为语义见 FastDDSBagNode.h play 声明注释) ----
-constexpr size_t kPlayReadAheadQueueSize = 1000;  // 预读队列深度(对齐参考实现预读队列默认值)
+constexpr size_t kPlayWriterHistorySize = 1000;   // 发布端 history/resource 上限(TL latched
+                                                  // 补发容量;独立常量不随 --read-ahead-queue-size
+                                                  // 联动——按参考实现语义该参数仅作用读侧内存队列)
+constexpr uint32_t kStarvedWarnAfterMs = 500;     // 队列空等待多久才打 starved 告警(开局分片
+                                                  // open/loop 轮边界 open 的短暂空窗不告警,
+                                                  // 持续饿死才告——对齐参考实现 starved 告警
+                                                  // "提示加大队列"意图且规避异步读线程开局噪音)
 constexpr uint32_t kPlayPausePollMs = 20;         // 暂停标志轮询间隔(短于录制轮询,暂停/恢复更跟手)
 constexpr uint32_t kPlayDelayPollMs = 50;         // 延迟窗停止标志轮询间隔(分段睡防大延迟卡 join)
 constexpr uint32_t kPlayAckWaitSliceMs = 200;     // 退出确认等待分片时长(片间轮询停止标志,永等可中断)
@@ -2515,14 +2521,17 @@ struct PlayWriterEntry
 
 // 读播解耦有界队列:读线程 push(满则背压阻塞)、播放线程 pop(空则等待)。双侧等待均
 // wait_for 带超时轮询停止谓词(不用无限 wait——TSan 规避同 record 消费线程先例);
-// notify 移出锁外避免被唤醒方立即撞锁。
+// notify 移出锁外避免被唤醒方立即撞锁。深度经构造注入(--read-ahead-queue-size,缺省
+// kPlayReadAheadQueueSizeDefault);队列空使播放持续等待超 kStarvedWarnAfterMs 打一次性 starved
+// 告警(读线程供给不上,播放将延迟——对齐参考实现 "Message queue starved..." 语义;
+// 开局/loop 轮边界 open 的短暂空窗不达阈值不打,eos 哨兵在队时 pop 即返不打)。
 class PlayQueue
 {
 public:
     using StopPredicate = std::function<bool()>;
 
-    explicit PlayQueue(StopPredicate stopped)
-        : stopped_(std::move(stopped))
+    PlayQueue(StopPredicate stopped, size_t queueSize)
+        : stopped_(std::move(stopped)), queueSize_(queueSize)
     {
     }
 
@@ -2530,7 +2539,7 @@ public:
     {
         {
             std::unique_lock<std::mutex> lock(mtx_);
-            while (!stopped_() && items_.size() >= kPlayReadAheadQueueSize)
+            while (!stopped_() && items_.size() >= queueSize_)
             {
                 cv_.wait_for(lock, std::chrono::milliseconds(kRecordPollMs));
             }
@@ -2548,9 +2557,18 @@ public:
     {
         {
             std::unique_lock<std::mutex> lock(mtx_);
+            size_t starvedWaitMs = 0;
             while (items_.empty() && !stopped_())
             {
                 cv_.wait_for(lock, std::chrono::milliseconds(kRecordPollMs));
+                starvedWaitMs += kRecordPollMs;
+                if (!warnedStarved_.load() && starvedWaitMs >= kStarvedWarnAfterMs)
+                {
+                    warnedStarved_.store(true);
+                    std::cout << "play: message queue starved, messages will be delayed. "
+                                 "Consider increasing the --read-ahead-queue-size option"
+                              << std::endl;
+                }
             }
             if (items_.empty())
             {
@@ -2565,6 +2583,8 @@ public:
 
 private:
     StopPredicate stopped_;
+    size_t queueSize_ = 0;                    // 背压边界(构造注入,>=1 由入口校验保证)
+    std::atomic<bool> warnedStarved_{false};  // starved 告警一次性标志
     std::mutex mtx_;
     std::condition_variable cv_;
     std::deque<PlayMsg> items_;
@@ -2574,7 +2594,7 @@ private:
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
         std::string* error, double playbackRate, const std::vector<std::string>& topics,
         bool loop, double startOffset, double delay, int64_t waitForAllAckedMs,
-        const std::vector<std::string>& topicRemaps)
+        const std::vector<std::string>& topicRemaps, size_t readAheadQueueSize)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2643,6 +2663,13 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         remapRules.emplace_back(oldTopic, rule.substr(sep + 2));
     }
 
+    // 预读队列深度入参校验（同上快速返回路径，不建任何 DDS 实体）；0 容量队列 push
+    // 背压 items_.size() >= 0 恒真死锁必拦；负值已由 CLI 解析层拦截，size_t 层仅余 0
+    if (readAheadQueueSize < 1)
+    {
+        return fail("invalid read-ahead queue size");
+    }
+
     // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
     const std::filesystem::path dirPath(bagDir);
     std::error_code ec;
@@ -2701,12 +2728,13 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
             {
                 return fail("topic [" + pt.topic + "] invalid qos string [" + pt.qos + "]");
             }
-            // history 与 resource 显式对齐设预读队列深度:history 为本地行为不参与匹配,
-            // 设大支持 TRANSIENT_LOCAL 订阅端匹配建立后 latched 补发;FastDDS 默认
-            // max_samples_per_instance=100 会触发 QoS 一致性检查拒绝,不依赖默认值
-            pt.qosCfg.history().depth = kPlayReadAheadQueueSize;
-            pt.qosCfg.resource_limits().max_samples_per_instance = kPlayReadAheadQueueSize;
-            pt.qosCfg.resource_limits().max_samples = kPlayReadAheadQueueSize;
+            // history 与 resource 显式对齐设 kPlayWriterHistorySize:history 为本地行为
+            // 不参与匹配,设大支持 TRANSIENT_LOCAL 订阅端匹配建立后 latched 补发;FastDDS
+            // 默认 max_samples_per_instance=100 会触发 QoS 一致性检查拒绝,不依赖默认值;
+            // 独立常量不随 --read-ahead-queue-size 联动(该参数按参考实现语义仅作用读侧)
+            pt.qosCfg.history().depth = kPlayWriterHistorySize;
+            pt.qosCfg.resource_limits().max_samples_per_instance = kPlayWriterHistorySize;
+            pt.qosCfg.resource_limits().max_samples = kPlayWriterHistorySize;
             playTopics.push_back(std::move(pt));
         }
     }
@@ -2846,7 +2874,7 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         return yomk::g_bagPlayStop.load(std::memory_order_relaxed) ||
                localStop.load(std::memory_order_relaxed);
     };
-    PlayQueue queue(stopped);
+    PlayQueue queue(stopped, readAheadQueueSize);
 
     // topic → playTopics 下标(读线程清单过滤与播放线程配置查表共用)
     std::map<std::string, std::size_t> topicIndex;

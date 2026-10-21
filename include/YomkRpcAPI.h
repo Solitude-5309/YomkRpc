@@ -324,13 +324,17 @@
 // old 经发布实体命名层精确比较（无通配），QoS/类型按 bag 快照照旧，--topics 过滤在
 // 读取层按原名先过滤后改名；old 不在 bag 清单则规则静默无效（对齐 ros2 rcl remap
 // 语义），空=不重映射恒等现行为）。
+// readAheadQueueSize 预读内存队列深度（对齐 ros2 --read-ahead-queue-size N "size of
+// message queue rosbag tries to hold in memory to help deterministic playback"：读侧
+// 吸收磁盘 IO 抖动保证确定性回放，大→占内存但防播放延迟；<1 报 "invalid read-ahead
+// queue size" 快速返回；发布端 history 上限为独立常量不随其联动）。
 // 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
 // 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs, topicRemaps) \
+#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs, topicRemaps, readAheadQueueSize) \
     YOMK_REQUEST("/YomkRpcBagService/bag_play", \
-        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs), (topicRemaps)}))
+        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs), (topicRemaps), (readAheadQueueSize)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

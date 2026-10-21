@@ -101,6 +101,13 @@
  *      （缺 ':=' → invalid remap rule、old 重复 → duplicate remap rule，均 false +
  *      stats 清空，对齐 P12.3 形态）；P14.5 old 不在 bag 静默无效（规则不命中即无
  *      效果——正常播毕、原名照常 +20，对齐 ros2 rcl remap 语义）。
+ *   P15 预读队列深度（--read-ahead-queue-size，对齐 ros2 语义 "size of message queue
+ *      rosbag tries to hold in memory to help deterministic playback"——读侧 PlayQueue
+ *      背压边界，大→占内存但防播放延迟；writer QoS 独立常量不联动）：P15.1 小深度
+ *      守恒（queue=1 读播交替极端形态，双 RELIABLE,TL reader 各精确 +20，stats 双行
+ *      topic/count/bytes 全精确）；P15.2 大深度守恒（queue=10000 ≥整场 40 零背压，
+ *      各精确 +20，stats 全精确）；P15.3 零值拒播（0 容量队列 push 背压恒真死锁必拦
+ *      → false + invalid read-ahead queue size + stats 清空，对齐 P12.3 形态）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -432,9 +439,10 @@ namespace
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
     // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false、startOffsetSec
-    // 缺省 0.0、delaySec 缺省 0.0、waitAckedMs 缺省 -1 透传节点层入口——P7 速率/P8 过滤/
-    // P10 循环/P11 偏移/P12 延迟/P13 退出确认等待/P14 重映射用例经尾参传入；topics/
-    // topicRemaps 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
+    // 缺省 0.0、delaySec 缺省 0.0、waitAckedMs 缺省 -1、readAheadQueueSize 缺省 1000
+    // 透传节点层入口——P7 速率/P8 过滤/P10 循环/P11 偏移/P12 延迟/P13 退出确认等待/
+    // P14 重映射/P15 队列深度用例经尾参传入；topics/topicRemaps/readAheadQueueSize
+    // 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
@@ -442,13 +450,15 @@ namespace
                                 const std::vector<std::string> &topics = {},
                                 bool loop = false, double startOffsetSec = 0.0,
                                 double delaySec = 0.0, int64_t waitAckedMs = -1,
-                                const std::vector<std::string> &topicRemaps = {})
+                                const std::vector<std::string> &topicRemaps = {},
+                                size_t readAheadQueueSize = 1000)
     {
         return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
-                            loop, startOffsetSec, delaySec, waitAckedMs, topicRemaps]()
+                            loop, startOffsetSec, delaySec, waitAckedMs, topicRemaps,
+                            readAheadQueueSize]()
         {
             ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec,
-                           delaySec, waitAckedMs, topicRemaps);
+                           delaySec, waitAckedMs, topicRemaps, readAheadQueueSize);
             done.store(true);
         });
     }
@@ -1480,6 +1490,60 @@ int main()
     CHECK(p8aListen.count.load() == p8aBase145 + 20 &&
               p8bListen.count.load() == p8bBase145 + 20,
           "P14.5 双 reader 各 +20（数据照常发原名）");
+
+    // ---- P15：--read-ahead-queue-size 预读队列深度（库层形态，对齐 ros2 语义 "size of
+    // message queue rosbag tries to hold in memory to help deterministic playback"：
+    // 读侧 PlayQueue 背压边界，大→占内存但防播放延迟；writer QoS 独立常量不联动） ----
+    // P15.1 小深度守恒：queue=1 读播交替极端形态（每入队 1 条即被取出），双 RELIABLE,TL
+    // reader 各精确 +20；stats 双行 topic/count/bytes 全精确（深度不影响守恒）
+    const auto p8aBase151 = p8aListen.count.load();
+    const auto p8bBase151 = p8bListen.count.load();
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p151Stats;
+    std::string p151Error;
+    std::atomic<bool> p151Done{false};
+    bool p151Ok = false;
+    std::thread p151Thread = startPlayThread(node, kP8Bag, p151Stats, p151Error, p151Ok,
+        p151Done, 1.0, {}, false, 0.0, 0.0, -1, {}, 1);
+    joinPlay(p151Thread, p151Done);
+    CHECK(p151Ok, "P15.1 queue=1 小深度 → ok=true 正常播毕");
+    CHECK(p151Stats.size() == 2 && p151Stats[0].topic == "/rt/p8a" &&
+              p151Stats[0].count == 20 && p151Stats[0].bytes == 20 * kPayloadSize &&
+              p151Stats[1].topic == "/rt/p8b" && p151Stats[1].count == 20 &&
+              p151Stats[1].bytes == 20 * kPayloadSize,
+          "P15.1 stats 双行 20 条×5B 全精确（小深度零丢失零重复）");
+    CHECK(p8aListen.count.load() == p8aBase151 + 20 &&
+              p8bListen.count.load() == p8bBase151 + 20,
+          "P15.1 双 RELIABLE,TL reader 各精确 +20（读播交替极端形态守恒）");
+
+    // P15.2 大深度守恒：queue=10000 ≥整场 40 条（零背压形态，读侧全速入队），各精确
+    // +20；stats 全精确——深度上界不改变守恒
+    const auto p8aBase152 = p8aListen.count.load();
+    const auto p8bBase152 = p8bListen.count.load();
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p152Stats;
+    std::string p152Error;
+    std::atomic<bool> p152Done{false};
+    bool p152Ok = false;
+    std::thread p152Thread = startPlayThread(node, kP8Bag, p152Stats, p152Error, p152Ok,
+        p152Done, 1.0, {}, false, 0.0, 0.0, -1, {}, 10000);
+    joinPlay(p152Thread, p152Done);
+    CHECK(p152Ok, "P15.2 queue=10000 大深度 → ok=true 正常播毕");
+    CHECK(p152Stats.size() == 2 && p152Stats[0].count == 20 && p152Stats[1].count == 20,
+          "P15.2 stats 双行各 20 精确（零背压形态守恒）");
+    CHECK(p8aListen.count.load() == p8aBase152 + 20 &&
+              p8bListen.count.load() == p8bBase152 + 20,
+          "P15.2 双 reader 各精确 +20（大深度零背压守恒）");
+
+    // P15.3 零值拒播：0 容量队列 push 背压恒真死锁必拦（入口校验快速返回不建任何
+    // DDS 实体），stats 清空——CLI 三段校验的节点层兑底（对齐 P12.3 同步快速失败形态）
+    std::vector<FastDDSBagNode::BagTopicStat> p153Stats;
+    std::string p153Error;
+    p153Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约（失败=未播放）
+    CHECK(!node.play(kP8Bag, p153Stats, &p153Error, 1.0, {}, false, 0.0, 0.0, -1, {}, 0) &&
+              p153Error.find("invalid read-ahead queue size") != std::string::npos,
+          "P15.3 queue=0 启动 → false + invalid read-ahead queue size");
+    CHECK(p153Stats.empty(), "P15.3 stats 清空（失败即未播放）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

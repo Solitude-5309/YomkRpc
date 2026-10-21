@@ -166,6 +166,11 @@ struct DDSBagConvert
                                       // 对象序列，每条目独立一组输出参数）
 };
 
+// bag play 预读内存队列深度（--read-ahead-queue-size N，对齐 ros2 同名选项：读侧吸收
+// 磁盘 IO 抖动保证确定性回放，大→占内存但防播放延迟；<1 拒播，writer QoS 不随其联动；
+// 缺省对齐参考实现同款默认 1000）
+constexpr size_t kBagPlayReadAheadQueueSize = 1000;
+
 // bag_play 请求负载。
 struct DDSBagPlay
 {
@@ -190,6 +195,8 @@ struct DDSBagPlay
                                            // --remap old:=new ...：发布主题名精确映射，QoS/类型
                                            // 按 bag 快照照旧，--topics 过滤按原名；尾部缺省字段，
                                            // 旧调用方零改动）
+    size_t readAheadQueueSize = kBagPlayReadAheadQueueSize;  // 预读内存队列深度（尾部缺省
+                                           // 字段，旧调用方零改动；深度语义见常量注释）
 };
 
 // clang-format off

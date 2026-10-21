@@ -26,7 +26,8 @@
  *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
  *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]
  *           [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>]
- *           [--wait-for-all-acked MS] [--remap old:=new ...] <bag-path>
+ *           [--wait-for-all-acked MS] [--remap old:=new ...]
+ *           [--read-ahead-queue-size N] <bag-path>
  *           交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，+/- 调节回放
  *           速率（±10%），Ctrl+C 停止
  *   yomkrpc -h | --help
@@ -61,6 +62,7 @@
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 -d 3   # 开播前先等 3 秒，等订阅端就绪
  *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --wait-for-all-acked 0   # 播毕等订阅端确认收齐再退出
  *   yomkrpc bag play bag_in --remap /chatter:=hello_world   # 旧数据喂新主题名
+ *   yomkrpc bag play bag_in --read-ahead-queue-size 5000   # 加大预读队列防 IO 抖动致播放延迟
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
  * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
@@ -194,7 +196,8 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>\n"
           "  yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]\n"
           "          [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>]\n"
-          "          [--wait-for-all-acked MS] [--remap old:=new ...] <bag-path>\n"
+          "          [--wait-for-all-acked MS] [--remap old:=new ...]\n"
+          "          [--read-ahead-queue-size N] <bag-path>\n"
                     "          交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，\n"
           "          +/- 调节回放速率（±10% 步进），Ctrl+C 停止\n"
           "  yomkrpc -h | --help\n"
@@ -242,6 +245,10 @@ static void printUsage(std::ostream &os)
           "                      里 old 主题的数据发到 new 主题——发布主题名精确匹配（无通配），\n"
           "                      old 不在 bag 则规则静默无效；格式须为 old:=new（两侧非空，恒等\n"
           "                      允许），old 重复报错退出\n"
+          "  --read-ahead-queue-size N\n"
+          "                      预读内存队列深度（仅 bag play 生效，对齐 ros2 同名选项）：读侧\n"
+          "                      吸收磁盘 IO 抖动保证确定性回放，大→占内存但防播放延迟；\n"
+          "                      缺省 1000，须为 >=1 的整数，0/负值报错退出\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -607,6 +614,10 @@ static std::string formatRate(double rate)
 // 发布主题名精确匹配映射——bag 里 old 主题的数据发到 new 主题（旧数据喂新主题名的
 // 测试注入场景），透传 writer 本按需创建改名零额外成本；回显附 ", remap=<规则>" 后缀
 // （仅显式传参才显示）；空=不重映射恒等现行为；
+// playReadAheadQueueSize 预读内存队列深度（--read-ahead-queue-size，对齐 ros2 同名
+// 选项）：读侧吸收磁盘 IO 抖动保证确定性回放，大→占内存但防播放延迟；哨兵 -1=未
+// 显式传参取缺省 1000，<1 在主解析层报错退出；回显附 ", queue=<N>" 后缀（仅显式
+// 传参才显示）；
 // tty 下额外起键盘监听线程：SPACE 从暂停态开始回放、p 暂停、r 继续（与 record 键位
 // 一致）、+/- 调节回放速率（±10% 步进，经 bagPlaySetRate 操作 yomk::g_bagPlayRate
 // 原子，对齐 ros2 Increase/Decrease Rate 10% 键位语义），Ctrl+C 经 yomk::bagPlayStop
@@ -614,7 +625,7 @@ static std::string formatRate(double rate)
 static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playbackRate,
         const std::vector<std::string> &topics, bool startPaused, bool loop,
         double startOffsetSec, double playDelaySec, int64_t playWaitAckedMs,
-        const std::vector<std::string> &playTopicRemaps)
+        const std::vector<std::string> &playTopicRemaps, long long playReadAheadQueueSize)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcBagService);
@@ -675,13 +686,19 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
             remapNote += playTopicRemaps[ri];
         }
     }
+    // 队列深度显式传参时附 queue=<N>（--read-ahead-queue-size 的可见性；-1 哨兵不显示）
+    std::string queueNote;
+    if (playReadAheadQueueSize >= 0)
+    {
+        queueNote = ", queue=" + std::to_string(playReadAheadQueueSize);
+    }
     const char *startSuffix = startPaused
         ? ", started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop"
         : ", press p to pause, r to resume, +/- rate, Ctrl+C to stop";
     const char *loopNote = loop ? ", looping" : "";
     YOMK_INFO_TAG("yomkrpc", "replaying bag [", bagDir, "] on domain ",
                   std::to_string(domainId), rateNote, offsetNote, delayNote, ackNote,
-                  remapNote, loopNote, startSuffix);
+                  remapNote, queueNote, loopNote, startSuffix);
 
     // 3. 键盘监听线程（tty 下生效）：SPACE=start（仅暂停态），p=pause（仅运行态），
     //    r=resume（仅暂停态，与 record 键位一致），+/-=rate ±10%，Ctrl+C 退出
@@ -756,9 +773,12 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     }).detach();
 
     // 4. 长驻阻塞：预扫、读播解耦与收尾实体清理都在服务端完成，返回即回放结束；
-    //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出
+    //    开播回显（replaying topic=... 逐主题行与 bag 元信息行）由节点层直接输出；
+    //    哨兵换算：-1（未显式传参）归一为缺省 1000 后透传宏第九参
+    const size_t queueSizeArg = playReadAheadQueueSize >= 0
+        ? static_cast<size_t>(playReadAheadQueueSize) : 1000;
     resp = YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffsetSec,
-                            playDelaySec, playWaitAckedMs, playTopicRemaps);
+                            playDelaySec, playWaitAckedMs, playTopicRemaps, queueSizeArg);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "bag play failed: ", resp.m_msg);
@@ -1750,6 +1770,8 @@ int main(int argc, char *argv[])
     double playDelaySec = 0.0;  // 开播延迟秒（-d/--delay；仅 bag play 生效，>0 支持小数）
     int64_t playWaitAckedMs = -1;  // 退出确认等待毫秒（--wait-for-all-acked；仅 bag play
                                    // 生效，-1 缺省不等待，0=永等，>0 超时毫秒）
+    long long playReadAheadQueueSize = -1;  // 预读队列深度（--read-ahead-queue-size；仅
+                                            // bag play 生效，-1 哨兵=未显式传参取缺省 1000）
     uint64_t maxBagSize = 0;  // 单分片最大字节数（-b/--max-bag-size；仅 bag record 生效，0=不分片）
     uint64_t maxBagDurationSec = 0;  // 单分片最大时长秒（--max-bag-duration；仅 bag record，0=不分片）
     uint64_t maxCacheSize = 100 * 1024 * 1024;  // 写缓存双缓冲字节数（-c/--max-cache-size；仅
@@ -2114,6 +2136,36 @@ int main(int argc, char *argv[])
             playWaitAckedMs = value;
             continue;
         }
+        if (arg == "--read-ahead-queue-size")
+        {
+            // 长名全局唯一无语境分流（对齐 --wait-for-all-acked 先例：仅 bag play 消费，
+            // 其余语境解析后闲置）；队列深度 >=1，0/负值报错退出（0 容量队列节点层
+            // push 背压恒真死锁必拦）
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少队列深度参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            char *end = nullptr;
+            const long long value = std::strtoll(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0')
+            {
+                std::cerr << "yomkrpc: 非法队列深度参数 \"" << argv[i]
+                          << "\"（须为 >=1 的整数）\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (value < 1)
+            {
+                // 文案对齐 --wait-for-all-acked valid range 形态
+                std::cerr << "yomkrpc: " << value
+                          << " is not in the valid range (>= 1)\n";
+                return 2;
+            }
+            playReadAheadQueueSize = value;
+            continue;
+        }
         if ((arg == "--remap" || arg == "-m") &&
             !(pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play"))
         {
@@ -2298,7 +2350,8 @@ int main(int argc, char *argv[])
     if (pos.size() == 3 && pos[0] == "bag" && pos[1] == "play" && !pos[2].empty())
     {
         return runBagPlay(domainId, pos[2], playbackRate, playTopics, startPaused, playLoop,
-                          startOffsetSec, playDelaySec, playWaitAckedMs, playTopicRemaps);
+                          startOffsetSec, playDelaySec, playWaitAckedMs, playTopicRemaps,
+                          playReadAheadQueueSize);
     }
     if (pos.size() == 2 && pos[0] == "bag" && pos[1] == "convert")
     {
