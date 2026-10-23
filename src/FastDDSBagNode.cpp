@@ -34,7 +34,9 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <random>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -2509,6 +2511,81 @@ struct PlayTopic
     DataWriterQos qosCfg;
 };
 
+// QoS 覆盖文件解析产物(单主题;字段可独立给——只覆盖给定档,未给档保持快照恢复值)
+struct PlayQosOverride
+{
+    std::optional<ReliabilityQosPolicyKind> reliability;
+    std::optional<DurabilityQosPolicyKind> durability;
+};
+
+// 解析 QoS 覆盖文件(JSON:顶层键=主题名 → 值={reliability, durability} 两枚枚举名对象,
+// 与 bag 快照串同款大写 DDS 标准拼写、复用同款解析函数;未知字段键忽略,非法枚举值/值非
+// string 报错——失败即整体拒播不静默回退,QoS 覆盖是发布正确性的一部分;主题命中判定
+// 留给预扫应用段静默处理——文件里含不在 bag 清单的主题键不算错误)。err 回填失败原因
+// 供调用方报错,成功返回 true 且 out 填充解析产物
+bool loadPlayQosOverrides(const std::string& path,
+    std::map<std::string, PlayQosOverride>& out, std::string& err)
+{
+    std::ifstream in(path);
+    if (!in)
+    {
+        err = "open qos overrides file [" + path + "] failed";
+        return false;
+    }
+    nlohmann::json root;
+    try
+    {
+        in >> root;
+    }
+    catch (const nlohmann::json::exception& e)
+    {
+        err = "parse qos overrides file [" + path + "] failed: " + e.what();
+        return false;
+    }
+    if (!root.is_object())
+    {
+        err = "invalid qos overrides file [" + path + "]: top level must be an object";
+        return false;
+    }
+    for (auto it = root.begin(); it != root.end(); ++it)
+    {
+        if (!it.value().is_object())
+        {
+            err = "topic [" + it.key() + "] qos override must be an object";
+            return false;
+        }
+        PlayQosOverride ovr;
+        const auto relIt = it.value().find("reliability");
+        if (relIt != it.value().end())
+        {
+            const std::string val =
+                relIt->is_string() ? relIt->get<std::string>() : relIt->dump();
+            ReliabilityQosPolicyKind relKind{};
+            if (!parseReliabilityKindName(val, relKind))
+            {
+                err = "topic [" + it.key() + "] invalid qos string [" + val + "]";
+                return false;
+            }
+            ovr.reliability = relKind;
+        }
+        const auto durIt = it.value().find("durability");
+        if (durIt != it.value().end())
+        {
+            const std::string val =
+                durIt->is_string() ? durIt->get<std::string>() : durIt->dump();
+            DurabilityQosPolicyKind durKind{};
+            if (!parseDurabilityKindName(val, durKind))
+            {
+                err = "topic [" + it.key() + "] invalid qos string [" + val + "]";
+                return false;
+            }
+            ovr.durability = durKind;
+        }
+        out[it.key()] = ovr;  // PlayQosOverride trivially-copyable，拷贝即无开销
+    }
+    return true;
+}
+
 // 发布实体登记项(writer 按需创建;停止序列 delete_datawriter → delete_topic;reliable
 // 供退出确认等待筛 RELIABLE writer——BEST_EFFORT 不参与 ackNack 直接跳过)
 struct PlayWriterEntry
@@ -2594,7 +2671,8 @@ private:
 bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
         std::string* error, double playbackRate, const std::vector<std::string>& topics,
         bool loop, double startOffset, double delay, int64_t waitForAllAckedMs,
-        const std::vector<std::string>& topicRemaps, size_t readAheadQueueSize)
+        const std::vector<std::string>& topicRemaps, size_t readAheadQueueSize,
+        const std::string& qosOverridesPath)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto fail = [&error](const std::string& msg)
@@ -2670,6 +2748,18 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
         return fail("invalid read-ahead queue size");
     }
 
+    // QoS 覆盖文件加载解析（同上快速返回路径，不建任何 DDS 实体；文件级校验先于 bag
+    // 触达——路径打不开/格式非法/枚举非法立即拒播）；空=缺省不加载恒等现行为
+    std::map<std::string, PlayQosOverride> qosOverrides;
+    if (!qosOverridesPath.empty())
+    {
+        std::string overrideErr;
+        if (!loadPlayQosOverrides(qosOverridesPath, qosOverrides, overrideErr))
+        {
+            return fail(overrideErr);
+        }
+    }
+
     // ---- ①预扫(失败即整体返回 false,不建任何 DDS 实体) ----
     const std::filesystem::path dirPath(bagDir);
     std::error_code ec;
@@ -2727,6 +2817,24 @@ bool FastDDSBagNode::play(const std::string& bagDir, std::vector<BagTopicStat>& 
                 !parseDurabilityKindName(pt.qos.substr(comma + 1), pt.qosCfg.durability().kind))
             {
                 return fail("topic [" + pt.topic + "] invalid qos string [" + pt.qos + "]");
+            }
+            // QoS 覆盖文件命中(三档优先级最高档:文件 > 快照 > 回退——回退组合已在上方
+            // qos 空串时回填快照串,此处统一以生效快照恢复值为起点覆盖);只覆盖文件给定
+            // 的档;命中后回填 pt.qos 保 replaying 行与实际发布一致;键为 bag 原名与
+            // --remap 正交,不命中键静默无效(对齐 remap 先例)
+            const auto ovrIt = qosOverrides.find(pt.topic);
+            if (ovrIt != qosOverrides.end())
+            {
+                if (ovrIt->second.reliability.has_value())
+                {
+                    pt.qosCfg.reliability().kind = *ovrIt->second.reliability;
+                }
+                if (ovrIt->second.durability.has_value())
+                {
+                    pt.qosCfg.durability().kind = *ovrIt->second.durability;
+                }
+                pt.qos = std::string(reliabilityKindName(pt.qosCfg.reliability().kind)) + "," +
+                         durabilityKindName(pt.qosCfg.durability().kind);
             }
             // history 与 resource 显式对齐设 kPlayWriterHistorySize:history 为本地行为
             // 不参与匹配,设大支持 TRANSIENT_LOCAL 订阅端匹配建立后 latched 补发;FastDDS

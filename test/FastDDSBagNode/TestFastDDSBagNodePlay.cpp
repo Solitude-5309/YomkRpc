@@ -108,6 +108,15 @@
  *      topic/count/bytes 全精确）；P15.2 大深度守恒（queue=10000 ≥整场 40 零背压，
  *      各精确 +20，stats 全精确）；P15.3 零值拒播（0 容量队列 push 背压恒真死锁必拦
  *      → false + invalid read-ahead queue size + stats 清空，对齐 P12.3 形态）。
+ *   P16 QoS 覆盖文件（--qos-profile-overrides-path，对齐 ros2 同名选项语义，本仓
+ *      YAML 换 JSON：顶层键=bag 原主题名，值={reliability, durability} 枚举名可独立
+ *      给——文件命中 > bag 内快照 > 旧 bag 回退三档优先级最高档）：P16.1 reliability
+ *      覆盖生效（p8a 覆盖 BEST_EFFORT+VOLATILE——RELIABLE,TL reader 匹配不建立收 0、
+ *      未覆盖 p8b 照常 20，反向钉死覆盖生效）；P16.2 durability 覆盖+未知键忽略+
+ *      不在清单静默（p8b 覆盖 VOLATILE——TL reader 匹配不建立收 0；p8a 恒等覆盖+
+ *      未知字段键忽略+absent 主题键静默无效——照常 20）；P16.3 错误路径三连（非法
+ *      枚举 → topic invalid qos string、文件不存在 → open failed、坏 JSON → parse
+ *      failed，均 false + stats 清空，对齐 P12.3 形态）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -439,10 +448,11 @@ namespace
 
     // play 长驻阻塞线程启动（主线程负责等待收数/停止置位；ok/done 为线程产物，join 后读；
     // playbackRate 缺省 1.0、topics 缺省空（不过滤）、loop 缺省 false、startOffsetSec
-    // 缺省 0.0、delaySec 缺省 0.0、waitAckedMs 缺省 -1、readAheadQueueSize 缺省 1000
-    // 透传节点层入口——P7 速率/P8 过滤/P10 循环/P11 偏移/P12 延迟/P13 退出确认等待/
-    // P14 重映射/P15 队列深度用例经尾参传入；topics/topicRemaps/readAheadQueueSize
-    // 按值捕获：调用点 {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
+    // 缺省 0.0、delaySec 缺省 0.0、waitAckedMs 缺省 -1、readAheadQueueSize 缺省 1000、
+    // qosOverridesPath 缺省空（不加载覆盖文件恒等）透传节点层入口——P7 速率/P8 过滤/
+    // P10 循环/P11 偏移/P12 延迟/P13 退出确认等待/P14 重映射/P15 队列深度/P16 QoS
+    // 覆盖用例经尾参传入；topics/topicRemaps/qosOverridesPath 按值捕获：调用点
+    // {"..."} 初始化列表临时在语句尾销毁，引用捕获悬垂）
     std::thread startPlayThread(FastDDSBagNode &node, const std::string &bagDir,
                                 std::vector<FastDDSBagNode::BagTopicStat> &stats,
                                 std::string &error, bool &ok, std::atomic<bool> &done,
@@ -451,14 +461,16 @@ namespace
                                 bool loop = false, double startOffsetSec = 0.0,
                                 double delaySec = 0.0, int64_t waitAckedMs = -1,
                                 const std::vector<std::string> &topicRemaps = {},
-                                size_t readAheadQueueSize = 1000)
+                                size_t readAheadQueueSize = 1000,
+                                const std::string &qosOverridesPath = {})
     {
         return std::thread([&node, &bagDir, &stats, &error, &ok, &done, playbackRate, topics,
                             loop, startOffsetSec, delaySec, waitAckedMs, topicRemaps,
-                            readAheadQueueSize]()
+                            readAheadQueueSize, qosOverridesPath]()
         {
             ok = node.play(bagDir, stats, &error, playbackRate, topics, loop, startOffsetSec,
-                           delaySec, waitAckedMs, topicRemaps, readAheadQueueSize);
+                           delaySec, waitAckedMs, topicRemaps, readAheadQueueSize,
+                           qosOverridesPath);
             done.store(true);
         });
     }
@@ -1544,6 +1556,112 @@ int main()
               p153Error.find("invalid read-ahead queue size") != std::string::npos,
           "P15.3 queue=0 启动 → false + invalid read-ahead queue size");
     CHECK(p153Stats.empty(), "P15.3 stats 清空（失败即未播放）");
+
+    // ---- P16：--qos-profile-overrides-path QoS 覆盖文件（对齐 ros2 同名选项语义，本仓
+    // YAML 换 JSON：顶层键=bag 原主题名，值={reliability, durability} 枚举名可独立给
+    // ——文件命中 > bag 内快照 > 旧 bag 回退三档优先级最高档；未知字段键忽略、非法枚
+    // 举值报错、不在 bag 清单的主题键静默无效）----
+    // P16.1 reliability 覆盖生效（对齐 P3b 反向钉死形态）：p8a 覆盖 BEST_EFFORT+
+    // VOLATILE → offer 降级致 RELIABLE,TL reader 匹配不建立收 0；未覆盖 p8b 照常收
+    // 满——覆盖只作用命中主题（复用 P8 双 reader 零新 bag）
+    {
+        const std::string qosFile1 = "play_p16_qos1.json";
+        std::ofstream out(qosFile1);
+        out << R"({"/rt/p8a": {"reliability": "BEST_EFFORT", "durability": "VOLATILE"}})";
+        out.close();
+        const auto p8aBase161 = p8aListen.count.load();
+        const auto p8bBase161 = p8bListen.count.load();
+        yomk::bagPlayReset();
+        std::vector<FastDDSBagNode::BagTopicStat> p161Stats;
+        std::string p161Error;
+        std::atomic<bool> p161Done{false};
+        bool p161Ok = false;
+        std::thread p161Thread = startPlayThread(node, kP8Bag, p161Stats, p161Error,
+            p161Ok, p161Done, 1.0, {}, false, 0.0, 0.0, -1, {}, 1000, qosFile1);
+        CHECK(waitForCount(p8bListen.count, p8bBase161 + 20),
+              "P16.1 未覆盖 p8b RELIABLE,TL reader 收满 +20（覆盖只作用命中主题）");
+        joinPlay(p161Thread, p161Done);
+        CHECK(p161Ok, "P16.1 覆盖文件加载生效 → ok=true 正常播毕");
+        CHECK(p161Stats.size() == 2 && p161Stats[0].count == 20 && p161Stats[1].count == 20,
+              "P16.1 stats 两行各 20（覆盖不改变统计口径）");
+        std::this_thread::sleep_for(std::chrono::seconds(2));  // 否定窗口（对齐 P3b）
+        CHECK(p8aListen.count.load() == p8aBase161,
+              "P16.1 p8a RELIABLE,TL reader 收 0（offer 降 BEST_EFFORT,VL 匹配不建立——覆盖生效实锤）");
+        std::filesystem::remove(qosFile1);
+    }
+
+    // P16.2 durability 覆盖+未知键忽略+不在清单静默：p8b 覆盖 durability=VOLATILE →
+    // offer 降级致 TL reader 匹配不建立收 0；p8a 恒等覆盖（reliability=RELIABLE）+
+    // 未知字段键 history 忽略 + absent 主题键静默无效 → 照常收满
+    {
+        const std::string qosFile2 = "play_p16_qos2.json";
+        std::ofstream out(qosFile2);
+        out << R"({"/rt/p8b": {"durability": "VOLATILE"},)"
+               R"( "/rt/p8a": {"history": "KEEP_LAST", "reliability": "RELIABLE"},)"
+               R"( "/rt/absent": {"reliability": "BEST_EFFORT"}})";
+        out.close();
+        const auto p8aBase162 = p8aListen.count.load();
+        const auto p8bBase162 = p8bListen.count.load();
+        yomk::bagPlayReset();
+        std::vector<FastDDSBagNode::BagTopicStat> p162Stats;
+        std::string p162Error;
+        std::atomic<bool> p162Done{false};
+        bool p162Ok = false;
+        std::thread p162Thread = startPlayThread(node, kP8Bag, p162Stats, p162Error,
+            p162Ok, p162Done, 1.0, {}, false, 0.0, 0.0, -1, {}, 1000, qosFile2);
+        CHECK(waitForCount(p8aListen.count, p8aBase162 + 20),
+              "P16.2 p8a 恒等覆盖+未知键忽略+不在清单静默 → RELIABLE,TL reader 收满 +20");
+        joinPlay(p162Thread, p162Done);
+        CHECK(p162Ok, "P16.2 覆盖文件加载生效 → ok=true 正常播毕");
+        CHECK(p162Stats.size() == 2 && p162Stats[0].count == 20 && p162Stats[1].count == 20,
+              "P16.2 stats 两行各 20（覆盖不改变统计口径）");
+        std::this_thread::sleep_for(std::chrono::seconds(2));  // 否定窗口（对齐 P3b）
+        CHECK(p8bListen.count.load() == p8bBase162,
+              "P16.2 p8b RELIABLE,TL reader 收 0（durability 覆盖 VOLATILE 降级匹配不建立）");
+        std::filesystem::remove(qosFile2);
+    }
+
+    // P16.3 错误路径三连（同步直调，对齐 P12.3/P15.3 快速失败形态）：文件级校验在
+    // 入口段完成（先于 bag 预扫触达），失败即拒播 + stats 清空
+    std::vector<FastDDSBagNode::BagTopicStat> p163Stats;
+    std::string p163Error;
+    p163Stats.emplace_back();  // 预置残留：验证失败路径 stats 清空契约
+    {
+        const std::string qosBadEnum = "play_p16_badenum.json";
+        std::ofstream out(qosBadEnum);
+        out << R"({"/rt/p8a": {"reliability": "RELIABL"}})";
+        out.close();
+        CHECK(!node.play(kP8Bag, p163Stats, &p163Error, 1.0, {}, false, 0.0, 0.0, -1,
+                  {}, 1000, qosBadEnum) &&
+                  p163Error.find("topic [/rt/p8a] invalid qos string [RELIABL]") !=
+                      std::string::npos &&
+                  p163Stats.empty(),
+              "P16.3a 非法枚举值 → false + topic invalid qos string + stats 清空");
+        std::filesystem::remove(qosBadEnum);
+    }
+    {
+        const std::string qosMissing = "play_p16_missing.json";
+        CHECK(!node.play(kP8Bag, p163Stats, &p163Error, 1.0, {}, false, 0.0, 0.0, -1,
+                  {}, 1000, qosMissing) &&
+                  p163Error.find(
+                      "open qos overrides file [play_p16_missing.json] failed") !=
+                      std::string::npos,
+              "P16.3b 文件不存在 → false + open qos overrides file failed");
+    }
+    {
+        const std::string qosBadJson = "play_p16_badjson.json";
+        std::ofstream out(qosBadJson);
+        out << "{not valid json";
+        out.close();
+        CHECK(!node.play(kP8Bag, p163Stats, &p163Error, 1.0, {}, false, 0.0, 0.0, -1,
+                  {}, 1000, qosBadJson) &&
+                  p163Error.find(
+                      "parse qos overrides file [play_p16_badjson.json] failed:") !=
+                      std::string::npos,
+              "P16.3c 坏 JSON → false + parse qos overrides file failed");
+        std::filesystem::remove(qosBadJson);
+    }
+    CHECK(p163Stats.empty(), "P16.3 stats 清空（失败即未播放）");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

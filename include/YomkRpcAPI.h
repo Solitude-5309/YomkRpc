@@ -328,13 +328,20 @@
 // message queue rosbag tries to hold in memory to help deterministic playback"：读侧
 // 吸收磁盘 IO 抖动保证确定性回放，大→占内存但防播放延迟；<1 报 "invalid read-ahead
 // queue size" 快速返回；发布端 history 上限为独立常量不随其联动）。
+// qosOverridesPath QoS 覆盖文件路径（对齐 ros2 --qos-profile-overrides-path "Path to a
+// yaml file defining overrides of the QoS profile for specific topics"——本仓 JSON 形态：
+// 键=bag 原主题名精确匹配（与 --remap 正交，remap 只改发布主题名），值={reliability,
+// durability} 两枚大写 DDS 标准拼写枚举名可独立给（只覆盖给定档，未给档保持 bag 快照
+// 恢复值）；未知字段键忽略，非法枚举值报 "invalid qos string" 拒播，不在 bag 的主题键
+// 静默无效（对齐 remap 先例）；三档优先级：文件命中 > bag 内 qos 快照 > 旧 bag 回退
+// RELIABLE+VOLATILE；空串=不加载恒等现行为）。
 // 须先创建 bag 节点（无 domainId 参数——节点模型先 YOMKRPC_BAG_NODE，同 DDSBagRecord
 // 裁定）；bagDir 相对/绝对路径均可，须含 metadata.json。
 // 成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节"统计。
 // 返回 YomkResponse。
-#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs, topicRemaps, readAheadQueueSize) \
+#define YOMKRPC_BAG_PLAY(bagDir, playbackRate, topics, loop, startOffset, delay, waitForAllAckedMs, topicRemaps, readAheadQueueSize, qosOverridesPath) \
     YOMK_REQUEST("/YomkRpcBagService/bag_play", \
-        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs), (topicRemaps), (readAheadQueueSize)}))
+        YomkMkPtr(DDSBagPlay, DDSBagPlay{(bagDir), (playbackRate), (topics), (loop), (startOffset), (delay), (waitForAllAckedMs), (topicRemaps), (readAheadQueueSize), (qosOverridesPath)}))
 
 // 退出录制：删除 bag 节点并销毁其全部 DDS 实体（未创建时返回错误）。返回 YomkResponse。
 #define YOMKRPC_BAG_DEL_NODE() YOMK_REQUEST("/YomkRpcBagService/delete_node", nullptr)

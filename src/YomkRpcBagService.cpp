@@ -273,7 +273,7 @@ YomkResponse YomkRpcBagService::bagPlay(YomkPkgPtr pkg)
     if (!node_->play(p->msg.bagDir, stats, &error, p->msg.playbackRate, p->msg.topics,
                          p->msg.loop, p->msg.startOffset, p->msg.delay,
                          p->msg.waitForAllAckedMs, p->msg.topicRemaps,
-                         p->msg.readAheadQueueSize))
+                         p->msg.readAheadQueueSize, p->msg.qosOverridesPath))
     {
         if (error.empty())
         {

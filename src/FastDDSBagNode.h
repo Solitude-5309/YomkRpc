@@ -187,13 +187,22 @@ public:
     // kPlayWriterHistorySize 不随其联动（按 ros2 语义该参数仅作用读侧内存队列）；队列空
     // 致播放持续等待时打一次性 starved 告警（对齐参考实现 "Message queue starved...");
     // 缺省 1000 恒等现行为
+    // qosOverridesPath QoS 覆盖文件路径（对齐 ros2 --qos-profile-overrides-path "Path to
+    // a yaml file defining overrides of the QoS profile for specific topics"）：JSON 形态
+    // 顶层键=bag 原主题名精确匹配（与 --remap 正交，remap 只改发布主题名），值={reliability,
+    // durability} 两枚大写 DDS 标准拼写枚举名对象可独立给（只覆盖给定档，未给档保持快照
+    // 恢复值）；未知字段键忽略，非法枚举值报 "invalid qos string" 拒播，不在 bag 清单的
+    // 主题键静默无效（对齐 remap 先例）；三档优先级：文件命中 > bag 内 qos 快照 > 旧 bag
+    // 回退 RELIABLE+VOLATILE；命中后回填生效口径（保 replaying 行与实际发布一致）；空串=
+    // 不加载恒等现行为
     bool play(const std::string& bagDir, std::vector<BagTopicStat>& stats,
             std::string* error = nullptr, double playbackRate = 1.0,
             const std::vector<std::string>& topics = {}, bool loop = false,
             double startOffset = 0.0, double delay = 0.0,
             int64_t waitForAllAckedMs = -1,
             const std::vector<std::string>& topicRemaps = {},
-            size_t readAheadQueueSize = kPlayReadAheadQueueSizeDefault);
+            size_t readAheadQueueSize = kPlayReadAheadQueueSizeDefault,
+            const std::string& qosOverridesPath = {});
     // 读 bag 目录 metadata.json 组装 info 文本（纯文件操作 DDS-free，不经节点实例；对齐参考
     // 实现 ros2 bag info 输出形态：首行空行、标签列宽 19、多主题/多分片续行缩进 19 空格、
     // Bag size 为目录递归总大小的人类可读换算、时间含 9 位纳秒小数）。Topic information 行

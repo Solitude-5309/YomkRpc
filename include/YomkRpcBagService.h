@@ -197,6 +197,9 @@ struct DDSBagPlay
                                            // 旧调用方零改动）
     size_t readAheadQueueSize = kBagPlayReadAheadQueueSize;  // 预读内存队列深度（尾部缺省
                                            // 字段，旧调用方零改动；深度语义见常量注释）
+    std::string qosOverridesPath;  // QoS 覆盖文件路径（JSON，键=bag 原主题名，值={reliability,
+                                   // durability} 枚举名可独立给——文件命中>快照>回退三档优先
+                                   // 级；空=缺省不加载恒等现行为；尾部缺省字段，旧调用方零改动）
 };
 
 // clang-format off
