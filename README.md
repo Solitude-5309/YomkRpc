@@ -1226,7 +1226,18 @@ yomkrpc bag play ./bag_2026-10-08_09-52-22            # 回放指定录制产物
                                            # tty 下播放中按 +/- 键 ±10% 动态调率
 ```
 
-开播回显与收尾统计（开播首行打印交互键提示——tty 下 SPACE 从暂停态开始、p 暂停、r 恢复、`+`/`-` ±10% 调率；`--start-paused` 启动时后缀为 `started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop`；`-l/--loop` 启动时后缀附 `, looping`；`--start-offset` 启动时后缀附 `, offset=<SEC>`（缺省 0 不显示，同倍率的 %g 风格去尾零——5 打作 5、2.5 打作 2.5）；`-d/--delay` 启动时后缀附 `, delay=<SEC>`（缺省 0 不显示，同 %g 风格去尾零）；`--wait-for-all-acked` 显式传参时后缀附 `, ack-wait=<MS>`（仅显式传参才显示含 0=永等）；`--remap` 显式传参时后缀附 `, remap=<old1>:=<new1>[,<old2>:=<new2>...]`（仅显式传参才显示，规则逗号拼接）；`--read-ahead-queue-size` 显式传参时后缀附 `, queue=<N>`（仅显式传参才显示）；`--qos-profile-overrides-path` 显式传参时后缀附 `, qos-override=<FILE>`（仅显式传参才显示），其后逐主题打印类型与恢复的 QoS 快照（`replaying topic=` 行主题名为 remap 后发布名）+ bag 元信息行；收尾按主题打印播出统计（topic 同为 remap 后新名））：
+上例 `qos.json` 文件内容——JSON 顶层键 = bag 内主题名（`bag info` 显示的原名，精确匹配，与 `--remap` 正交），值 = QoS 字段对象：仅 `{reliability, durability}` 两字段、可独立给（只覆盖给定档，未给的档保持快照恢复值）；枚举值为大写 DDS 标准拼写——reliability 取 `RELIABLE` / `BEST_EFFORT`，durability 取 `VOLATILE` / `TRANSIENT_LOCAL` / `TRANSIENT` / `PERSISTENT`：
+
+```json
+{
+  "/chatter": {"reliability": "BEST_EFFORT", "durability": "VOLATILE"},
+  "/battery": {"durability": "VOLATILE"}
+}
+```
+
+上例 `/battery` 只给 durability——reliability 保持 bag 快照恢复值；未知字段键忽略，不在 bag 清单的主题键静默无效，非法枚举值启动报 `topic [x] invalid qos string [y]` 整体拒播；覆盖为 `BEST_EFFORT` 后该主题对 RELIABLE 订阅端匹配不建立（收不到该主题数据，如需照常收数先核订阅端档位）；完整语义见下方行为说明。
+
+开播回显与收尾统计（开播首行打印交互键提示——tty 下 SPACE 从暂停态开始、p 暂停、r 恢复、`+`/`-` ±10% 调率；`--start-paused` 启动时后缀为 `started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop`；`-l/--loop` 启动时后缀附 `, looping`；`--start-offset` 启动时后缀附 `, offset=<SEC>`（缺省 0 不显示，同倍率的 %g 风格去尾零——5 打作 5、2.5 打作 2.5）；`-d/--delay` 启动时后缀附 `, delay=<SEC>`（缺省 0 不显示，同 %g 风格去尾零）；`--wait-for-all-acked` 显式传参时后缀附 `, ack-wait=<MS>`（仅显式传参才显示含 0=永等）；`--remap` 显式传参时后缀附 `, remap=<old1>:=<new1>[,<old2>:=<new2>...]`（仅显式传参才显示，规则逗号拼接）；`--read-ahead-queue-size` 显式传参时后缀附 `, queue=<N>`（仅显式传参才显示）；`--qos-profile-overrides-path` 显式传参时后缀附 `, qos-override=<FILE>`（仅显式传参才显示），其后逐主题打印类型与生效 QoS 串（快照恢复值经覆盖文件覆盖后的实际值，`replaying topic=` 行主题名为 remap 后发布名）+ bag 元信息行；收尾按主题打印播出统计（topic 同为 remap 后新名））：
 
 ```text
 replaying bag [ bag_in ] on domain 0 , rate=1 , started paused, press SPACE to start, p/r to pause/resume, +/- rate, Ctrl+C to stop   # --start-paused 启动行
