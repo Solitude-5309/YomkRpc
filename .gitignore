@@ -5,6 +5,7 @@ bin/
 compile_commands.json
 .vscode/
 .trae/
+.qoder/
 *~
 *.autosave
 *.a

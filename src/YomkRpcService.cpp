@@ -121,7 +121,7 @@ YomkResponse YomkRpcService::registerPubTopic(YomkPkgPtr pkg)
         delete static_cast<eprosima::fastdds::dds::TopicDataType*>(p->msg.type);
         return YomkResponse(YomkResponse::eNo, "node [" + p->msg.nodeName + "] not exists");
     }
-    if (!it->second->registerPubTopic(p->msg.topicName, p->msg.type))
+    if (!it->second->registerPubTopic(p->msg.topicName, p->msg.type, p->msg.qos))
     {
         YOMK_ERROR_TAG(
             "YomkRpcService::registerPubTopic",
@@ -149,7 +149,7 @@ YomkResponse YomkRpcService::registerSubTopic(YomkPkgPtr pkg)
         delete static_cast<eprosima::fastdds::dds::TopicDataType*>(p->msg.type);
         return YomkResponse(YomkResponse::eNo, "node [" + p->msg.nodeName + "] not exists");
     }
-    if (!it->second->registerSubTopic(p->msg.topicName, p->msg.type, p->msg.callback))
+    if (!it->second->registerSubTopic(p->msg.topicName, p->msg.type, p->msg.callback, p->msg.qos))
     {
         YOMK_ERROR_TAG(
             "YomkRpcService::registerSubTopic",

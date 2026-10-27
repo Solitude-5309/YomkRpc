@@ -63,6 +63,61 @@ inline uint32_t YomkRpcDefaultDomainId()
     return static_cast<uint32_t>(n);
 }
 
+// ===== 端点 QoS 描述（公共头零 fastdds 依赖） =====
+
+// 端点 QoS 枚举：enum class 禁止隐式整型转换，用户只能取枚举项（裸数字编译期报错）；
+// Unset=0 为哨兵=未设置（默认构造即全哨兵，保持 Fast DDS 端点默认底座）。
+enum class DDSHistoryKind : uint8_t
+{
+    Unset = 0,
+    KEEP_LAST,
+    KEEP_ALL,
+};
+
+enum class DDSReliability : uint8_t
+{
+    Unset = 0,
+    RELIABLE,
+    BEST_EFFORT,
+};
+
+enum class DDSDurability : uint8_t
+{
+    Unset = 0,
+    TRANSIENT_LOCAL,
+    VOLATILE,
+};
+
+enum class DDSLiveliness : uint8_t
+{
+    Unset = 0,
+    AUTOMATIC,
+    MANUAL_BY_TOPIC,
+};
+
+// 端点 QoS 描述（writer/reader 通用）：未设置项（枚举 Unset / 数值 -1）保持 Fast DDS
+// 端点默认底座，非哨兵项逐项覆盖（与 rclcpp::QoS "底座+逐项覆盖"语义同构）。
+// 时间类 -1=未设置=底座默认 ∞，与 ROS2 默认 ∞ 等值。
+struct DDSQosProfile
+{
+    DDSHistoryKind historyKind = DDSHistoryKind::Unset;
+    int32_t depth = -1;              // KEEP_LAST 的 history depth；KEEP_ALL 时忽略
+    DDSReliability reliability = DDSReliability::Unset;
+    DDSDurability durability = DDSDurability::Unset;
+    DDSLiveliness liveliness = DDSLiveliness::Unset;
+    int64_t deadlineNs = -1;         // deadline 周期纳秒
+    int64_t lifespanNs = -1;         // 消息生存期纳秒（writer 侧策略，reader 翻译时忽略）
+    int64_t livelinessLeaseNs = -1;  // liveliness 租约纳秒
+
+    // ROS2 底座工厂（8 项全非哨兵 = 等价整包替换为 ROS2 底座）。分端点裁定依据
+    // requested≤offered 匹配方向：publisher RELIABLE offered 对任意 ROS2 侧 requested
+    // 可匹配；subscriber BEST_EFFORT requested 对任意 offered 可匹配（RELIABLE 版
+    // 订阅 BEST_EFFORT 话题不匹配收不到）。
+    static DDSQosProfile ros2DefaultPublisher();   // KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3
+    static DDSQosProfile ros2DefaultSubscriber();  // KEEP_LAST(10)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3
+    static DDSQosProfile ros2SensorData();         // KEEP_LAST(5)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3（两端通用）
+};
+
 // create_node 请求负载。
 struct DDSNode
 {
@@ -78,6 +133,8 @@ struct DDSTopic
     std::string nodeName;
     std::string topicName;
     void* type;  // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
+    // 端点 QoS 描述（缺省全哨兵=Fast DDS 默认底座，与既有三参聚合初始化调用兼容）
+    DDSQosProfile qos;
 };
 
 // register_sub_topic 请求负载。
@@ -87,6 +144,8 @@ struct DDSSubRequest
     std::string topicName;
     void* type;  // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
     DDSCallbackFunc callback;  // 收到消息时回调
+    // 端点 QoS 描述（缺省全哨兵=Fast DDS 默认底座，与既有四参聚合初始化调用兼容）
+    DDSQosProfile qos;
 };
 
 // publish 请求负载。

@@ -35,15 +35,20 @@
 
 // 在指定节点上注册发布主题。
 // type：消息类型实例（new XxxPubSubType()），所有权移交服务端——调用后 caller 不再持有/释放（无论成功或失败）。
-#define YOMKRPC_PUB_TOPIC(nodeName, topicName, type) \
-    YOMK_REQUEST("/YomkRpcService/register_pub_topic", YomkMkPtr(DDSTopic, DDSTopic{nodeName, topicName, type}))
+// qos（可缺省尾参）：端点 QoS 描述 DDSQosProfile（include/YomkRpcService.h）；缺省（不传）
+// 为全哨兵=保持 Fast DDS 端点默认底座（现状行为）；传 DDSQosProfile::ros2DefaultPublisher()
+// 即 ROS2 默认底座（RELIABLE+KEEP_LAST(10)+VOLATILE），也可在底座上逐项覆盖（如只设 depth）。
+#define YOMKRPC_PUB_TOPIC(nodeName, topicName, type, ...) \
+    YOMK_REQUEST("/YomkRpcService/register_pub_topic", YomkMkPtr(DDSTopic, DDSTopic{nodeName, topicName, type, ##__VA_ARGS__}))
 
 // 在指定节点上注册订阅主题。
 // type：同 YOMKRPC_PUB_TOPIC，所有权移交服务端；callback：std::function<void(const void*)>，每次收到消息时被调用。
-#define YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback) \
+// qos（可缺省尾参）：端点 QoS 描述 DDSQosProfile；缺省为全哨兵=现状行为；订阅端推荐
+// DDSQosProfile::ros2DefaultSubscriber()（BEST_EFFORT requested 对任意 offered 均可匹配）。
+#define YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback, ...) \
     YOMK_REQUEST(                                              \
         "/YomkRpcService/register_sub_topic",                  \
-        YomkMkPtr(DDSSubRequest, DDSSubRequest{nodeName, topicName, type, callback}))
+        YomkMkPtr(DDSSubRequest, DDSSubRequest{nodeName, topicName, type, callback, ##__VA_ARGS__}))
 
 // 向指定节点的已注册发布主题发送一条消息。
 // data：消息实例指针（&msg），借用（非所有权）——publish 同步写入，caller 保留并在调用后自行管理其生命周期。

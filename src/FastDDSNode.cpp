@@ -10,6 +10,12 @@ using namespace eprosima::fastdds::dds;
 
 namespace
 {
+// 纳秒每秒（Duration_t 秒/纳秒分解用）
+constexpr int64_t kNsPerSec = 1000000000LL;
+// ROS2 底座工厂的 history depth（rmw_qos_profile_default/sensor_data 规范值）
+constexpr int32_t kRos2DefaultDepth = 10;
+constexpr int32_t kRos2SensorDataDepth = 5;
+
 // registerSubTopic 异常安全守卫：栈展开时释放已建资源，防止泄漏。
 struct SubResGuard
 {
@@ -29,7 +35,130 @@ struct SubResGuard
         }
     }
 };
+
+// 纳秒转 Duration_t（sec, nsec 分解；调用方保证 ns >= 0）。
+Duration_t toDuration(int64_t ns)
+{
+    return Duration_t(static_cast<int32_t>(ns / kNsPerSec), static_cast<uint32_t>(ns % kNsPerSec));
+}
+
+// DDSQosProfile 翻译到 Fast DDS 端点 QoS：起点为调用方已拷贝的 *_QOS_DEFAULT 底座，
+// 非哨兵项（枚举非 Unset / 数值 >= 0）逐项覆盖，哨兵项保持底座默认（现状行为）；
+// 枚举到 policy 的映射在此显式完成（不做数值直译，公共头枚举与 Fast DDS 内部枚举解耦）。
+void toWriterQos(const DDSQosProfile& p, DataWriterQos& qos)
+{
+    if (p.historyKind != DDSHistoryKind::Unset)
+    {
+        qos.history().kind =
+            (p.historyKind == DDSHistoryKind::KEEP_LAST) ? KEEP_LAST_HISTORY_QOS : KEEP_ALL_HISTORY_QOS;
+    }
+    // depth 仅 KEEP_LAST 下有意义；KEEP_ALL 时忽略（对齐计划裁定）
+    if (p.depth >= 0 && p.historyKind == DDSHistoryKind::KEEP_LAST)
+    {
+        qos.history().depth = p.depth;
+    }
+    if (p.reliability != DDSReliability::Unset)
+    {
+        qos.reliability().kind =
+            (p.reliability == DDSReliability::RELIABLE) ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
+    }
+    if (p.durability != DDSDurability::Unset)
+    {
+        qos.durability().kind =
+            (p.durability == DDSDurability::TRANSIENT_LOCAL) ? TRANSIENT_LOCAL_DURABILITY_QOS : VOLATILE_DURABILITY_QOS;
+    }
+    if (p.liveliness != DDSLiveliness::Unset)
+    {
+        qos.liveliness().kind =
+            (p.liveliness == DDSLiveliness::AUTOMATIC) ? AUTOMATIC_LIVELINESS_QOS : MANUAL_BY_TOPIC_LIVELINESS_QOS;
+    }
+    if (p.deadlineNs >= 0)
+    {
+        qos.deadline().period = toDuration(p.deadlineNs);
+    }
+    if (p.lifespanNs >= 0)
+    {
+        qos.lifespan().duration = toDuration(p.lifespanNs);
+    }
+    if (p.livelinessLeaseNs >= 0)
+    {
+        qos.liveliness().lease_duration = toDuration(p.livelinessLeaseNs);
+    }
+}
+
+// reader 版：无 lifespan（writer 侧策略，reader 翻译时忽略），其余同构。
+void toReaderQos(const DDSQosProfile& p, DataReaderQos& qos)
+{
+    if (p.historyKind != DDSHistoryKind::Unset)
+    {
+        qos.history().kind =
+            (p.historyKind == DDSHistoryKind::KEEP_LAST) ? KEEP_LAST_HISTORY_QOS : KEEP_ALL_HISTORY_QOS;
+    }
+    if (p.depth >= 0 && p.historyKind == DDSHistoryKind::KEEP_LAST)
+    {
+        qos.history().depth = p.depth;
+    }
+    if (p.reliability != DDSReliability::Unset)
+    {
+        qos.reliability().kind =
+            (p.reliability == DDSReliability::RELIABLE) ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
+    }
+    if (p.durability != DDSDurability::Unset)
+    {
+        qos.durability().kind =
+            (p.durability == DDSDurability::TRANSIENT_LOCAL) ? TRANSIENT_LOCAL_DURABILITY_QOS : VOLATILE_DURABILITY_QOS;
+    }
+    if (p.liveliness != DDSLiveliness::Unset)
+    {
+        qos.liveliness().kind =
+            (p.liveliness == DDSLiveliness::AUTOMATIC) ? AUTOMATIC_LIVELINESS_QOS : MANUAL_BY_TOPIC_LIVELINESS_QOS;
+    }
+    if (p.deadlineNs >= 0)
+    {
+        qos.deadline().period = toDuration(p.deadlineNs);
+    }
+    if (p.livelinessLeaseNs >= 0)
+    {
+        qos.liveliness().lease_duration = toDuration(p.livelinessLeaseNs);
+    }
+}
 }  // namespace
+
+// ===== DDSQosProfile ROS2 底座工厂（8 项全非哨兵 = 等价整包替换为 ROS2 底座） =====
+// 分端点裁定依据 requested≤offered 匹配方向（见公共头注释）；时间三项保持 -1（底座 ∞，
+// 与 ROS2 默认 ∞ 等值）。
+DDSQosProfile DDSQosProfile::ros2DefaultPublisher()
+{
+    DDSQosProfile p;
+    p.historyKind = DDSHistoryKind::KEEP_LAST;
+    p.depth = kRos2DefaultDepth;
+    p.reliability = DDSReliability::RELIABLE;
+    p.durability = DDSDurability::VOLATILE;
+    p.liveliness = DDSLiveliness::AUTOMATIC;
+    return p;
+}
+
+DDSQosProfile DDSQosProfile::ros2DefaultSubscriber()
+{
+    DDSQosProfile p;
+    p.historyKind = DDSHistoryKind::KEEP_LAST;
+    p.depth = kRos2DefaultDepth;
+    p.reliability = DDSReliability::BEST_EFFORT;
+    p.durability = DDSDurability::VOLATILE;
+    p.liveliness = DDSLiveliness::AUTOMATIC;
+    return p;
+}
+
+DDSQosProfile DDSQosProfile::ros2SensorData()
+{
+    DDSQosProfile p;
+    p.historyKind = DDSHistoryKind::KEEP_LAST;
+    p.depth = kRos2SensorDataDepth;
+    p.reliability = DDSReliability::BEST_EFFORT;
+    p.durability = DDSDurability::VOLATILE;
+    p.liveliness = DDSLiveliness::AUTOMATIC;
+    return p;
+}
 
 class FastDDSNode::SubListener : public DataReaderListener
 {
@@ -200,7 +329,7 @@ Topic* FastDDSNode::getOrCreateTopic(const std::string& topicName, const std::st
 }
 
 // type 所有权无条件接管（失败路径亦 delete）；writer 创建失败回滚本次新建的主题。
-bool FastDDSNode::registerPubTopic(const std::string& topicName, void* type)
+bool FastDDSNode::registerPubTopic(const std::string& topicName, void* type, const DDSQosProfile& qos)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ == nullptr || publisher_ == nullptr || type == nullptr || pubTopics_.count(topicName) > 0)
@@ -221,7 +350,10 @@ bool FastDDSNode::registerPubTopic(const std::string& topicName, void* type)
         return false;
     }
 
-    info.writer = publisher_->create_datawriter(topic, DATAWRITER_QOS_DEFAULT);
+    // 端点 QoS：默认底座 + DDSQosProfile 非哨兵项逐项覆盖（全哨兵时翻译结果恒等现状）
+    DataWriterQos wqos = DATAWRITER_QOS_DEFAULT;
+    toWriterQos(qos, wqos);
+    info.writer = publisher_->create_datawriter(topic, wqos);
     if (info.writer == nullptr)
     {
         // 本次新创建的主题需回滚
@@ -251,7 +383,8 @@ bool FastDDSNode::registerPubTopic(const std::string& topicName, void* type)
 }
 
 // type 所有权无条件接管（含失败/异常路径，经 SubResGuard 与主题回滚释放）。
-bool FastDDSNode::registerSubTopic(const std::string& topicName, void* type, DataCallback callback)
+bool FastDDSNode::registerSubTopic(const std::string& topicName, void* type, DataCallback callback,
+    const DDSQosProfile& qos)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ == nullptr || subscriber_ == nullptr || type == nullptr || subTopics_.count(topicName) > 0)
@@ -293,7 +426,10 @@ bool FastDDSNode::registerSubTopic(const std::string& topicName, void* type, Dat
     info.data = data;
     info.listener = std::make_unique<SubListener>(data, std::move(callback));
 
-    info.reader = subscriber_->create_datareader(topic, DATAREADER_QOS_DEFAULT, info.listener.get());
+    // 端点 QoS：默认底座 + DDSQosProfile 非哨兵项逐项覆盖（全哨兵时翻译结果恒等现状）
+    DataReaderQos rqos = DATAREADER_QOS_DEFAULT;
+    toReaderQos(qos, rqos);
+    info.reader = subscriber_->create_datareader(topic, rqos, info.listener.get());
     if (info.reader == nullptr)
     {
         if (!topicExisted)

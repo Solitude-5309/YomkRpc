@@ -25,7 +25,8 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcService.h" // 服务 + DDSTopic/DDSSubRequest/DDSPublish + String + YOMK_* 宏
+#include "YomkRpcService.h" // 服务 + DDSQosProfile + DDSTopic/DDSSubRequest/DDSPublish + String + YOMK_* 宏
+#include "YomkRpcDebugService.h" // YomkRpcDebugService + DDSDebugNode/DDSDebugInfo（QoS-B4 读回链路）
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MString / MInt32 数据类
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType / MInt32PubSubType
@@ -251,6 +252,130 @@ namespace
         CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "ecb_node")).m_status == YomkResponse::eOk,
               "删除 ecb_node → eOk（空回调路径无崩溃/UAF，析构 reader 停止回调）");
     }
+
+    // ===== 闭环 1：端点 QoS 通道（DDSQosProfile → 翻译 → create_datawriter/reader） =====
+    // B1：ros2 底座工厂组合收发——writer RELIABLE offered /
+    //     reader BEST_EFFORT requested 可匹配，QoS 组合下端到端收发成功；
+    // B2：reliability 生效反证——writer 显式 BEST_EFFORT + reader 显式 RELIABLE
+    //     （requested > offered，DDS 不可匹配保证）→ 收 0 条；若翻译失效（QoS 未落
+    //     端点），reader 底座 BEST_EFFORT 将匹配收到 → CHECK 失败侦察；
+    // B4：debug 链路 QoS 直证——B2 的 writer（BEST_EFFORT+VOLATILE，与 writer 底座
+    //     RELIABLE+TRANSIENT_LOCAL 双双不同）经调试节点 topic info -v 从发现数据
+    //     读回断言两行 QoS，直证 profile 值落到端点；
+    // 全哨兵缺省兼容：既有 T8/e2e 等用例的三参/四参聚合初始化（不带尾参）即全哨兵路径。
+    void testQosProfile(YomkRpcService *svc, YomkRpcDebugService *svcDebug)
+    {
+        // B1：ros2 底座组合收发（invoke+四参/五参聚合尾参，与宏展开等价同链路）
+        CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN, "qos1_node")).m_status == YomkResponse::eOk,
+              "QoS 创建 qos1_node → eOk");
+        CHECK(svc->invoke("/register_pub_topic",
+                          YomkMkPtr(DDSTopic,
+                              DDSTopic{"qos1_node", "q1_topic", new YomkRpc::MStringPubSubType(), DDSQosProfile::ros2DefaultPublisher()}))
+                      .m_status == YomkResponse::eOk,
+              "QoS-B1 register_pub_topic 尾参 ros2DefaultPublisher → eOk（四参聚合尾参落位）");
+        std::atomic<int> recv1{0};
+        auto cb1 = [&recv1](const void *)
+        {
+            recv1++;
+        };
+        CHECK(svc->invoke("/register_sub_topic",
+                          YomkMkPtr(DDSSubRequest,
+                              DDSSubRequest{"qos1_node", "q1_topic", new YomkRpc::MStringPubSubType(), cb1,
+                                  DDSQosProfile::ros2DefaultSubscriber()}))
+                      .m_status == YomkResponse::eOk,
+              "QoS-B1 register_sub_topic 尾参 ros2DefaultSubscriber → eOk（五参聚合尾参落位）");
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待 discovery
+        int pubOk1 = 0;
+        for (int i = 0; i < 5; ++i)
+        {
+            YomkRpc::MString msg;
+            msg.data("q1-" + std::to_string(i));
+            if (svc->invoke("/publish", YomkMkPtr(DDSPublish, DDSPublish{"qos1_node", "q1_topic", &msg}))
+                    .m_status == YomkResponse::eOk)
+            {
+                pubOk1++;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        CHECK(pubOk1 == 5, "QoS-B1 publish 5 条 → 全部 eOk");
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待投递
+        CHECK(recv1.load() > 0, "QoS-B1 RELIABLE writer + BEST_EFFORT reader 匹配收到数据");
+        CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "qos1_node")).m_status == YomkResponse::eOk,
+              "删除 qos1_node → eOk");
+
+        // B2：BEST_EFFORT writer + RELIABLE reader（requested > offered 不匹配反证）
+        CHECK(svc->invoke("/create_node", mkNode(TEST_DOMAIN, "qos2_node")).m_status == YomkResponse::eOk,
+              "QoS 创建 qos2_node → eOk");
+        DDSQosProfile be;
+        be.reliability = DDSReliability::BEST_EFFORT;
+        be.durability = DDSDurability::VOLATILE; // writer 底座 TRANSIENT_LOCAL，显式 VOLATILE 供 B4 直证
+        CHECK(svc->invoke("/register_pub_topic",
+                          YomkMkPtr(DDSTopic, DDSTopic{"qos2_node", "t_be", new YomkRpc::MStringPubSubType(), be}))
+                      .m_status == YomkResponse::eOk,
+              "QoS-B2 register_pub_topic t_be 显式 BEST_EFFORT+VOLATILE → eOk");
+        DDSQosProfile rel;
+        rel.reliability = DDSReliability::RELIABLE;
+        std::atomic<int> recv2{0};
+        auto cb2 = [&recv2](const void *)
+        {
+            recv2++;
+        };
+        CHECK(svc->invoke("/register_sub_topic",
+                          YomkMkPtr(
+                              DDSSubRequest, DDSSubRequest{"qos2_node", "t_be", new YomkRpc::MStringPubSubType(), cb2, rel}))
+                      .m_status == YomkResponse::eOk,
+              "QoS-B2 register_sub_topic t_be 显式 RELIABLE → eOk");
+        std::this_thread::sleep_for(std::chrono::seconds(2)); // 双方 discovery + 匹配判定稳定
+        int pubOk2 = 0;
+        for (int i = 0; i < 5; ++i)
+        {
+            YomkRpc::MString msg;
+            msg.data("be-" + std::to_string(i));
+            if (svc->invoke("/publish", YomkMkPtr(DDSPublish, DDSPublish{"qos2_node", "t_be", &msg}))
+                    .m_status == YomkResponse::eOk)
+            {
+                pubOk2++;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        CHECK(pubOk2 == 5, "QoS-B2 publish 5 条 → 全部 eOk（write 不依赖匹配成功）");
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待潜在投递
+        CHECK(recv2.load() == 0,
+              "QoS-B2 RELIABLE requested > BEST_EFFORT offered → 收 0 条（若翻译失效将匹配收到 → 失败侦察）");
+
+        // B4：debug 链路 QoS 直证（发现数据读回 writer 端点实际 QoS）
+        CHECK(svcDebug->invoke("/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{TEST_DOMAIN})).m_status == YomkResponse::eOk,
+              "QoS-B4 创建调试节点（域 200）→ eOk");
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 调试参与者发现已在线端点
+        auto hitV = svcDebug->invoke("/topic_info", YomkMkPtr(DDSDebugInfo, DDSDebugInfo{"t_be", 10, 200, true}));
+        CHECK(hitV.m_status == YomkResponse::eOk && hitV.m_data != nullptr,
+              "QoS-B4 topic info -v t_be → eOk（发现缓存命中）");
+        YomkUnPackPkg(hitV.m_data, StringArray, infoArrV);
+        CHECK(infoArrV != nullptr, "QoS-B4 verbose 返回包可解包为 StringArray");
+        bool hasBe = false;
+        bool hasVol = false;
+        if (infoArrV != nullptr)
+        {
+            for (const auto &line : infoArrV->d)
+            {
+                if (line == "  Reliability: BEST_EFFORT")
+                {
+                    hasBe = true;
+                }
+                if (line == "  Durability: VOLATILE")
+                {
+                    hasVol = true;
+                }
+            }
+        }
+        CHECK(hasBe, "QoS-B4 writer QoS 读回 Reliability: BEST_EFFORT（底座 RELIABLE → profile 生效直证）");
+        CHECK(hasVol, "QoS-B4 writer QoS 读回 Durability: VOLATILE（底座 TRANSIENT_LOCAL → profile 生效直证）");
+        CHECK(svcDebug->invoke("/delete_node", nullptr).m_status == YomkResponse::eOk,
+              "删除调试节点 → eOk");
+        CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "qos2_node")).m_status == YomkResponse::eOk,
+              "删除 qos2_node → eOk");
+    }
+
 } // namespace
 
 int main()
@@ -260,12 +385,16 @@ int main()
     // 注册被测服务：所有权移交框架（shared_ptr 持有），init() 内部调用后 weak_from_this() 方有效
     auto *svc = new YomkRpcService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcService 注册成功（所有权移交框架，init() 已内部调用）");
+    // 调试服务（QoS-B4 从发现数据读回端点实际 QoS 用）
+    auto *svcDebug = new YomkRpcDebugService(YOMK_SERVER_P);
+    CHECK(YOMK_ADD_SERVICE(svcDebug) == 0, "YomkRpcDebugService 注册成功");
 
     testTopicRegistration(svc);
     testEndToEndPubSub(svc);
     testPublishGuards(svc);
     testTypeOwnershipOnFailure(svc);
     testEmptyCallbackSub(svc);
+    testQosProfile(svc, svcDebug);
 
     return testReport("TestYomkRpcTopic");
 }

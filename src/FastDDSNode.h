@@ -1,6 +1,8 @@
 #ifndef FASTDDSNODE_H
 #define FASTDDSNODE_H
 
+#include "YomkRpcService.h"  // DDSQosProfile（端点 QoS 描述，公共头零 fastdds 依赖；平铺引号形式命中 include/，安装树经 YomkRpc/ 前缀提供同一头）
+
 #include <cstdint>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
@@ -52,9 +54,14 @@ public:
     // Fast DDS 默认名 RTPSParticipant；默认参，兼容既有调用）。
     bool setDomainId(uint32_t domainId, const std::string& nodeName = "");
     // 注册订阅主题：接管 type 所有权，收到消息时经 callback 交付；主题名冲突/类型名不符/资源创建失败返回 false。
-    bool registerSubTopic(const std::string& topicName, void* type, DataCallback callback);
+    // qos：端点 QoS 描述（缺省全哨兵=Fast DDS 端点默认底座，现状行为）；非哨兵项逐项覆盖
+    // （如 reliability=BEST_EFFORT、depth；语义与 rclcpp::QoS "底座+逐项覆盖"同构）。
+    bool registerSubTopic(const std::string& topicName, void* type, DataCallback callback,
+        const DDSQosProfile& qos = DDSQosProfile{});
     // 注册发布主题：接管 type 所有权并创建 writer；主题名冲突/类型名不符/writer 创建失败返回 false。
-    bool registerPubTopic(const std::string& topicName, void* type);
+    // qos：同 registerSubTopic；缺省全哨兵=现状行为，非哨兵项逐项覆盖。
+    bool registerPubTopic(const std::string& topicName, void* type,
+        const DDSQosProfile& qos = DDSQosProfile{});
     // 同步发布一条消息（data 借用，write 内部完成序列化/拷贝）；主题未注册发布/data==nullptr/write 失败返回 false。
     bool publish(const std::string& topicName, const void* data);
     // 借出 writer 池内样本（仅 plain 类型支持）：成功返回 true 且 sample 指向池内缓冲，填值后 publish 免序列化；
