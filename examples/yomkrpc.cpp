@@ -65,9 +65,20 @@
  *   yomkrpc bag play bag_in --remap /chatter:=hello_world   # 旧数据喂新主题名
  *   yomkrpc bag play bag_in --read-ahead-queue-size 5000   # 加大预读队列防 IO 抖动致播放延迟
  *   yomkrpc bag play bag_in --qos-profile-overrides-path qos.json   # 按主题覆盖发布 QoS（文件命中>快照>回退）
+ *   yomkrpc topic print --qos-ros hello_world   # ROS2 底座订阅（KEEP_LAST(10) 防 ROS2 高频流丢样本）
+ *   yomkrpc topic pub --qos-file qos.json hello_world '{"data":"hi"}'   # 文件逐项覆盖发布 QoS
+ *
+ * QoS 选项（仅 topic pub 发布模式与 topic print/hz 生效，详见 --help）：
+ *   --qos-ros 整体切 ROS2 底座（pub 端 RELIABLE+VOLATILE+depth10，print/hz 端
+ *   BEST_EFFORT+VOLATILE+depth10）；8 项 --qos-* 逐项覆盖（reliability/durability/
+ *   history/depth/deadline/lifespan/liveliness/liveliness-lease-duration）；--qos-file
+ *   从 JSON 文件加载逐项覆盖；优先级：命令行逐项 > 文件逐项 > --qos-ros 底座 >
+ *   Fast DDS 默认（无任何 QoS 选项即现状行为：writer RELIABLE+TRANSIENT_LOCAL，
+ *   reader BEST_EFFORT+VOLATILE，depth 1）。
  * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
  * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
- * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；
+ * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；订阅端 reader
+ * QoS 经 --qos-ros、--qos-* 与 --qos-file 可调（缺省 BEST_EFFORT+VOLATILE depth 1）；
  * topic list：创建节点后一次性收敛查询并逐行打印 topicName——自适应收敛：
  * 节点内部每 ~200ms 轮询一次发现缓存快照，连续 waitRounds 次（默认 5，环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS 可调）集合不变
  * 即认为发现收敛、立即输出，无需固定等待窗口；-t/--types 类型名模式：每行改输出
@@ -97,7 +108,8 @@
  * 200ms 后退出；-w/-r/-t 独立识别可任意顺序叠加：先等匹配达标再首轮发布进入持续循环，
  * 发满上限即停）：节点层先
  * 发现收敛（类型名 + 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何
- * 发布实体），临时 RELIABLE+TRANSIENT_LOCAL writer 匹配收敛后 write；存在 RELIABLE 订阅
+ * 发布实体），临时 writer（QoS 经 --qos-ros、--qos-* 与 --qos-file 可调，缺省
+ * RELIABLE+TRANSIENT_LOCAL）匹配收敛后 write；存在 RELIABLE 订阅
  * 者时以 ack 确认送达（未全部确认报错退出），全 BEST_EFFORT 或无订阅者退化尽力而为；
  * 未发现主题报错退出。载荷直接给 JSON 参数，或经 -f/--file 从文件整体读取（文件不存在/
  * 为空报错退出，与 topic pub -ef 导出文件对接形成导出→改值→发布闭环）。
@@ -107,7 +119,8 @@
  * 当前目录生成，-o 指定目录（相对/绝对均可，目录不存在报错退出，不自动创建）；未发现
  * 主题报错退出。
  * topic hz：订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印
- * 消息），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
+ * 消息，reader QoS 同样经 --qos-ros、--qos-* 与 --qos-file 可调——深度不足丢帧偏频，对接
+ * 高频流建议 --qos-ros），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
  * 相邻消息间隔均值倒数，Hz；min/max 为间隔极值，秒；std dev 为间隔总体标准差，秒；
  * window 为间隔样本数，上限 --window 默认 10000）；无新消息不重复打印，首条消息前静默；
  * Ctrl+C 退出。
@@ -136,6 +149,8 @@
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkRpc/YomkRpcBagService.h>
 #include <YomkServer/YomkAPI.h>
+
+#include <nlohmann/json.hpp> // --qos-file 解析（vendored header-only，CMake 配 include 路径）
 
 #include <algorithm>
 #include <atomic>
@@ -175,19 +190,19 @@ static void onSignal(int)
 static void printUsage(std::ostream &os)
 {
     os << "Usage:\n"
-          "  yomkrpc topic print <topic-name>\n"
+          "  yomkrpc topic print [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <topic-name>\n"
           "  yomkrpc topic list [-t | --types]\n"
           "  yomkrpc topic info [-v | --verbose] <topic-name>\n"
           "  yomkrpc topic type <topic-name>\n"
           "  yomkrpc topic find <type-name>\n"
-          "  yomkrpc topic hz [--window N] <topic-name>\n"
+          "  yomkrpc topic hz [--window N] [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <topic-name>\n"
           "  yomkrpc interface show <type-name>\n"
           "  yomkrpc interface list\n"
           "  yomkrpc topic pub -e | --example <topic-name>\n"
           "  yomkrpc topic pub -ef | --example-file\n"
           "          [-o <dir> | --output <dir>] <topic-name>\n"
-          "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] <topic-name> <json>\n"
-          "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] <topic-name> -f <file> | --file <file>\n"
+          "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <topic-name> <json>\n"
+          "  yomkrpc topic pub [-w N | --wait N] [-r N | --rate N] [-t N | --times N] [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <topic-name> -f <file> | --file <file>\n"
           "  yomkrpc node list\n"
           "  yomkrpc node info <node-name>\n"
           "  yomkrpc bag record [-o <dir> | --output <dir>] [-b <bytes> | --max-bag-size <bytes>]\n"
@@ -261,6 +276,31 @@ static void printUsage(std::ostream &os)
           "                      {\"reliability\": \"BEST_EFFORT\"}}；三档优先级 文件命中 >\n"
           "                      bag 快照 > 回退；未知字段键忽略，非法枚举值/文件不可读/\n"
           "                      格式非法报错退出，不在 bag 清单的主题键静默无效\n"
+          "  --qos-ros           整体切 ROS2 底座 QoS（仅 topic pub 发布模式与 topic print/hz\n"
+          "                      生效，下同）：pub 端 KEEP_LAST(10)+RELIABLE+VOLATILE，\n"
+          "                      print/hz 端 KEEP_LAST(10)+BEST_EFFORT+VOLATILE（时间项 ∞）；\n"
+          "                      与 --qos-*/--qos-file 叠加时作底座被逐项覆盖\n"
+          "  --qos-reliability REL\n"
+          "                      逐项覆盖 reliability：reliable | best_effort（大小写不敏感，\n"
+          "                      ros2 小写与 DDS 大写均收；下同）\n"
+          "  --qos-durability DUR\n"
+          "                      逐项覆盖 durability：transient_local | volatile\n"
+          "  --qos-history HIST  逐项覆盖 history：keep_last | keep_all\n"
+          "  --qos-depth N       逐项覆盖 history depth（须 >=1 整数；keep_all 时忽略；未设\n"
+          "                      --qos-history 时底座即 keep_last，直接生效）\n"
+          "  --qos-deadline SEC  逐项覆盖 deadline 周期秒（非负小数，0=∞；下同）\n"
+          "  --qos-lifespan SEC  逐项覆盖 lifespan 秒（writer 侧策略，print/hz 订阅端忽略）\n"
+          "  --qos-liveliness KIND\n"
+          "                      逐项覆盖 liveliness：automatic | manual_by_topic\n"
+          "  --qos-liveliness-lease-duration SEC\n"
+          "                      逐项覆盖 liveliness 租约秒\n"
+          "  --qos-file FILE     从 JSON 文件加载逐项覆盖（扁平对象，键为 reliability/\n"
+          "                      durability/history/depth/deadline/lifespan/liveliness/\n"
+          "                      liveliness_lease_duration，值形态同对应 --qos-* 选项，如\n"
+          "                      {\"reliability\":\"reliable\",\"depth\":10,\"deadline\":0.5}）；\n"
+          "                      文件不存在/非法 JSON/顶层非对象/未知键/非法值报错退出；\n"
+          "                      优先级：命令行 --qos-* 逐项 > --qos-file 逐项 > --qos-ros\n"
+          "                      底座 > Fast DDS 默认（无任何 QoS 选项即现状行为）\n"
           "  -f, --file <file>   发布 JSON 载荷文件（仅 topic pub 生效）：文件内容整体作为发布载荷\n"
           "                      （与 topic pub -ef 导出文件对接，多行缩进 JSON 直接可发；文件\n"
           "                      不存在或为空报错退出，相对/绝对路径均可）\n"
@@ -407,8 +447,293 @@ static bool parseDiscoverRounds(const char *text, uint32_t &rounds)
     return true;
 }
 
-// topic print 子命令：登记主题持续打印消息，Ctrl+C 退出（原 main 业务体）
-static int runPrint(uint32_t domainId, const std::string &topicName)
+// ---- topic pub（发布模式）/topic print/topic hz 的 QoS 选项解析辅助 ----
+// 优先级链：命令行 --qos-* 逐项 > --qos-file 逐项 > --qos-ros 底座 > Fast DDS 默认。
+// 实现为底座 + 两份逐项 profile 顺序合并（不可按 argv 出现顺序写同一份——--qos-file 与
+// --qos-* 顺序任意）；全哨兵=Fast DDS 默认底座（现状行为），--qos-ros 分端点取 ROS2 底座。
+
+// 枚举值大小写不敏感归一（ros2 CLI 风格小写与 DDS 大写拼写均收）
+static std::string qosEnumLower(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
+}
+
+// --qos-reliability 取值：reliable | best_effort；命中填 value 返回 true
+static bool parseQosReliability(const std::string &text, DDSReliability &value)
+{
+    const std::string low = qosEnumLower(text);
+    if (low == "reliable")
+    {
+        value = DDSReliability::RELIABLE;
+        return true;
+    }
+    if (low == "best_effort")
+    {
+        value = DDSReliability::BEST_EFFORT;
+        return true;
+    }
+    return false;
+}
+
+// --qos-durability 取值：transient_local | volatile
+static bool parseQosDurability(const std::string &text, DDSDurability &value)
+{
+    const std::string low = qosEnumLower(text);
+    if (low == "transient_local")
+    {
+        value = DDSDurability::TRANSIENT_LOCAL;
+        return true;
+    }
+    if (low == "volatile")
+    {
+        value = DDSDurability::VOLATILE;
+        return true;
+    }
+    return false;
+}
+
+// --qos-history 取值：keep_last | keep_all
+static bool parseQosHistory(const std::string &text, DDSHistoryKind &value)
+{
+    const std::string low = qosEnumLower(text);
+    if (low == "keep_last")
+    {
+        value = DDSHistoryKind::KEEP_LAST;
+        return true;
+    }
+    if (low == "keep_all")
+    {
+        value = DDSHistoryKind::KEEP_ALL;
+        return true;
+    }
+    return false;
+}
+
+// --qos-liveliness 取值：automatic | manual_by_topic
+static bool parseQosLiveliness(const std::string &text, DDSLiveliness &value)
+{
+    const std::string low = qosEnumLower(text);
+    if (low == "automatic")
+    {
+        value = DDSLiveliness::AUTOMATIC;
+        return true;
+    }
+    if (low == "manual_by_topic")
+    {
+        value = DDSLiveliness::MANUAL_BY_TOPIC;
+        return true;
+    }
+    return false;
+}
+
+// 秒值校验 + 转纳秒（非负有限小数秒，对齐 ros2 CLI duration 语义；0→哨兵 -1 表 ∞=不覆盖，
+// 底座默认即 ∞）；parseQosSeconds 与 loadQosFile 共用的核心
+static bool qosSecondsToNs(double value, int64_t &ns)
+{
+    if (!std::isfinite(value) || value < 0.0 || value > static_cast<double>(INT64_MAX) / 1e9)
+    {
+        return false;
+    }
+    ns = (value == 0.0) ? -1 : static_cast<int64_t>(value * 1e9);
+    return true;
+}
+
+// 时间三项（deadline/lifespan/liveliness-lease-duration）字符串秒值解析
+static bool parseQosSeconds(const std::string &text, int64_t &ns)
+{
+    char *end = nullptr;
+    const double value = std::strtod(text.c_str(), &end);
+    if (end == text.c_str() || *end != '\0')
+    {
+        return false;
+    }
+    return qosSecondsToNs(value, ns);
+}
+
+// over 的非哨兵字段写入 into（哨兵=未设置不覆盖）：逐项合并语义与节点层翻译一致
+static void mergeQos(const DDSQosProfile &over, DDSQosProfile &into)
+{
+    if (over.historyKind != DDSHistoryKind::Unset)
+    {
+        into.historyKind = over.historyKind;
+    }
+    if (over.depth >= 0)
+    {
+        into.depth = over.depth;
+    }
+    if (over.reliability != DDSReliability::Unset)
+    {
+        into.reliability = over.reliability;
+    }
+    if (over.durability != DDSDurability::Unset)
+    {
+        into.durability = over.durability;
+    }
+    if (over.liveliness != DDSLiveliness::Unset)
+    {
+        into.liveliness = over.liveliness;
+    }
+    if (over.deadlineNs >= 0)
+    {
+        into.deadlineNs = over.deadlineNs;
+    }
+    if (over.lifespanNs >= 0)
+    {
+        into.lifespanNs = over.lifespanNs;
+    }
+    if (over.livelinessLeaseNs >= 0)
+    {
+        into.livelinessLeaseNs = over.livelinessLeaseNs;
+    }
+}
+
+// topic pub/print/hz 共用的 QoS 选项聚合：resolve(publisher) 按端点方向合成最终 profile
+struct QosArgs
+{
+    bool rosBase = false;       // --qos-ros：整体切 ROS2 底座（pub→ros2DefaultPublisher，
+                                // print/hz→ros2DefaultSubscriber）
+    DDSQosProfile fileProfile;  // --qos-file 逐项（优先级低于命令行逐项）
+    DDSQosProfile cliProfile;   // 命令行 --qos-* 逐项（最高优先级）
+
+    // profile 是否含任一显式设置项（全哨兵=false）
+    static bool isSet(const DDSQosProfile &p)
+    {
+        return p.historyKind != DDSHistoryKind::Unset || p.depth >= 0 ||
+               p.reliability != DDSReliability::Unset || p.durability != DDSDurability::Unset ||
+               p.liveliness != DDSLiveliness::Unset || p.deadlineNs >= 0 ||
+               p.lifespanNs >= 0 || p.livelinessLeaseNs >= 0;
+    }
+
+    // 有任一 QoS 输入：供非 topic pub/print/hz 命令的"选项不适用"拦截报错
+    bool any() const
+    {
+        return rosBase || isSet(fileProfile) || isSet(cliProfile);
+    }
+
+    // 合成最终 profile：底座（--qos-ros 分端点取 ROS2 工厂，否则全哨兵=Fast DDS 默认）
+    // 之上依次叠 --qos-file、命令行 --qos-* 的非哨兵项
+    DDSQosProfile resolve(bool publisher) const
+    {
+        DDSQosProfile p = rosBase ? (publisher ? DDSQosProfile::ros2DefaultPublisher()
+                                               : DDSQosProfile::ros2DefaultSubscriber())
+                                  : DDSQosProfile{};
+        mergeQos(fileProfile, p);
+        mergeQos(cliProfile, p);
+        return p;
+    }
+};
+
+// --qos-file JSON 文件加载：扁平对象，键与 --qos-* 同名去连字符转下划线
+// （reliability/durability/history/depth/deadline/lifespan/liveliness/
+// liveliness_lease_duration，值形态同对应 --qos-* 选项，如
+// {"reliability":"reliable","depth":10,"deadline":0.5}）；文件不存在/非法 JSON/顶层非
+// 对象/未知键/非法值置 errMsg 返回 false（调用方报错退出）
+static bool loadQosFile(const std::string &path, DDSQosProfile &profile, std::string &errMsg)
+{
+    std::ifstream in(path);
+    if (!in)
+    {
+        errMsg = "cannot open qos file: " + path;
+        return false;
+    }
+    nlohmann::json root;
+    try
+    {
+        in >> root;
+    }
+    catch (const nlohmann::json::parse_error &e)
+    {
+        errMsg = "invalid json in qos file \"" + path + "\": " + e.what();
+        return false;
+    }
+    if (!root.is_object())
+    {
+        errMsg = "qos file top-level must be a json object: " + path;
+        return false;
+    }
+    for (auto it = root.begin(); it != root.end(); ++it)
+    {
+        const std::string &key = it.key();
+        const nlohmann::json &val = it.value();
+        if (key == "reliability")
+        {
+            if (!val.is_string() ||
+                    !parseQosReliability(val.get<std::string>(), profile.reliability))
+            {
+                errMsg = "invalid value for key \"reliability\" in qos file \"" + path +
+                         "\" (expected \"reliable\" or \"best_effort\")";
+                return false;
+            }
+        }
+        else if (key == "durability")
+        {
+            if (!val.is_string() ||
+                    !parseQosDurability(val.get<std::string>(), profile.durability))
+            {
+                errMsg = "invalid value for key \"durability\" in qos file \"" + path +
+                         "\" (expected \"transient_local\" or \"volatile\")";
+                return false;
+            }
+        }
+        else if (key == "history")
+        {
+            if (!val.is_string() ||
+                    !parseQosHistory(val.get<std::string>(), profile.historyKind))
+            {
+                errMsg = "invalid value for key \"history\" in qos file \"" + path +
+                         "\" (expected \"keep_last\" or \"keep_all\")";
+                return false;
+            }
+        }
+        else if (key == "depth")
+        {
+            // 须为 >=1 的整数（浮点/布尔一律拒绝）
+            if (!val.is_number_integer() || val.is_boolean() || val.get<long long>() < 1)
+            {
+                errMsg = "invalid value for key \"depth\" in qos file \"" + path +
+                         "\" (expected integer >= 1)";
+                return false;
+            }
+            profile.depth = static_cast<int32_t>(val.get<long long>());
+        }
+        else if (key == "deadline" || key == "lifespan" || key == "liveliness_lease_duration")
+        {
+            // 须为非负数值（布尔拒绝）；0=∞（哨兵）
+            int64_t nsTmp = -1;
+            if (!val.is_number() || val.is_boolean() ||
+                    !qosSecondsToNs(val.get<double>(), nsTmp))
+            {
+                errMsg = "invalid value for key \"" + key + "\" in qos file \"" + path +
+                         "\" (expected non-negative seconds)";
+                return false;
+            }
+            if (key == "deadline")
+            {
+                profile.deadlineNs = nsTmp;
+            }
+            else if (key == "lifespan")
+            {
+                profile.lifespanNs = nsTmp;
+            }
+            else
+            {
+                profile.livelinessLeaseNs = nsTmp;
+            }
+        }
+        else
+        {
+            errMsg = "unknown key \"" + key + "\" in qos file \"" + path + "\"";
+            return false;
+        }
+    }
+    return true;
+}
+
+// topic print 子命令：登记主题持续打印消息，Ctrl+C 退出（原 main 业务体）；qos 为动态
+// 订阅 reader 的 QoS 描述（全哨兵=Fast DDS 默认底座）
+static int runPrint(uint32_t domainId, const std::string &topicName, const DDSQosProfile &qos)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -426,7 +751,7 @@ static int runPrint(uint32_t domainId, const std::string &topicName)
     {
         std::cout << text << std::endl; // 逐条直出并刷新
     };
-    resp = YOMKRPC_DEBUG_TOPIC_PRINT(topicName, onMessage);
+    resp = YOMKRPC_DEBUG_TOPIC_PRINT(topicName, onMessage, qos);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "register debug topic failed: ", resp.m_msg);
@@ -918,7 +1243,8 @@ static int runBagConvert(const std::vector<std::string> &inputs, const std::stri
 // "average rate"（窗口内相邻消息间隔均值的倒数，Hz）、min/max（间隔极值，秒）、
 // std dev（间隔的总体标准差，除以 n）、window（间隔样本数，上限 --window）；无新消息
 // 不重复打印（对齐 ros2 哨兵语义），首条消息前静默等待；Ctrl+C 退出
-static int runHz(uint32_t domainId, const std::string &topicName, size_t windowSize)
+static int runHz(uint32_t domainId, const std::string &topicName, size_t windowSize,
+        const DDSQosProfile &qos)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -952,7 +1278,7 @@ static int runHz(uint32_t domainId, const std::string &topicName, size_t windowS
         hzLast = now;
         hzHasLast = true;
     };
-    resp = YOMKRPC_DEBUG_TOPIC_PRINT(topicName, onMessage);
+    resp = YOMKRPC_DEBUG_TOPIC_PRINT(topicName, onMessage, qos);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "register debug topic failed: ", resp.m_msg);
@@ -1548,7 +1874,8 @@ static int runTopicPubExample(uint32_t domainId, const std::string &topicName, u
 // 或无订阅者退化尽力而为；持续模式节点层保留发布链周期重复 write（尽力而为），Ctrl+C
 // 经停止标志退出并回传 total/failed 统计；maxTimes>0 发满即停（排空 200ms 后返回）
 static int runTopicPub(uint32_t domainId, const std::string &topicName, const std::string &json,
-        uint32_t waitRounds, double rateHz, uint32_t requiredSubs, uint32_t maxTimes)
+        uint32_t waitRounds, double rateHz, uint32_t requiredSubs, uint32_t maxTimes,
+        const DDSQosProfile &qos)
 {
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcDebugService);
@@ -1581,7 +1908,7 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
     const auto repeatIntervalMs =
         std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(1000.0 / rateHz)));
     resp = YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, waitRounds, 200, repeatIntervalMs, requiredSubs,
-            maxTimes);
+            maxTimes, qos);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("yomkrpc", "topic pub failed: ", resp.m_msg);
@@ -1637,7 +1964,7 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
 // 发布链路复用 runTopicPub（发现收敛→类型重建→载荷解析→匹配收敛→write→ack 自适应确认）
 static int runTopicPubJsonFile(uint32_t domainId, const std::string &topicName,
         const std::string &jsonFile, uint32_t waitRounds, double rateHz, uint32_t requiredSubs,
-        uint32_t maxTimes)
+        uint32_t maxTimes, const DDSQosProfile &qos)
 {
     YOMK_INIT();
 
@@ -1661,7 +1988,8 @@ static int runTopicPubJsonFile(uint32_t domainId, const std::string &topicName,
     const std::string json = raw.substr(first, last - first + 1);
 
     // 2. 复用发布链路
-    return runTopicPub(domainId, topicName, json, waitRounds, rateHz, requiredSubs, maxTimes);
+    return runTopicPub(domainId, topicName, json, waitRounds, rateHz, requiredSubs, maxTimes,
+            qos);
 }
 
 // node list 子命令：独立收敛查询域内已发现的命名参与者（节点内部轮询参与者发现缓存快照，
@@ -1820,6 +2148,8 @@ int main(int argc, char *argv[])
     std::vector<std::string> playTopicRemaps;  // 主题重映射规则（--remap/-m；仅 bag play 生效）
     uint32_t pubWaitSubs = 0; // 期望建匹配订阅端数（-w/--wait；仅 topic pub 发布模式生效，0=自动收敛）
     uint32_t pubMaxTimes = 0; // 发布条数上限（-t/--times；仅 topic pub 发布模式生效，含首轮，0=不限）
+    QosArgs qosArgs;         // topic pub（发布模式）/print/hz 的 QoS 选项聚合
+                             // （--qos-ros/--qos-*/--qos-file，解析时逐项归入 cliProfile）
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i)
     {
@@ -2212,6 +2542,152 @@ int main(int argc, char *argv[])
             playQosOverridesPath = argv[++i];
             continue;
         }
+        if (arg == "--qos-ros")
+        {
+            // topic pub（发布模式）/print/hz 的 QoS 选项（下同）：无参开关，整体切 ROS2
+            // 底座——pub 端 ros2DefaultPublisher（KEEP_LAST(10)+RELIABLE+VOLATILE），
+            // print/hz 端 ros2DefaultSubscriber（KEEP_LAST(10)+BEST_EFFORT+VOLATILE）；
+            // 与 --qos-*/--qos-file 叠加时作底座被逐项覆盖；其余语境解析后闲置
+            // （分派层拦截报错）
+            qosArgs.rosBase = true;
+            continue;
+        }
+        if (arg == "--qos-reliability")
+        {
+            // 8 项 --qos-* 逐项覆盖（下同）：reliable | best_effort（大小写不敏感，
+            // ros2 小写与 DDS 大写均收）
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少枚举值参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (!parseQosReliability(argv[++i], qosArgs.cliProfile.reliability))
+            {
+                std::cerr << "yomkrpc: 非法 reliability 取值 \"" << argv[i]
+                          << "\"（reliable | best_effort）\n";
+                return 2;
+            }
+            continue;
+        }
+        if (arg == "--qos-durability")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少枚举值参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (!parseQosDurability(argv[++i], qosArgs.cliProfile.durability))
+            {
+                std::cerr << "yomkrpc: 非法 durability 取值 \"" << argv[i]
+                          << "\"（transient_local | volatile）\n";
+                return 2;
+            }
+            continue;
+        }
+        if (arg == "--qos-history")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少枚举值参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (!parseQosHistory(argv[++i], qosArgs.cliProfile.historyKind))
+            {
+                std::cerr << "yomkrpc: 非法 history 取值 \"" << argv[i]
+                          << "\"（keep_last | keep_all）\n";
+                return 2;
+            }
+            continue;
+        }
+        if (arg == "--qos-liveliness")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少枚举值参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            if (!parseQosLiveliness(argv[++i], qosArgs.cliProfile.liveliness))
+            {
+                std::cerr << "yomkrpc: 非法 liveliness 取值 \"" << argv[i]
+                          << "\"（automatic | manual_by_topic）\n";
+                return 2;
+            }
+            continue;
+        }
+        if (arg == "--qos-depth")
+        {
+            // 须为 >=1 的整数（keep_all 时忽略；未设 --qos-history 时底座即 keep_last，
+            // depth 直接生效）
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少深度参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            char *end = nullptr;
+            const long long value = std::strtoll(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value < 1)
+            {
+                std::cerr << "yomkrpc: 非法 depth \"" << argv[i]
+                          << "\"（须为 >=1 的整数）\n";
+                return 2;
+            }
+            qosArgs.cliProfile.depth = static_cast<int32_t>(value);
+            continue;
+        }
+        if (arg == "--qos-deadline" || arg == "--qos-lifespan" ||
+                arg == "--qos-liveliness-lease-duration")
+        {
+            // 时间三项同构解析：非负小数秒（0=∞），内部转纳秒存 profile
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少秒值参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            int64_t ns = -1;
+            if (!parseQosSeconds(argv[++i], ns))
+            {
+                std::cerr << "yomkrpc: 非法 " << arg << " \"" << argv[i]
+                          << "\"（须为 >=0 的秒数，0=∞）\n";
+                return 2;
+            }
+            if (arg == "--qos-deadline")
+            {
+                qosArgs.cliProfile.deadlineNs = ns;
+            }
+            else if (arg == "--qos-lifespan")
+            {
+                qosArgs.cliProfile.lifespanNs = ns;
+            }
+            else
+            {
+                qosArgs.cliProfile.livelinessLeaseNs = ns;
+            }
+            continue;
+        }
+        if (arg == "--qos-file")
+        {
+            // JSON 文件加载逐项覆盖（fileProfile；优先级低于命令行逐项）：文件不存在/
+            // 非法 JSON/顶层非对象/未知键/非法值报错退出（错误五态在 loadQosFile 归类）
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少 JSON 文件路径参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            std::string qosFileErr;
+            if (!loadQosFile(argv[++i], qosArgs.fileProfile, qosFileErr))
+            {
+                std::cerr << "yomkrpc: " << qosFileErr << "\n";
+                return 2;
+            }
+            continue;
+        }
         if ((arg == "--remap" || arg == "-m") &&
             !(pos.size() >= 2 && pos[0] == "bag" && pos[1] == "play"))
         {
@@ -2315,7 +2791,7 @@ int main(int argc, char *argv[])
     //      node list / node info <node-name> / bag record <topic-name> ... ----
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "print" && !pos[2].empty())
     {
-        return runPrint(domainId, pos[2]);
+        return runPrint(domainId, pos[2], qosArgs.resolve(false));
     }
     if (pos.size() == 2 && pos[0] == "topic" && pos[1] == "list")
     {
@@ -2351,13 +2827,13 @@ int main(int argc, char *argv[])
             !pos[2].empty() && !pubJsonFile.empty())
     {
         return runTopicPubJsonFile(domainId, pos[2], pubJsonFile, waitRounds, pubRateHz,
-                pubWaitSubs, pubMaxTimes);
+                pubWaitSubs, pubMaxTimes, qosArgs.resolve(true));
     }
     if (pos.size() == 4 && pos[0] == "topic" && pos[1] == "pub" &&
             !pos[2].empty() && !pos[3].empty())
     {
         return runTopicPub(domainId, pos[2], pos[3], waitRounds, pubRateHz, pubWaitSubs,
-                pubMaxTimes);
+                pubMaxTimes, qosArgs.resolve(true));
     }
     if (pos.size() >= 2 && pos[0] == "topic" && pos[1] == "pub")
     {
@@ -2365,7 +2841,7 @@ int main(int argc, char *argv[])
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "hz" && !pos[2].empty())
     {
-        return runHz(domainId, pos[2], windowSize);
+        return runHz(domainId, pos[2], windowSize, qosArgs.resolve(false));
     }
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "info" && !pos[2].empty())
     {
@@ -2408,6 +2884,14 @@ int main(int argc, char *argv[])
             return 2;
         }
         return runBagConvert(convertInputs, msgOutDir);
+    }
+    if (qosArgs.any())
+    {
+        // QoS 选项语境拦截（对齐 --remap 先例）：仅 topic pub 发布模式（json/-f）与
+        // topic print/hz 消费；-e/-ef 导出与查询类均不适用，显式报错优于静默忽略
+        std::cerr << "yomkrpc: --qos-ros/--qos-*/--qos-file 仅 topic pub（发布模式）与 topic print/hz 生效\n";
+        printUsage(std::cerr);
+        return 2;
     }
     if (pos.size() == 2 && (pos[0] == "topic" || pos[0] == "node" || pos[0] == "bag"))
     {

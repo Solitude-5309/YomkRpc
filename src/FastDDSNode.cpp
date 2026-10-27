@@ -52,8 +52,8 @@ void toWriterQos(const DDSQosProfile& p, DataWriterQos& qos)
         qos.history().kind =
             (p.historyKind == DDSHistoryKind::KEEP_LAST) ? KEEP_LAST_HISTORY_QOS : KEEP_ALL_HISTORY_QOS;
     }
-    // depth 仅 KEEP_LAST 下有意义；KEEP_ALL 时忽略（对齐计划裁定）
-    if (p.depth >= 0 && p.historyKind == DDSHistoryKind::KEEP_LAST)
+    // depth 在 KEEP_ALL 下忽略；未设 historyKind（底座即 KEEP_LAST）时同样生效
+    if (p.depth >= 0 && p.historyKind != DDSHistoryKind::KEEP_ALL)
     {
         qos.history().depth = p.depth;
     }
@@ -94,7 +94,7 @@ void toReaderQos(const DDSQosProfile& p, DataReaderQos& qos)
         qos.history().kind =
             (p.historyKind == DDSHistoryKind::KEEP_LAST) ? KEEP_LAST_HISTORY_QOS : KEEP_ALL_HISTORY_QOS;
     }
-    if (p.depth >= 0 && p.historyKind == DDSHistoryKind::KEEP_LAST)
+    if (p.depth >= 0 && p.historyKind != DDSHistoryKind::KEEP_ALL)
     {
         qos.history().depth = p.depth;
     }

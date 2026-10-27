@@ -331,6 +331,98 @@ FastDDSDebugNode::EndpointDetail makeReaderDetail(
     detail.qosLines = readerQosLines(reader);
     return detail;
 }
+
+// ===== DDSQosProfile 翻译（与 FastDDSNode.cpp 版本同构，独立持有不跨 cpp 共享） =====
+
+// 纳秒每秒（Duration_t 秒/纳秒分解用）
+constexpr int64_t kNsPerSec = 1000000000LL;
+
+// 纳秒转 Duration_t（sec, nsec 分解；调用方保证 ns >= 0）。
+Duration_t toDuration(int64_t ns)
+{
+    return Duration_t(static_cast<int32_t>(ns / kNsPerSec), static_cast<uint32_t>(ns % kNsPerSec));
+}
+
+// DDSQosProfile 翻译到 Fast DDS 端点 QoS：起点为调用方已拷贝的 *_QOS_DEFAULT 底座，
+// 非哨兵项（枚举非 Unset / 数值 >= 0）逐项覆盖，哨兵项保持底座默认（现状行为）；
+// 枚举到 policy 的映射在此显式完成（不做数值直译，公共头枚举与 Fast DDS 内部枚举解耦）。
+void toWriterQos(const DDSQosProfile& p, DataWriterQos& qos)
+{
+    if (p.historyKind != DDSHistoryKind::Unset)
+    {
+        qos.history().kind =
+            (p.historyKind == DDSHistoryKind::KEEP_LAST) ? KEEP_LAST_HISTORY_QOS : KEEP_ALL_HISTORY_QOS;
+    }
+    // depth 在 KEEP_ALL 下忽略；未设 historyKind（底座即 KEEP_LAST）时同样生效
+    if (p.depth >= 0 && p.historyKind != DDSHistoryKind::KEEP_ALL)
+    {
+        qos.history().depth = p.depth;
+    }
+    if (p.reliability != DDSReliability::Unset)
+    {
+        qos.reliability().kind =
+            (p.reliability == DDSReliability::RELIABLE) ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
+    }
+    if (p.durability != DDSDurability::Unset)
+    {
+        qos.durability().kind =
+            (p.durability == DDSDurability::TRANSIENT_LOCAL) ? TRANSIENT_LOCAL_DURABILITY_QOS : VOLATILE_DURABILITY_QOS;
+    }
+    if (p.liveliness != DDSLiveliness::Unset)
+    {
+        qos.liveliness().kind =
+            (p.liveliness == DDSLiveliness::AUTOMATIC) ? AUTOMATIC_LIVELINESS_QOS : MANUAL_BY_TOPIC_LIVELINESS_QOS;
+    }
+    if (p.deadlineNs >= 0)
+    {
+        qos.deadline().period = toDuration(p.deadlineNs);
+    }
+    if (p.lifespanNs >= 0)
+    {
+        qos.lifespan().duration = toDuration(p.lifespanNs);
+    }
+    if (p.livelinessLeaseNs >= 0)
+    {
+        qos.liveliness().lease_duration = toDuration(p.livelinessLeaseNs);
+    }
+}
+
+// reader 版：无 lifespan（writer 侧策略，reader 翻译时忽略），其余同构。
+void toReaderQos(const DDSQosProfile& p, DataReaderQos& qos)
+{
+    if (p.historyKind != DDSHistoryKind::Unset)
+    {
+        qos.history().kind =
+            (p.historyKind == DDSHistoryKind::KEEP_LAST) ? KEEP_LAST_HISTORY_QOS : KEEP_ALL_HISTORY_QOS;
+    }
+    if (p.depth >= 0 && p.historyKind != DDSHistoryKind::KEEP_ALL)
+    {
+        qos.history().depth = p.depth;
+    }
+    if (p.reliability != DDSReliability::Unset)
+    {
+        qos.reliability().kind =
+            (p.reliability == DDSReliability::RELIABLE) ? RELIABLE_RELIABILITY_QOS : BEST_EFFORT_RELIABILITY_QOS;
+    }
+    if (p.durability != DDSDurability::Unset)
+    {
+        qos.durability().kind =
+            (p.durability == DDSDurability::TRANSIENT_LOCAL) ? TRANSIENT_LOCAL_DURABILITY_QOS : VOLATILE_DURABILITY_QOS;
+    }
+    if (p.liveliness != DDSLiveliness::Unset)
+    {
+        qos.liveliness().kind =
+            (p.liveliness == DDSLiveliness::AUTOMATIC) ? AUTOMATIC_LIVELINESS_QOS : MANUAL_BY_TOPIC_LIVELINESS_QOS;
+    }
+    if (p.deadlineNs >= 0)
+    {
+        qos.deadline().period = toDuration(p.deadlineNs);
+    }
+    if (p.livelinessLeaseNs >= 0)
+    {
+        qos.liveliness().lease_duration = toDuration(p.livelinessLeaseNs);
+    }
+}
 }  // namespace
 
 class FastDDSDebugNode::DebugParticipantListener : public DomainParticipantListener
@@ -574,7 +666,8 @@ bool FastDDSDebugNode::setDomainId(uint32_t domainId)
     return true;
 }
 
-bool FastDDSDebugNode::subscribeTopic(const std::string& topicName, std::string* error)
+bool FastDDSDebugNode::subscribeTopic(const std::string& topicName, std::string* error,
+        const DDSQosProfile& qos)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     // 四类拒绝原因各自归类（原单一 return false 使服务层只能报笼统 failed）
@@ -603,6 +696,9 @@ bool FastDDSDebugNode::subscribeTopic(const std::string& topicName, std::string*
         return false;
     }
     pending_.insert(topicName);
+    // qos 随登记暂存，工作线程建订（tryStartSubscription）时取用，建订成功处随 pending_
+    // 一同清除（失败保留供重试）
+    pendingQos_[topicName] = qos;
     // 记录登记时刻作为一次性等待提示的宽限起点（提示由工作线程在满
     // kPendingHintDelayMs 仍无 writer 时打）。不在此处直接查发现缓存判定：调用方
     // 通常在 setDomainId 之后立即登记，本端发现尚未完成会对"发布者早已在线"误报
@@ -1470,7 +1566,8 @@ bool FastDDSDebugNode::jsonExampleOfType(const std::string& typeName, std::strin
 bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string& json,
         std::string& error, uint32_t stableRounds, uint32_t intervalMs,
         uint32_t repeatIntervalMs, uint32_t requiredSubscribers,
-        uint32_t maxTimes, uint32_t* total, uint32_t* failed)
+        uint32_t maxTimes, uint32_t* total, uint32_t* failed,
+        const DDSQosProfile& qos)
 {
     if (total != nullptr)
     {
@@ -1583,9 +1680,8 @@ bool FastDDSDebugNode::topicPub(const std::string& topicName, const std::string&
     Topic* topic = participant_->create_topic(topicName, ts.get_type_name(), TOPIC_QOS_DEFAULT);
     Publisher* publisher = topic != nullptr ?
         participant_->create_publisher(PUBLISHER_QOS_DEFAULT) : nullptr;
-    DataWriterQos wqos;
-    wqos.reliability().kind = RELIABLE_RELIABILITY_QOS;
-    wqos.durability().kind = TRANSIENT_LOCAL_DURABILITY_QOS;
+    DataWriterQos wqos = DATAWRITER_QOS_DEFAULT;
+    toWriterQos(qos, wqos);  // 无参=全哨兵零覆盖，底座值≡原写死 RELIABLE+TRANSIENT_LOCAL（等值替换）
     DataWriter* writer = publisher != nullptr ?
         publisher->create_datawriter(topic, wqos) : nullptr;
     if (writer == nullptr)
@@ -1929,6 +2025,15 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
         return false;
     }
 
+    // 登记时暂存的 QoS 描述（subscribeTopic 写入 pendingQos_）：无条目=全哨兵兜底
+    // （防御：正常路径登记与建订一一对应）
+    DDSQosProfile qos;
+    const auto qosIt = pendingQos_.find(topicName);
+    if (qosIt != pendingQos_.end())
+    {
+        qos = qosIt->second;
+    }
+
     // 按（主题, 告警类型）节流：首次立即打印，之后距上次打印 ≥ kSubWarnIntervalMs 才重复。
     // warnAt_ 受 mtx_ 保护（本函数入口即持 mtx_）
     auto warnThrottled = [this, &topicName](const char* kind, const std::string& text)
@@ -2002,7 +2107,9 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
         entry.topic = topic;
         entry.listener = std::make_unique<DebugSubListener>(topicName, ts.get_type_name(),
                     entry.topicType, sink_);
-        entry.reader = subscriber_->create_datareader(topic, DATAREADER_QOS_DEFAULT, entry.listener.get());
+        DataReaderQos rqos = DATAREADER_QOS_DEFAULT;
+        toReaderQos(qos, rqos);  // 无参=全哨兵零覆盖，底座值≡原 DATAREADER_QOS_DEFAULT（等值替换）
+        entry.reader = subscriber_->create_datareader(topic, rqos, entry.listener.get());
         if (entry.reader == nullptr)
         {
             warnThrottled("datareader",
@@ -2026,6 +2133,7 @@ bool FastDDSDebugNode::tryStartSubscription(const std::string& topicName,
 
     pending_.erase(topicName);
     pendingSince_.erase(topicName);
+    pendingQos_.erase(topicName);
     std::cout << "subscribed topic=" << topicName
               << " type=" << ts.get_type_name() << std::endl;
     return true;

@@ -100,7 +100,7 @@ YomkResponse YomkRpcDebugService::topicPrint(YomkPkgPtr pkg)
     // 拒绝原因由节点层归类透传（未入域 / subscriber 未建 / 主题名空 / 重复登记），
     // 不再统一报笼统 failed；保留 failed 字样以维持调用方对失败语义的既有判定
     std::string error;
-    if (!node_->subscribeTopic(p->msg.topicName, &error))
+    if (!node_->subscribeTopic(p->msg.topicName, &error, p->msg.qos))
     {
         if (error.empty())
         {
@@ -311,7 +311,7 @@ YomkResponse YomkRpcDebugService::topicPub(YomkPkgPtr pkg)
     uint32_t failed = 0;
     if (!node_->topicPub(p->msg.topicName, p->msg.json, error, p->msg.stableRounds,
                 p->msg.intervalMs, p->msg.repeatIntervalMs, p->msg.requiredSubscribers,
-                p->msg.maxTimes, &total, &failed))
+                p->msg.maxTimes, &total, &failed, p->msg.qos))
     {
         YOMK_ERROR_TAG("YomkRpcDebugService::topicPub", "pub failed: ", error);
         return YomkResponse(YomkResponse::eNo, error);

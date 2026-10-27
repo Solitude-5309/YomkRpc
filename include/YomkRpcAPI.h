@@ -91,15 +91,18 @@
 
 // 登记调试主题：发现匹配的远端 DataWriter 后自动解析类型并建立订阅，消息 JSON 文本逐条投递
 // output（DDSDebugOutputFunc，用户自定义，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误。
+// qos（可缺省尾参）：动态订阅 reader QoS DDSQosProfile；缺省全哨兵=Fast DDS reader 默认底座
+// （KEEP_LAST(1)+BEST_EFFORT+VOLATILE，现状行为）；对接 ROS2 高频流建议
+// DDSQosProfile::ros2DefaultSubscriber()（KEEP_LAST(10) 防丢样本）。
 // 登记为发现驱动的延迟行为：主题尚未被任何发布者上线时仍返回成功，订阅待 writer 出现后
 // 自动建立；登记约 3s 后仍无 writer 时由节点层工作线程打一次性等待提示（宽限窗避开
 // 刚入域发现未完成时对"发布者早已在线"的误报）。失败时 m_msg 携带节点层归类的具体拒绝原因
 // （debug node not created / subscriber not created / empty topic name /
 // topic [...] already registered）。返回 YomkResponse。
-#define YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output) \
+#define YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output, ...) \
     YOMK_REQUEST(                              \
         "/YomkRpcDebugService/topic_print",    \
-        YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, output}))
+        YomkMkPtr(DDSDebugTopic, DDSDebugTopic{topicName, output, ##__VA_ARGS__}))
 
 // 列出当前域内已发现的全部主题与数据类型名（自适应收敛）：轮询发现缓存快照，连续 stableRounds
 // 次集合不变即收敛返回（0 值钳制为默认 5 次/200ms；stableRounds=1 即单次快照免等待；最长阻塞约
@@ -202,11 +205,13 @@
 // 发满 maxTimes 条（>0 时，含首轮；发满达标在销毁发布链前保底排空 200ms 后返回，Ctrl+C
 // 中断不排空）才退出清理；成功响应 data 为 StringArray {"total=N", "failed=M"}（仅持续
 // 模式，含首轮）。未发现主题（topic [...] not found）/载荷不合法（invalid json for type [...]）/
-// 送达未确认返回 eNo。须先创建调试节点。返回 YomkResponse。
-#define YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes)  \
+// 送达未确认返回 eNo。qos（可缺省尾参）：临时发布 writer QoS DDSQosProfile；缺省全哨兵=
+// Fast DDS writer 默认底座（KEEP_LAST(1)+RELIABLE+TRANSIENT_LOCAL，≡既有写死值，现状行为）；
+// ROS2 底座建议 DDSQosProfile::ros2DefaultPublisher()。须先创建调试节点。返回 YomkResponse。
+#define YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes, ...)  \
     YOMK_REQUEST(                                                            \
         "/YomkRpcDebugService/topic_pub",                                    \
-        YomkMkPtr(DDSDebugTopicPub, DDSDebugTopicPub{topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes}))
+        YomkMkPtr(DDSDebugTopicPub, DDSDebugTopicPub{topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes, ##__VA_ARGS__}))
 
 // 列出当前域内已发现的全部命名参与者（独立收敛，与 list_topics/topic_info 完全分开）：轮询
 // 参与者发现缓存快照，连续 stableRounds 次不变即收敛返回（0 值钳制为默认 5 次/200ms；

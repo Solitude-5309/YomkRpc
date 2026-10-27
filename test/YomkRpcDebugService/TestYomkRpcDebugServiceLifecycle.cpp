@@ -19,6 +19,8 @@
  *       interface_list 类型名去重清单命中唯一行与空域未发现 eNo → topic_example 按主题名
  *       输出发布示例三段行集（Type/IDL/example 可复制命令逐段断言）与未发现主题 eNo →
  *       topic_pub 发布一次消息（eOk delivered，ack 确认送达）与非法 JSON eNo →
+ *       topic_pub 带 qos 尾参（BEST_EFFORT+VOLATILE 持续模式，闭环 2）→ 直连 observer
+ *       发现读回双差异行（服务层下传链路端到端）→
  *       topic_msg 两要素行集命中（类型名/紧凑 msg JSON 逐行断言）与未发现主题 eNo →
  *       node_info 命中五行断言（节点名/Subscribers
  *       段/Publishers 段，对齐 ros2 node info 形态）+ 未发现节点名 eNo → 退出前清理；
@@ -33,6 +35,7 @@
 
 #include "TestCheck.h"
 #include "YomkRpcDebugService.h" // 服务/DDSDebugNode/DDSDebugTopic/DDSDebugInfo/YOMK_* 宏
+#include "FastDDSDebugNode.h"    // qos 下传用例的直连 observer（发现 QoS 行读回，闭环 2）
 
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅 topic_info/node_info 命中用例的最小远端发布端）
 
@@ -46,8 +49,10 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include <cstdint>
+#include <atomic>
 #include <iostream>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -457,6 +462,65 @@ int main()
                 CHECK(pubBad.m_status == YomkResponse::eNo &&
                           pubBad.m_msg.find("invalid json") != std::string::npos,
                       "topic_pub 非法 JSON → eNo invalid json for type [...]（不触 DDS 发布）");
+
+                // topic_pub 带 qos 尾参（闭环 2 服务层下传链路端到端）：显式
+                // BEST_EFFORT+VOLATILE（与 writer 默认底座双差异）持续模式给观察窗——
+                // 下传链路（聚合尾参→handler 解包→node_->topicPub）完整走到 DDS，QoS
+                // 落端点经直连 observer（独立 FastDDSDebugNode）发现读回断言（HIT_TOPIC
+                // 上 hitParticipant 远端 writer 在场，命中需 ≥2 端点且全端点扫描，svc
+                // writer 的 BE+VOL 与 peer 默认底座双差异无歧义）；debugPubStop 停止
+                // 持续发布后 invoke 返回
+                {
+                    DDSQosProfile pubQos;
+                    pubQos.reliability = DDSReliability::BEST_EFFORT;
+                    pubQos.durability = DDSDurability::VOLATILE;
+                    std::atomic<int> pubQosStatus{-1};
+                    std::thread pubQosThread([&]() {
+                        auto r = svc->invoke("/topic_pub", YomkMkPtr(
+                            DDSDebugTopicPub, DDSDebugTopicPub{HIT_TOPIC,
+                            R"({"data":"t_pub_qos"})", 5, 100, 100, 0, 0, pubQos}));
+                        pubQosStatus.store(static_cast<int>(r.m_status));
+                    });
+                    FastDDSDebugNode observer;
+                    CHECK(observer.setDomainId(TEST_DOMAIN),
+                          "qos 下传用例直连 observer setDomainId → true");
+                    std::string obTn;
+                    size_t obPc = 0;
+                    size_t obSc = 0;
+                    std::vector<FastDDSDebugNode::EndpointDetail> obPubs;
+                    bool obSeen = false;
+                    for (int i = 0; i < 40 && !obSeen; ++i)
+                    {
+                        obPubs.clear();
+                        // 命中需 ≥2 端点：HIT_TOPIC 上 hitParticipant 远端 writer（默认
+                        // 底座）在场，svc topicPub writer 尚未被观察节点发现时不能提前命中
+                        obSeen = observer.topicInfo(HIT_TOPIC, obTn, obPc, obSc, 2, 100,
+                                        &obPubs, nullptr) && obPubs.size() >= 2;
+                        if (!obSeen)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                    yomk::debugPubStop();
+                    pubQosThread.join();
+                    CHECK(obSeen, "qos 下传用例 observer 读回 svc 发布 writer 端点详情");
+                    bool obRel = false;
+                    bool obDur = false;
+                    // 全端点扫描：peer（RE+TL 默认底座）与 svc writer（BE+VOL）双差异无歧义
+                    for (const auto &ep : obPubs)
+                    {
+                        for (const auto &line : ep.qosLines)
+                        {
+                            obRel = obRel || line.rfind("  Reliability: BEST_EFFORT", 0) == 0;
+                            obDur = obDur || line.rfind("  Durability: VOLATILE", 0) == 0;
+                            std::cout << "[OBSERVE] svc qos writer |" << line << "|" << std::endl;
+                        }
+                    }
+                    CHECK(obRel && obDur,
+                          "topic_pub 带 qos 尾参 → writer 发现读回 BEST_EFFORT+VOLATILE（服务层下传链路端到端）");
+                    CHECK(pubQosStatus.load() == static_cast<int>(YomkResponse::eOk),
+                          "qos 下传持续模式停止后 invoke 返回 eOk");
+                }
 
                 // topic_msg：两要素行集（d[0]=类型名、d[1]=紧凑 msg JSON，机器可读契约，
                 // 断言对齐 topic_example 的宽松风格）

@@ -38,6 +38,9 @@ target_link_libraries(ExampleYomkRpcSub PRIVATE YomkRpc::YomkRpc YomkServer::Yom
 # 查询主题详情 / 列出域内节点 / 查询节点详情；类型无关，无需 YomkRpcMsg）
 add_executable(yomkrpc yomkrpc.cpp)
 target_link_libraries(yomkrpc PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer)
+# --qos-file 解析依赖 nlohmann/json（vendored header-only；主库 PRIVATE include 不导出，
+# 此处单独配路径）
+target_include_directories(yomkrpc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/nlohmann_json/include)
 
 # 示例程序随扩展一并安装到 <安装路径>/bin（运行方式见 README）
 # 示例程序可能有多个，此处显式列出全部示例目标名（不能用 ${PROJECT_NAME} 占位）

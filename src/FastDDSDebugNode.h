@@ -1,6 +1,8 @@
 #ifndef FASTDDSDEBUGNODE_H
 #define FASTDDSDEBUGNODE_H
 
+#include "YomkRpcService.h"  // DDSQosProfile（端点 QoS 描述，公共头零 fastdds 依赖；平铺引号形式命中 include/，安装树经 YomkRpc/ 前缀提供同一头）
+
 #include <chrono>
 #include <cstdint>
 #include <fastdds/dds/builtin/topic/PublicationBuiltinTopicData.hpp>
@@ -77,7 +79,13 @@ public:
     // 四类各自独立文本，不再统一报笼统 failed；登记后满 kPendingHintDelayMs 仍未发现
     // writer 时由工作线程打一次性等待提示（登记本身不阻塞、不改返回值——订阅建立
     // 本就是发现驱动的延迟行为）。
-    bool subscribeTopic(const std::string& topicName, std::string* error = nullptr);
+    // qos 为动态订阅 reader 的 QoS 描述（可缺省尾参）：全哨兵=Fast DDS reader 默认底座
+    // （KEEP_LAST(1)+BEST_EFFORT+VOLATILE，即现状行为）；对接 ROS2 高频流建议
+    // DDSQosProfile::ros2DefaultSubscriber()（KEEP_LAST(10) 防丢样本）。qos 随登记写入
+    // pendingQos_ 暂存，工作线程建订（tryStartSubscription）时取用：建订成功随 pending_
+    // 一同清除，失败保留供重试。
+    bool subscribeTopic(const std::string& topicName, std::string* error = nullptr,
+            const DDSQosProfile& qos = DDSQosProfile{});
     // 设置输出目的地；须在订阅实际建立前调用（工作线程建订阅时按值捕获），用于测试注入。
     void setOutputSink(OutputSink sink);
     // 列出已发现的远端主题与数据类型名（自适应收敛查询，基于发现缓存：远端 DataWriter 与
@@ -204,8 +212,10 @@ public:
     // 主题 false，error="topic [...] not found"）→ ②类型重建 + JSON 解析（json_deserialize
     // EPROSIMA 格式，与 topic pub -e 模板对称；失败 false，error="invalid json ..."，不建
     // writer）→ ③建临时发布链（DynamicPubSubType 注册 + create_topic/publisher/datawriter，
-    // QoS 固定 RELIABLE+TRANSIENT_LOCAL 最大兼容：请求 ≤ 提供规则下覆盖 FastDDSNode 默认与
-    // ros2 常见组合）+ 匹配收敛（requiredSubscribers>0 时先阻塞等待 matched 订阅端计数达到
+    // QoS 经 qos 尾参描述：全哨兵=Fast DDS writer 默认底座 KEEP_LAST(1)+RELIABLE+
+    // TRANSIENT_LOCAL，≡既有固定值（请求 ≤ 提供规则下最大兼容），无参行为不变；ROS2
+    // 对接建议显式传 DDSQosProfile::ros2DefaultPublisher()）+ 匹配收敛（
+    // requiredSubscribers>0 时先阻塞等待 matched 订阅端计数达到
     // 该值——每 intervalMs 轮询一次，计数变化或约每 5s 打印等待进度日志（stdout），一直等
     // 待不设超时，yomk::g_debugPubStop 置位即中断返回 false（error="waiting for subscribers
     // interrupted"）；=0 时跳过直接进入稳定收敛）+ publication matched 计数连续 stableRounds
@@ -224,6 +234,7 @@ public:
     // 2*stableRounds*intervalMs + 2s（ack 可用时）；requiredSubscribers>0 时匹配等待不设
     // 上限（直至达标或 g_debugPubStop 中断）；持续模式再叠加用户 Ctrl+C 或发满 maxTimes
     // 前的全部间隔时长。total/failed 统计出参可空（仅持续模式回填；单次发布成功隐含 total=1）。
+    // qos 为临时发布 writer 的 QoS 描述（可缺省尾参，语义见上方阶段③说明）。
     bool topicPub(const std::string& topicName, const std::string& json,
             std::string& error,
             uint32_t stableRounds = kDefaultStableRounds,
@@ -232,7 +243,8 @@ public:
             uint32_t requiredSubscribers = 0,
             uint32_t maxTimes = 0,
             uint32_t* total = nullptr,
-            uint32_t* failed = nullptr);
+            uint32_t* failed = nullptr,
+            const DDSQosProfile& qos = DDSQosProfile{});
 
 private:
     // listTopics 的收敛轮询辅助（私有实现细节）：假定调用方已完成入域检查，仅承担快照轮询
@@ -348,6 +360,11 @@ private:
     // writer"并打一次性等待提示，提示打过后置 time_point::max() 作已提示标记（不重复打）；
     // 订阅建立成功时随 pending_ 一同清除。受 mtx_ 保护，主题数有限无需逐出
     std::map<std::string, std::chrono::steady_clock::time_point> pendingSince_;
+    // 已登记主题的 QoS 暂存（topic → 描述）：subscribeTopic 登记成功处同步写入，工作线程
+    // tryStartSubscription 入口取用（无条目=全哨兵兜底），建订成功随 pending_ 一同清除，
+    // 失败保留供重试；节点析构随成员销毁释放（服务层删除节点即 node_.reset()）。生命周期
+    // 与 pending_/pendingSince_ 同步，受 mtx_ 保护（同锁域）
+    std::map<std::string, DDSQosProfile> pendingQos_;
     std::mutex mtx_;  // 串行化公开方法与工作线程（participant_/pending_/subs_/workerRunning_）
     // 发现缓存专用叶子锁（保护 seen_/seenReaders_/seenParticipants_）：发现回调在 Fast DDS 持有 PDP/EDP 内部
     // 锁的临界区内被调用，只允许拿此锁——若拿 mtx_ 会与工作线程（tryStartSubscription 持

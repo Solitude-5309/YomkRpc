@@ -48,6 +48,14 @@
  *   等待提示 无发布者主题 subscribeTopic → true（登记不因未发现而失败）；宽限窗内
  *         （2s < kPendingHintDelayMs=3000）不打提示（刚入域发现未完成时对"发布者早已在线"
  *         的常规场景不误报）；满窗后恰打 1 次 "not discovered yet" 且后续轮询不重复。
+ *   端点 QoS（闭环 2）topicPub 显式 BEST_EFFORT+VOLATILE（持续模式给观察窗；先放 peer
+ *         发布端制造发现数据——topicPub 前置是主题已发现且类型可重建，未发现报 not
+ *         found）/ 无参（全哨兵）保现值 RELIABLE+TRANSIENT_LOCAL（原写死值≡默认底座，
+ *         等值替换；peer 显式 BE+VOL 制造双差异）；动态订阅显式 RELIABLE+depth=10 读回
+ *         （与 reader 底座 BEST_EFFORT 双差异）+ 匹配收数据；requested>offered 反证：
+ *         offered BEST_EFFORT vs requested RELIABLE 收 0 条且 reader 仍建立读回
+ *         RELIABLE（翻译落端点直证）。writer/reader 均不外露，断言经二号调试节点
+ *         topicInfo verbose 的发现 QoS 行读回（发现数据是唯一观察面）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  *       不经 YomkRpcService/YOMK_INIT，直接 RAII 使用 FastDDSNode 与 FastDDSDebugNode
@@ -1536,6 +1544,250 @@ int main()
         const std::string tailWindow = hintCap3.stop();
         CHECK(tailWindow.find(kHintMark) == std::string::npos,
               "提示已打过 → 后续轮询不再重复（一次性）");
+    }
+
+    // ---- 端点 QoS 用例（闭环 2）：topicPub writer 与动态订阅 reader 的 QoS 经
+    // DDSQosProfile 可调，无参（全哨兵）保持默认底座。writer/reader 均不外露，断言
+    // 经二号调试节点（observer）topicInfo verbose 的发现 QoS 行读回（发现数据携带端点
+    // QoS，是唯一观察面，先例同 nodeInfo verbose 用例）；收发实证经 setOutputSink ----
+    {
+        FastDDSDebugNode observer;
+        CHECK(observer.setDomainId(TEST_DOMAIN), "QoS 用例观察节点 setDomainId(200) → true");
+
+        // 辅助：轮询读回 verbose 端点详情（等发现/建订就绪，最多约 4s×快照窗）；minCount
+        // 为命中所需端点数下限（pub 用例读回含 peer+topicPub 两个 writer，peer 先被发现时
+        // 不能提前命中，须等到被测 writer 也在场）
+        auto waitVerbose = [&observer](const char *topic, bool wantPubs,
+                std::vector<FastDDSDebugNode::EndpointDetail> &out, size_t minCount = 1) {
+            std::string tn;
+            size_t pc = 0;
+            size_t sc = 0;
+            for (int i = 0; i < 40; ++i)
+            {
+                out.clear();
+                if (observer.topicInfo(topic, tn, pc, sc, 2, 100,
+                        wantPubs ? &out : nullptr, wantPubs ? nullptr : &out) &&
+                        out.size() >= minCount)
+                {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return false;
+        };
+        // 辅助：端点详情行集（任一端点）是否含 "  <键>: <值>" 行（逐行前缀匹配，同 verbose
+        // 先例；全端点扫描——读回端点含 peer 与 topicPub 两个 writer，peer 显式 QoS 与
+        // 目标行集双差异故命中无歧义）
+        auto hasQosLine = [](const std::vector<FastDDSDebugNode::EndpointDetail> &detail,
+                const char *key, const char *value) {
+            const std::string prefix = std::string("  ") + key + ": " + value;
+            for (const auto &ep : detail)
+            {
+                for (const auto &line : ep.qosLines)
+                {
+                    if (line.rfind(prefix, 0) == 0)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        // ① topicPub 显式 BEST_EFFORT+VOLATILE（持续模式给观察窗）：与 writer 默认底座
+        // （RELIABLE+TRANSIENT_LOCAL）双差异 → 直证 profile 落端点。topicPub 前置是主题
+        // 已被发现且类型可重建（waitForTopicInfoStable→fetchTypeObject，未发现即 not
+        // found 返回）——先放 peer 发布端制造发现数据；peer 用默认底座，读回端点含
+        // peer+topicPub 两个 writer，BEST_EFFORT/VOLATILE 行无歧义归属 topicPub writer
+        {
+            constexpr const char *BE_TOPIC = "t_qos_pub_be";
+            FastDDSNode peer;
+            CHECK(peer.setDomainId(TEST_DOMAIN),
+                  "topicPub QoS 用例发布端 peer setDomainId → true（制造发现数据）");
+            CHECK(peer.registerPubTopic(BE_TOPIC, new YomkRpc::MStringPubSubType()),
+                  "topicPub QoS 用例发布端 registerPubTopic（默认底座）→ true");
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            FastDDSDebugNode dbg;
+            CHECK(dbg.setDomainId(TEST_DOMAIN), "topicPub QoS 用例被测端 setDomainId → true");
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            DDSQosProfile beVo;
+            beVo.reliability = DDSReliability::BEST_EFFORT;
+            beVo.durability = DDSDurability::VOLATILE;
+            uint32_t beTotal = 0;
+            uint32_t beFailed = 0;
+            std::thread pubThread([&]() {
+                std::string pErr;
+                const bool ok = dbg.topicPub(BE_TOPIC, R"({"data":"qos_be"})", pErr, 5, 100,
+                        100, 0, 0, &beTotal, &beFailed, beVo);
+                std::cout << "[OBSERVE] topicPub(be) ok=" << ok << " err=|" << pErr
+                          << "| total=" << beTotal << " failed=" << beFailed << std::endl;
+            });
+            std::vector<FastDDSDebugNode::EndpointDetail> pubDetail;
+            const bool seen = waitVerbose(BE_TOPIC, true, pubDetail, 2);
+            yomk::debugPubStop();  // 停止持续发布（发布线程 join 后 dbg 析构）
+            pubThread.join();
+            CHECK(seen, "topicPub 持续发布期间观察节点读回 writer 端点详情");
+            for (const auto &ep : pubDetail)
+            {
+                for (const auto &line : ep.qosLines)
+                {
+                    std::cout << "[OBSERVE] be writer qos |" << line << "|" << std::endl;
+                }
+            }
+            CHECK(hasQosLine(pubDetail, "Reliability", "BEST_EFFORT"),
+                  "显式 BEST_EFFORT → writer 发现读回 Reliability: BEST_EFFORT（profile 落端点）");
+            CHECK(hasQosLine(pubDetail, "Durability", "VOLATILE"),
+                  "显式 VOLATILE → writer 发现读回 Durability: VOLATILE（profile 落端点）");
+        }
+
+        // ② topicPub 无参（全哨兵零覆盖）→ 保现值 RELIABLE+TRANSIENT_LOCAL
+        // （原写死两行 ≡ 默认底座，等值替换无参行为不变）。peer 经闭环 1 qos 尾参显式
+        // BEST_EFFORT+VOLATILE 制造发现数据且与目标行集双差异——RELIABLE/TRANSIENT_LOCAL
+        // 行无歧义归属 topicPub writer
+        {
+            constexpr const char *DEF_TOPIC = "t_qos_pub_def";
+            FastDDSNode peer;
+            CHECK(peer.setDomainId(TEST_DOMAIN),
+                  "无参 topicPub 用例发布端 peer setDomainId → true（制造发现数据）");
+            DDSQosProfile peerBeVo;  // 显式 BE+VOL：与被测 writer 的 RELIABLE+TRANSIENT_LOCAL 双差异
+            peerBeVo.reliability = DDSReliability::BEST_EFFORT;
+            peerBeVo.durability = DDSDurability::VOLATILE;
+            CHECK(peer.registerPubTopic(DEF_TOPIC, new YomkRpc::MStringPubSubType(), peerBeVo),
+                  "无参 topicPub 用例发布端 registerPubTopic 显式 BEST_EFFORT+VOLATILE → true");
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            FastDDSDebugNode dbg;
+            CHECK(dbg.setDomainId(TEST_DOMAIN), "topicPub 无参 QoS 用例被测端 setDomainId → true");
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::thread pubThread([&]() {
+                std::string pErr;
+                const bool ok = dbg.topicPub(DEF_TOPIC, R"({"data":"qos_def"})", pErr, 5, 100, 100);
+                std::cout << "[OBSERVE] topicPub(def) ok=" << ok << " err=|" << pErr << "|"
+                          << std::endl;
+            });
+            std::vector<FastDDSDebugNode::EndpointDetail> defDetail;
+            const bool seenDef = waitVerbose(DEF_TOPIC, true, defDetail, 2);
+            yomk::debugPubStop();
+            pubThread.join();
+            CHECK(seenDef, "无参 topicPub 持续发布期间观察节点读回 writer 端点详情");
+            for (const auto &ep : defDetail)
+            {
+                for (const auto &line : ep.qosLines)
+                {
+                    std::cout << "[OBSERVE] def writer qos |" << line << "|" << std::endl;
+                }
+            }
+            CHECK(hasQosLine(defDetail, "Reliability", "RELIABLE"),
+                  "无参 → writer 发现读回 Reliability: RELIABLE（保现值）");
+            CHECK(hasQosLine(defDetail, "Durability", "TRANSIENT_LOCAL"),
+                  "无参 → writer 发现读回 Durability: TRANSIENT_LOCAL（保现值）");
+        }
+
+        // ③ 动态订阅 reader 显式 RELIABLE+depth=10：peer 发布端（默认底座 RELIABLE offered）
+        // → 匹配收数据（sink 实证，异步建订链路终端）+ 读回 Subscribers 段
+        // Reliability: RELIABLE（与 reader 底座 BEST_EFFORT 差异）+ History: KEEP_LAST (depth 10)
+        {
+            constexpr const char *SUB_TOPIC = "t_qos_sub_reliable";
+            FastDDSNode peer;
+            CHECK(peer.setDomainId(TEST_DOMAIN, "test-qos-pub"),
+                  "reader QoS 用例发布端 setDomainId → true");
+            CHECK(peer.registerPubTopic(SUB_TOPIC, new YomkRpc::MStringPubSubType()),
+                  "reader QoS 用例发布端 registerPubTopic（默认底座 RELIABLE offered）→ true");
+
+            FastDDSDebugNode dbg;
+            CHECK(dbg.setDomainId(TEST_DOMAIN), "reader QoS 用例被测端 setDomainId → true");
+            std::mutex subMtx;
+            std::string subCaptured;
+            dbg.setOutputSink([&subMtx, &subCaptured](const std::string &text) {
+                std::lock_guard<std::mutex> lk(subMtx);
+                subCaptured += text;
+            });
+            DDSQosProfile subQos;
+            subQos.reliability = DDSReliability::RELIABLE;
+            subQos.depth = 10;
+            std::string subErr;
+            CHECK(dbg.subscribeTopic(SUB_TOPIC, &subErr, subQos),
+                  "subscribeTopic 显式 RELIABLE+depth=10 → true（登记成功 qos 暂存）");
+
+            // 发布循环直至收到 payload 或超时（匹配建立前的样本丢失，同端到端先例）
+            YomkRpc::MString msg;
+            msg.data("qos_sub_payload");
+            bool got = false;
+            for (int i = 0; i < 50 && !got; ++i)
+            {
+                peer.publish(SUB_TOPIC, &msg);
+                {
+                    std::lock_guard<std::mutex> lk(subMtx);
+                    got = subCaptured.find("qos_sub_payload") != std::string::npos;
+                }
+                if (!got)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            CHECK(got, "显式 RELIABLE reader（requested==offered）收到消息（异步建订链路终端实证）");
+
+            // observer 读回被测端 reader 端点（verbose Subscribers 段）
+            std::vector<FastDDSDebugNode::EndpointDetail> subDetail;
+            const bool seenSub = waitVerbose(SUB_TOPIC, false, subDetail);
+            CHECK(seenSub, "观察节点读回被测端 reader 端点详情（建订完成实证）");
+            for (const auto &line : (subDetail.empty() ? std::vector<std::string>()
+                                                       : subDetail[0].qosLines))
+            {
+                std::cout << "[OBSERVE] reliable reader qos |" << line << "|" << std::endl;
+            }
+            CHECK(hasQosLine(subDetail, "Reliability", "RELIABLE"),
+                  "显式 RELIABLE → reader 发现读回 Reliability: RELIABLE（与底座 BEST_EFFORT 差异）");
+            CHECK(hasQosLine(subDetail, "History", "KEEP_LAST (depth 10)"),
+                  "显式 depth=10 → reader 发现读回 History: KEEP_LAST (depth 10)");
+        }
+
+        // ④ requested>offered 反证：发布端经闭环 1 通道显式 BEST_EFFORT（offered），
+        // 被测端显式 RELIABLE（requested）→ 不匹配收 0 条；reader 仍建立（发现缓存可见）
+        // 且读回 Reliability: RELIABLE——直证 requested 翻译落端点（不匹配≠未建订）
+        {
+            constexpr const char *MS_TOPIC = "t_qos_mismatch";
+            FastDDSNode peer;
+            CHECK(peer.setDomainId(TEST_DOMAIN, "test-qos-mismatch"),
+                  "反证用例发布端 setDomainId → true");
+            DDSQosProfile beOffered;
+            beOffered.reliability = DDSReliability::BEST_EFFORT;
+            CHECK(peer.registerPubTopic(MS_TOPIC, new YomkRpc::MStringPubSubType(), beOffered),
+                  "反证用例发布端 registerPubTopic 显式 BEST_EFFORT offered → true");
+
+            FastDDSDebugNode dbg;
+            CHECK(dbg.setDomainId(TEST_DOMAIN), "反证用例被测端 setDomainId → true");
+            std::mutex msMtx;
+            std::string msCaptured;
+            dbg.setOutputSink([&msMtx, &msCaptured](const std::string &text) {
+                std::lock_guard<std::mutex> lk(msMtx);
+                msCaptured += text;
+            });
+            DDSQosProfile relRequested;
+            relRequested.reliability = DDSReliability::RELIABLE;
+            std::string msErr;
+            CHECK(dbg.subscribeTopic(MS_TOPIC, &msErr, relRequested),
+                  "反证用例 subscribeTopic 显式 RELIABLE requested → true");
+
+            // 观察窗：发布 30 条×100ms，requested>offered 不匹配 → 全部丢失
+            YomkRpc::MString msg;
+            msg.data("mismatch_payload");
+            for (int i = 0; i < 30; ++i)
+            {
+                peer.publish(MS_TOPIC, &msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            {
+                std::lock_guard<std::mutex> lk(msMtx);
+                CHECK(msCaptured.find("mismatch_payload") == std::string::npos,
+                      "requested RELIABLE > offered BEST_EFFORT 不匹配 → 收 0 条（翻译生效反证）");
+            }
+            // reader 建立实证：observer 读回 Subscribers 段 Reliability: RELIABLE
+            std::vector<FastDDSDebugNode::EndpointDetail> msDetail;
+            const bool seenMs = waitVerbose(MS_TOPIC, false, msDetail);
+            CHECK(seenMs, "反证用例 reader 建立成功（读回端点详情）");
+            CHECK(hasQosLine(msDetail, "Reliability", "RELIABLE"),
+                  "反证用例 reader 读回 Reliability: RELIABLE（requested 翻译落端点直证）");
+        }
     }
 
     return testReport("TestFastDDSDebugNode");
