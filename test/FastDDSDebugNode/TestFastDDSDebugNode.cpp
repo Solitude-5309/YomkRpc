@@ -1593,6 +1593,25 @@ int main()
             }
             return false;
         };
+        // 辅助：单端点前 8 行 ROS2 对齐组键序恒齐（History/Depth/Reliability/Durability/
+        // Deadline/Lifespan/Liveliness/Liveliness lease duration，rmw_qos_profile_t 八字段序）
+        auto alignKeysOk = [](const FastDDSDebugNode::EndpointDetail &ep) {
+            static const char *kAlignKeys[8] = {"History", "Depth", "Reliability",
+                "Durability", "Deadline", "Lifespan", "Liveliness",
+                "Liveliness lease duration"};
+            if (ep.qosLines.size() < 8)
+            {
+                return false;
+            }
+            for (size_t i = 0; i < 8; ++i)
+            {
+                if (ep.qosLines[i].rfind(std::string("  ") + kAlignKeys[i] + ": ", 0) != 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
 
         // ① topicPub 显式 BEST_EFFORT+VOLATILE（持续模式给观察窗）：与 writer 默认底座
         // （RELIABLE+TRANSIENT_LOCAL）双差异 → 直证 profile 落端点。topicPub 前置是主题
@@ -1638,6 +1657,18 @@ int main()
                   "显式 BEST_EFFORT → writer 发现读回 Reliability: BEST_EFFORT（profile 落端点）");
             CHECK(hasQosLine(pubDetail, "Durability", "VOLATILE"),
                   "显式 VOLATILE → writer 发现读回 Durability: VOLATILE（profile 落端点）");
+            // 对齐组恒齐：两 writer 端点 qosLines 前 8 行键序固定（闭环 3 口径，对齐
+            // rmw_qos_profile_t 八字段序）
+            for (const auto &ep : pubDetail)
+            {
+                CHECK(alignKeysOk(ep), "writer 端点 qosLines 前 8 行 ROS2 对齐组键序恒齐");
+            }
+            // not advertised 兜底：Fast DDS 本地 writer 发现数据不携带 history → 两行显式
+            // not advertised（替代旧口径 has_value 为空静默跳过）
+            CHECK(hasQosLine(pubDetail, "History", "not advertised"),
+                  "writer 发现数据不携带 history → History: not advertised 显式兜底");
+            CHECK(hasQosLine(pubDetail, "Depth", "not advertised"),
+                  "writer 发现数据不携带 history → Depth: not advertised 显式兜底");
         }
 
         // ② topicPub 无参（全哨兵零覆盖）→ 保现值 RELIABLE+TRANSIENT_LOCAL
@@ -1684,7 +1715,8 @@ int main()
 
         // ③ 动态订阅 reader 显式 RELIABLE+depth=10：peer 发布端（默认底座 RELIABLE offered）
         // → 匹配收数据（sink 实证，异步建订链路终端）+ 读回 Subscribers 段
-        // Reliability: RELIABLE（与 reader 底座 BEST_EFFORT 差异）+ History: KEEP_LAST (depth 10)
+        // Reliability: RELIABLE（与 reader 底座 BEST_EFFORT 差异）+ History: KEEP_LAST
+        // + 独立 Depth: 10 行（闭环 3 拆行口径）
         {
             constexpr const char *SUB_TOPIC = "t_qos_sub_reliable";
             FastDDSNode peer;
@@ -1737,8 +1769,10 @@ int main()
             }
             CHECK(hasQosLine(subDetail, "Reliability", "RELIABLE"),
                   "显式 RELIABLE → reader 发现读回 Reliability: RELIABLE（与底座 BEST_EFFORT 差异）");
-            CHECK(hasQosLine(subDetail, "History", "KEEP_LAST (depth 10)"),
-                  "显式 depth=10 → reader 发现读回 History: KEEP_LAST (depth 10)");
+            CHECK(hasQosLine(subDetail, "History", "KEEP_LAST"),
+                  "显式 depth=10 → reader 发现读回 History: KEEP_LAST（Depth 独立行）");
+            CHECK(hasQosLine(subDetail, "Depth", "10"),
+                  "显式 depth=10 → reader 发现读回独立 Depth: 10 行");
         }
 
         // ④ requested>offered 反证：发布端经闭环 1 通道显式 BEST_EFFORT（offered），

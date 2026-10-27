@@ -211,19 +211,22 @@ std::string partitionNames(const PartitionQosPolicy& partition)
     return out;
 }
 
-// 扩展组（fastcdr::optional）：发现数据携带（has_value）才追加行
-void appendHistoryLine(std::vector<std::string>& lines, const HistoryQosPolicy& history)
+// ROS2 对齐组前两行：History/Depth 独立两行同源判定（发现数据携带输出实值，KEEP_ALL 时 Depth
+// 为发现数据原值 0）；为空时两行均 not advertised（显式标注替代静默跳过）
+void appendHistoryDepthLines(std::vector<std::string>& lines,
+        const eprosima::fastcdr::optional<HistoryQosPolicy>& history)
 {
-    std::string line = "  History: ";
-    if (history.kind == KEEP_ALL_HISTORY_QOS)
+    if (history.has_value())
     {
-        line += "KEEP_ALL";
+        lines.emplace_back(std::string("  History: ") +
+                (history->kind == KEEP_ALL_HISTORY_QOS ? "KEEP_ALL" : "KEEP_LAST"));
+        lines.emplace_back("  Depth: " + std::to_string(history->depth));
     }
     else
     {
-        line += "KEEP_LAST (depth " + std::to_string(history.depth) + ")";
+        lines.emplace_back("  History: not advertised");
+        lines.emplace_back("  Depth: not advertised");
     }
-    lines.push_back(std::move(line));
 }
 
 void appendResourceLimitsLine(std::vector<std::string>& lines,
@@ -234,28 +237,27 @@ void appendResourceLimitsLine(std::vector<std::string>& lines,
             ", max_samples_per_instance=" + std::to_string(limits.max_samples_per_instance));
 }
 
-// writer 端点的 QoS profile 行集：核心组恒输出（11 行）+ 扩展组按发现数据携带情况追加
+// writer 端点的 QoS profile 行集：ROS2 对齐组恒 8 行前置（History/Depth 同源判定，其余六项
+// 为发现数据值成员恒输出）+ DDS 扩展组后置按发现数据携带情况追加（optional 一行不删）
 std::vector<std::string> writerQosLines(const rtps::PublicationBuiltinTopicData& writer)
 {
     std::vector<std::string> lines;
+    appendHistoryDepthLines(lines, writer.history);
     lines.emplace_back(std::string("  Reliability: ") +
             reliabilityKindName(writer.reliability.kind));
     lines.emplace_back(std::string("  Durability: ") + durabilityKindName(writer.durability.kind));
     lines.emplace_back("  Deadline: " + formatDuration(writer.deadline.period));
-    lines.emplace_back("  Latency Budget: " + formatDuration(writer.latency_budget.duration));
     lines.emplace_back("  Lifespan: " + formatDuration(writer.lifespan.duration));
     lines.emplace_back(std::string("  Liveliness: ") + livelinessKindName(writer.liveliness.kind));
     lines.emplace_back(
         "  Liveliness lease duration: " + formatDuration(writer.liveliness.lease_duration));
+    // DDS 扩展组：发现数据携带情况决定（值成员恒输出 / optional 追加），一行不删
+    lines.emplace_back("  Latency Budget: " + formatDuration(writer.latency_budget.duration));
     lines.emplace_back(std::string("  Ownership: ") + ownershipKindName(writer.ownership.kind));
     lines.emplace_back("  Ownership Strength: " + std::to_string(writer.ownership_strength.value));
     lines.emplace_back(std::string("  Destination Order: ") +
             destinationOrderKindName(writer.destination_order.kind));
     lines.emplace_back("  Partition: " + partitionNames(writer.partition));
-    if (writer.history.has_value())
-    {
-        appendHistoryLine(lines, *writer.history);
-    }
     if (writer.resource_limits.has_value())
     {
         appendResourceLimitsLine(lines, *writer.resource_limits);
@@ -280,30 +282,28 @@ std::vector<std::string> writerQosLines(const rtps::PublicationBuiltinTopicData&
     return lines;
 }
 
-// reader 端点的 QoS profile 行集：核心组恒输出（11 行，无 Ownership Strength、多 Time Based
-// Filter）+ 扩展组按发现数据携带情况追加
+// reader 端点的 QoS profile 行集：ROS2 对齐组恒 8 行前置（同 writer 构成同序）+ DDS 扩展组
+// 后置（无 Ownership Strength、多 Time Based Filter，optional 一行不删）
 std::vector<std::string> readerQosLines(const rtps::SubscriptionBuiltinTopicData& reader)
 {
     std::vector<std::string> lines;
+    appendHistoryDepthLines(lines, reader.history);
     lines.emplace_back(std::string("  Reliability: ") +
             reliabilityKindName(reader.reliability.kind));
     lines.emplace_back(std::string("  Durability: ") + durabilityKindName(reader.durability.kind));
     lines.emplace_back("  Deadline: " + formatDuration(reader.deadline.period));
-    lines.emplace_back("  Latency Budget: " + formatDuration(reader.latency_budget.duration));
     lines.emplace_back("  Lifespan: " + formatDuration(reader.lifespan.duration));
     lines.emplace_back(std::string("  Liveliness: ") + livelinessKindName(reader.liveliness.kind));
     lines.emplace_back(
         "  Liveliness lease duration: " + formatDuration(reader.liveliness.lease_duration));
+    // DDS 扩展组：发现数据携带情况决定（值成员恒输出 / optional 追加），一行不删
+    lines.emplace_back("  Latency Budget: " + formatDuration(reader.latency_budget.duration));
     lines.emplace_back(std::string("  Ownership: ") + ownershipKindName(reader.ownership.kind));
     lines.emplace_back(
         "  Time Based Filter: " + formatDuration(reader.time_based_filter.minimum_separation));
     lines.emplace_back(std::string("  Destination Order: ") +
             destinationOrderKindName(reader.destination_order.kind));
     lines.emplace_back("  Partition: " + partitionNames(reader.partition));
-    if (reader.history.has_value())
-    {
-        appendHistoryLine(lines, *reader.history);
-    }
     if (reader.resource_limits.has_value())
     {
         appendResourceLimitsLine(lines, *reader.resource_limits);
