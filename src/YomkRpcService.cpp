@@ -9,6 +9,10 @@
 #include "YomkRpcService.h"
 
 #include "FastDDSNode.h"
+#include "FastDDSXmlHelper.h"  // yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSNode.h 传递亦可得，显式引入对齐 IWYU）
+
+#include <fstream>
+#include <sstream>
 
 namespace
 {
@@ -39,6 +43,7 @@ YomkRpcService::~YomkRpcService() = default;
 int YomkRpcService::init()
 {
     YomkInstallFunc("/version", YomkRpcService::getVersion);
+    YomkInstallFunc("/load_xml", YomkRpcService::loadXml);
     YomkInstallFunc("/create_node", YomkRpcService::createNode);
     YomkInstallFunc("/delete_node", YomkRpcService::deleteNode);
     YomkInstallFunc("/register_pub_topic", YomkRpcService::registerPubTopic);
@@ -53,6 +58,47 @@ YomkResponse YomkRpcService::getVersion(YomkPkgPtr pkg)
 {
     std::string version = "YomkRpc v" YOMKRPC_VERSION_STRING;
     return YomkResponse(YomkResponse::eOk, "ok", YomkMkPtr(String, version));
+}
+
+YomkResponse YomkRpcService::loadXml(YomkPkgPtr pkg)
+{
+    YomkUnPackPkgResponse(pkg, DDSXmlLoad, p);
+
+    if (p->msg.xmlPath.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcService::loadXml", "xml path is empty");
+        return YomkResponse(YomkResponse::eNo, "xml path is empty");
+    }
+    // 读 raw 串缓存：get_*_qos_from_xml 系列吃 raw 串非文件路径，节点层三级提取链经 xmlCache() 取用
+    std::ifstream file(p->msg.xmlPath);
+    if (!file)
+    {
+        YOMK_ERROR_TAG("YomkRpcService::loadXml", "xml file [", p->msg.xmlPath, "] not readable");
+        return YomkResponse(YomkResponse::eNo, "xml file [" + p->msg.xmlPath + "] not readable");
+    }
+    std::ostringstream buf;
+    buf << file.rdbuf();
+    const std::string xml = buf.str();
+    if (xml.empty())
+    {
+        YOMK_ERROR_TAG("YomkRpcService::loadXml", "xml file [", p->msg.xmlPath, "] is empty");
+        return YomkResponse(YomkResponse::eNo, "xml file [" + p->msg.xmlPath + "] is empty");
+    }
+    // Fast DDS 解析校验前置：文件格式非法在 load 时报（rc 为 int32_t 别名 ReturnCode_t，整值
+    // 回显便于对照官方错误码；成功仅证明文件可解析，缓存后由节点层按名/默认档提取）
+    auto* factory = eprosima::fastdds::dds::DomainParticipantFactory::get_instance();
+    const auto rc = factory->load_XML_profiles_file(p->msg.xmlPath);
+    if (rc != eprosima::fastdds::dds::RETCODE_OK)
+    {
+        YOMK_ERROR_TAG("YomkRpcService::loadXml", "load_XML_profiles_file [", p->msg.xmlPath, "] failed, rc=", rc);
+        return YomkResponse(
+            YomkResponse::eNo,
+            "load_XML_profiles_file [" + p->msg.xmlPath + "] failed, rc=" + std::to_string(rc));
+    }
+    // 缓存更新在服务 mtx_ 内（防同服务并发 load 交错写）；读取侧（Debug/Bag 服务经 xmlCache()）仅拷贝
+    std::lock_guard<std::mutex> lock(mtx_);
+    xmlCache_ = xml;
+    return YomkResponse(YomkResponse::eOk, "ok");
 }
 
 YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
@@ -84,10 +130,24 @@ YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
     }
 
     auto node = std::make_unique<FastDDSNode>();
-    if (!node->setDomainId(p->msg.domainId, p->msg.nodeName))
+    // XML 配置通道 + serverLocator 直配（闭环 4）：spec 组装——xmlCache_ 空串=未加载，提取链
+    // 跳过回退现状；serverLocator 空串=不直配现状。非法 serverSpec 经 err 回显具体非法项
+    yomkrpc_xml::ParticipantQosSpec spec;
+    spec.xml = xmlCache_;
+    spec.serverSpec = p->msg.serverLocator;
+    std::string nodeErr;
+    if (!node->setDomainId(p->msg.domainId, p->msg.nodeName, spec, &nodeErr))
     {
-        YOMK_ERROR_TAG("YomkRpcService::createNode", "create node [", p->msg.nodeName, "] failed: setDomainId error");
-        return YomkResponse(YomkResponse::eNo, "create node [" + p->msg.nodeName + "] failed: setDomainId error");
+        YOMK_ERROR_TAG(
+            "YomkRpcService::createNode",
+            "create node [",
+            p->msg.nodeName,
+            "] failed: ",
+            nodeErr.empty() ? "setDomainId error" : nodeErr);
+        return YomkResponse(
+            YomkResponse::eNo,
+            "create node [" + p->msg.nodeName + "] failed: " +
+                (nodeErr.empty() ? "setDomainId error" : nodeErr));
     }
     nodes_[p->msg.nodeName] = std::move(node);
     return YomkResponse(YomkResponse::eOk, "ok");
@@ -240,4 +300,11 @@ YomkResponse YomkRpcService::discardLoan(YomkPkgPtr pkg)
             YomkResponse::eNo, "discardLoan [" + p->msg.topicName + "] failed on node [" + p->msg.nodeName + "]");
     }
     return YomkResponse(YomkResponse::eOk, "ok");
+}
+
+std::string YomkRpcService::xmlCache_;  // 已成功加载的 XML profiles raw 串（空=未加载）
+
+const std::string& YomkRpcService::xmlCache()
+{
+    return xmlCache_;
 }

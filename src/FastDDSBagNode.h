@@ -1,6 +1,8 @@
 #ifndef FASTDDSBAGNODE_H
 #define FASTDDSBAGNODE_H
 
+#include "FastDDSXmlHelper.h"  // ParticipantQosSpec（XML 配置通道 + serverLocator 直配 spec；缺省实参需完整类型，自身引公共头与 fastdds）
+
 #include <cstdint>
 #include <fastdds/dds/builtin/topic/PublicationBuiltinTopicData.hpp>
 #include <fastdds/dds/builtin/topic/SubscriptionBuiltinTopicData.hpp>
@@ -76,7 +78,10 @@ public:
         uint64_t bytes = 0;    // 录制字节数（CDR 全量，含 encapsulation header）
     };
     // 设置 DDS 域并创建 participant（挂发现监听）与 subscriber；仅可成功一次，失败/重复调用返回 false。
-    bool setDomainId(uint32_t domainId);
+    // spec/err 语义同 FastDDSNode::setDomainId（XML 三级提取链——本节点无用户名，按名 profile
+    // 无意义仅默认档可兜底；serverLocator 直配强制 CLIENT，节点唯一名在提取后置入）。
+    bool setDomainId(uint32_t domainId, const yomkrpc_xml::ParticipantQosSpec& spec =
+            yomkrpc_xml::ParticipantQosSpec{}, std::string* err = nullptr);
     // 录制主题列表（长驻阻塞：调用线程阻塞至 Ctrl+C 停止标志置位并完成收尾）：
     // ①启动校验——轮询发现缓存快照（各主题 writer/reader 有无），连续 stableRounds 次不变或
     //   全部主题有端点即收敛（总窗不足 kMinValidateWindowMs 自动提升 rounds；0 值钳制默认

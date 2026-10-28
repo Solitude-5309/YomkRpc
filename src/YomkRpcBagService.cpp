@@ -12,8 +12,10 @@
 // （同 YomkRpcDebugService::listTopics 持锁收敛等待的既有约定），停止经 yomk::bagRecordStop /
 // yomk::bagPlayStop 由 SIGINT 处理函数异步置位，不依赖本服务其他端点。
 #include "YomkRpcBagService.h"
+#include "YomkRpcService.h"  // YomkRpcService::xmlCache()（XML profiles raw 串单例访问；本头未 include 公共头）
 
 #include "FastDDSBagNode.h"
+#include "FastDDSXmlHelper.h"  // yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSBagNode.h 传递亦可得）
 
 #include <utility>
 
@@ -69,10 +71,21 @@ YomkResponse YomkRpcBagService::createNode(YomkPkgPtr pkg)
     }
 
     auto node = std::make_unique<FastDDSBagNode>();
-    if (!node->setDomainId(p->msg.domainId))
+    // XML 配置通道 + serverLocator 直配（闭环 4）：xmlCache 经 YomkRpcService::xmlCache()
+    // 单例取用（load_xml 端点成功后非空）；serverLocator 空串=不直配现状
+    yomkrpc_xml::ParticipantQosSpec spec;
+    spec.xml = YomkRpcService::xmlCache();
+    spec.serverSpec = p->msg.serverLocator;
+    std::string nodeErr;
+    if (!node->setDomainId(p->msg.domainId, spec, &nodeErr))
     {
-        YOMK_ERROR_TAG("YomkRpcBagService::createNode", "create bag node failed: setDomainId error");
-        return YomkResponse(YomkResponse::eNo, "create bag node failed: setDomainId error");
+        YOMK_ERROR_TAG(
+            "YomkRpcBagService::createNode",
+            "create bag node failed: ",
+            nodeErr.empty() ? "setDomainId error" : nodeErr);
+        return YomkResponse(
+            YomkResponse::eNo,
+            "create bag node failed: " + (nodeErr.empty() ? "setDomainId error" : nodeErr));
     }
     node_ = std::move(node);
     return YomkResponse(YomkResponse::eOk, "ok");

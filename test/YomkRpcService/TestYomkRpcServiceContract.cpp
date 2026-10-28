@@ -103,10 +103,10 @@ int main()
     auto *svc = new YomkRpcService(YOMK_SERVER_P);
     CHECK(YOMK_ADD_SERVICE(svc) == 0, "YomkRpcService 注册成功（所有权移交框架，init() 已内部调用）");
 
-    // 内省：8 个 RPC 端点均已注册
+    // 内省：9 个 RPC 端点均已注册（闭环 4 增 /load_xml）
     auto infos = svc->funcInfos();
-    CHECK(infos.size() == 8 && infos.count("/version") && infos.count("/create_node") && infos.count("/delete_node") && infos.count("/register_pub_topic") && infos.count("/register_sub_topic") && infos.count("/publish") && infos.count("/loan") && infos.count("/discard_loan"),
-          "funcInfos 内省 8 端点齐全");
+    CHECK(infos.size() == 9 && infos.count("/version") && infos.count("/load_xml") && infos.count("/create_node") && infos.count("/delete_node") && infos.count("/register_pub_topic") && infos.count("/register_sub_topic") && infos.count("/publish") && infos.count("/loan") && infos.count("/discard_loan"),
+          "funcInfos 内省 9 端点齐全");
 
     testVersion(svc);
     testUnpackGuards(svc);

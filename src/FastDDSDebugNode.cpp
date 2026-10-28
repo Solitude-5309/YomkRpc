@@ -619,7 +619,8 @@ FastDDSDebugNode::~FastDDSDebugNode()
     DomainParticipantFactory::get_instance()->delete_participant(participant_);
 }
 
-bool FastDDSDebugNode::setDomainId(uint32_t domainId)
+bool FastDDSDebugNode::setDomainId(uint32_t domainId,
+    const yomkrpc_xml::ParticipantQosSpec& spec, std::string* err)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ != nullptr)
@@ -630,8 +631,25 @@ bool FastDDSDebugNode::setDomainId(uint32_t domainId)
     // listener 仅服务发现回调（RTPS 层直接派发，不受 mask 控制）；mask 用 none() 对齐
     // FastDDSNode——实测 all() 会使本节点上的动态 reader 匹配成功但数据不交付。
     // 调试节点唯一名：入域即被同域 nodeList 列出（发现层面可辨识），创建后不可改；
-    // uid 后缀使多进程各自的调试节点名称互不相同
+    // uid 后缀使多进程各自的调试节点名称互不相同。
+    // XML 配置通道三级提取链先于置名执行：无用户名，按名 profile 无意义仅默认档可兜底，
+    // 落空保持 DEFAULT 底座回退现状
     DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
+    yomkrpc_xml::participantQosFromXml(qos, "", spec.xml);
+    // 发现服务器直配（仅 client 角色）：CLIENT + m_DiscoveryServers 重建，覆盖 XML
+    // discoveryServersList（合并语义：直配 > XML 提取打底）；serverSpec 非法则整体失败
+    if (!spec.serverSpec.empty())
+    {
+        std::string serverErr;
+        if (!yomkrpc_xml::applyDiscoveryServers(qos, spec.serverSpec, serverErr))
+        {
+            if (err != nullptr)
+            {
+                *err = serverErr;
+            }
+            return false;
+        }
+    }
     qos.name(std::string("yomkrpc_debug_") + makeUidSuffix());
     participant_ = DomainParticipantFactory::get_instance()->create_participant(
         domainId, qos, listener_.get(), StatusMask::none());

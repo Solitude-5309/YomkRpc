@@ -9,6 +9,7 @@
 #include "YomkRpcDebugService.h"
 
 #include "FastDDSDebugNode.h"
+#include "FastDDSXmlHelper.h"  // yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSDebugNode.h 传递亦可得）
 
 #include <set>
 #include <utility>
@@ -71,10 +72,21 @@ YomkResponse YomkRpcDebugService::createNode(YomkPkgPtr pkg)
     }
 
     auto node = std::make_unique<FastDDSDebugNode>();
-    if (!node->setDomainId(p->msg.domainId))
+    // XML 配置通道 + serverLocator 直配（闭环 4）：xmlCache 经 YomkRpcService::xmlCache()
+    // 单例取用（load_xml 端点成功后非空）；serverLocator 空串=不直配现状
+    yomkrpc_xml::ParticipantQosSpec spec;
+    spec.xml = YomkRpcService::xmlCache();
+    spec.serverSpec = p->msg.serverLocator;
+    std::string nodeErr;
+    if (!node->setDomainId(p->msg.domainId, spec, &nodeErr))
     {
-        YOMK_ERROR_TAG("YomkRpcDebugService::createNode", "create debug node failed: setDomainId error");
-        return YomkResponse(YomkResponse::eNo, "create debug node failed: setDomainId error");
+        YOMK_ERROR_TAG(
+            "YomkRpcDebugService::createNode",
+            "create debug node failed: ",
+            nodeErr.empty() ? "setDomainId error" : nodeErr);
+        return YomkResponse(
+            YomkResponse::eNo,
+            "create debug node failed: " + (nodeErr.empty() ? "setDomainId error" : nodeErr));
     }
     node_ = std::move(node);
     return YomkResponse(YomkResponse::eOk, "ok");

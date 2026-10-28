@@ -272,7 +272,8 @@ FastDDSNode::~FastDDSNode()
     DomainParticipantFactory::get_instance()->delete_participant(participant_);
 }
 
-bool FastDDSNode::setDomainId(uint32_t domainId, const std::string& nodeName)
+bool FastDDSNode::setDomainId(uint32_t domainId, const std::string& nodeName,
+    const yomkrpc_xml::ParticipantQosSpec& spec, std::string* err)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (participant_ != nullptr)
@@ -281,8 +282,25 @@ bool FastDDSNode::setDomainId(uint32_t domainId, const std::string& nodeName)
     }
 
     // nodeName 非空时下沉为参与者名称：SPDP 发现数据原生携带 participant_name，同域对端经
-    // 发现机制可读（创建时固化不可改）；string_255 定长 256 字节，超长自动截断
+    // 发现机制可读（创建时固化不可改）；string_255 定长 256 字节，超长自动截断。
+    // XML 配置通道三级提取链先于置名执行：按节点名 profile → 默认档 → 落空保持 DEFAULT
+    // 底座回退现状；提取整体填充 qos（含 name），节点名在提取后最终覆盖不可被 XML 顶掉
     DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
+    yomkrpc_xml::participantQosFromXml(qos, nodeName, spec.xml);
+    // 发现服务器直配（仅 client 角色）：CLIENT + m_DiscoveryServers 重建，覆盖 XML
+    // discoveryServersList（合并语义：直配 > XML 提取打底）；serverSpec 非法则整体失败
+    if (!spec.serverSpec.empty())
+    {
+        std::string serverErr;
+        if (!yomkrpc_xml::applyDiscoveryServers(qos, spec.serverSpec, serverErr))
+        {
+            if (err != nullptr)
+            {
+                *err = serverErr;
+            }
+            return false;
+        }
+    }
     if (!nodeName.empty())
     {
         qos.name(nodeName);

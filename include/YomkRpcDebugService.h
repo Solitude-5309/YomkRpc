@@ -69,6 +69,10 @@ using DDSDebugOutputFunc = std::function<void(const std::string&)>;
 struct DDSDebugNode
 {
     uint32_t domainId;  // DDS 域号，合法范围 [0,232]
+    // 发现服务器直配聚合串（可缺省尾参）：空串=不直配（现状行为）；格式 "ip[:port]"，
+    // 多 server 逗号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
+    // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
+    std::string serverLocator;
 };
 
 // topic_print 请求负载。

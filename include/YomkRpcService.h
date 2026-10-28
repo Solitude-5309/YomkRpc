@@ -22,6 +22,7 @@ public:
 
 private:
     YomkResponse getVersion(YomkPkgPtr pkg);
+    YomkResponse loadXml(YomkPkgPtr pkg);
     YomkResponse createNode(YomkPkgPtr pkg);
     YomkResponse deleteNode(YomkPkgPtr pkg);
     YomkResponse registerPubTopic(YomkPkgPtr pkg);
@@ -33,6 +34,16 @@ private:
 private:
     std::map<std::string, std::unique_ptr<FastDDSNode>> nodes_;
     std::mutex mtx_;
+
+    // 已成功加载的 XML profiles raw 串（load_XML_profiles_file 成功后缓存）：get_*_qos_from_xml
+    // 系列吃 raw 串非文件路径，节点层 participant 三级提取链经 xmlCache() 取用；空串=未加载。
+    // 三服务同进程，Debug/Bag 节点创建时同样经此取 XML 串。
+    static std::string xmlCache_;
+
+public:
+    // XML profiles raw 串访问器（线程安全：load 与 create_node 均在各自服务 mtx_ 内，
+    // 串写竞态由调用方 loadXml/createNode 的锁序保证；读取侧仅拷贝）。空串=未加载。
+    static const std::string& xmlCache();
 };
 
 // 订阅回调：收到消息时被调用，参数为交付的消息实例指针（const void*），static_cast 为自己的消息类型后读取。
@@ -118,6 +129,18 @@ struct DDSQosProfile
     static DDSQosProfile ros2SensorData();         // KEEP_LAST(5)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3（两端通用）
 };
 
+// fastdds discovery 默认监听端口（server 侧 -p 缺省值；serverLocator 串缺省 port 同源）
+constexpr uint32_t kDdsDiscoveryDefaultPort = 11811;
+
+// 发现服务器连接描述（client 角色）：address 为 server 监听 IP；port 缺省 11811（fastdds
+// discovery 默认端口）。3.6.1 client 连接 server 只需 ip:port + CLIENT 协议（server 响应自报
+// GUID），两字段足够；作为节点层 serverLocator 聚合串解析产物使用（公共头零 fastdds 依赖）。
+struct DDSServerInfo
+{
+    std::string address;
+    uint32_t port = kDdsDiscoveryDefaultPort;
+};
+
 // create_node 请求负载。
 struct DDSNode
 {
@@ -125,6 +148,16 @@ struct DDSNode
     // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_NODE 单参形态）经类内缺省初始化器读
     // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0）。
     uint32_t domainId = YomkRpcDefaultDomainId();
+    // 发现服务器直配聚合串（可缺省尾参）：空串=不直配（现状行为）；格式 "ip[:port]"，
+    // 多 server 逗号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
+    // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
+    std::string serverLocator;
+};
+
+// load_xml 请求负载。
+struct DDSXmlLoad
+{
+    std::string xmlPath;  // Fast DDS XML profiles 文件路径（相对/绝对均可）
 };
 
 // register_pub_topic 请求负载。
@@ -175,6 +208,7 @@ struct DDSLoanResult
 // YomkMsg 是 YomkServer 第三方宏，cppcheck 未 --library 配置识别（unknownMacro 属工具配置需求，非自有源码缺陷）
 // cppcheck-suppress unknownMacro
 YomkMsg(DDSNode, DDSNode, msg)
+YomkMsg(DDSXmlLoad, DDSXmlLoad, msg)
 YomkMsg(DDSTopic, DDSTopic, msg)
 YomkMsg(DDSSubRequest, DDSSubRequest, msg)
 YomkMsg(DDSPublish, DDSPublish, msg)

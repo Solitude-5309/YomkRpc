@@ -18,10 +18,27 @@ set_tests_properties(TestYomkRpcServiceContract PROPERTIES
 # 边界与 setDomainId 重复设置守卫（Part B 直接单测，服务层不可达）。
 # =============================================================================
 add_executable(TestYomkRpcNodeLifecycle TestYomkRpcNodeLifecycle.cpp)
-target_link_libraries(TestYomkRpcNodeLifecycle PRIVATE yomkrpc_under_test)
+# 闭环 4 Part F 连通性：spawn 项目自带 discovery server（路径编译期注入，避免依赖工作目录）
+target_link_libraries(TestYomkRpcNodeLifecycle PRIVATE yomkrpc_under_test YomkRpcMsg)
+target_compile_definitions(TestYomkRpcNodeLifecycle PRIVATE
+    TEST_FASTDDS_DISCOVERY_BIN="${THIRD_PARTY_DIR}/Fast-DDS-3.6.1/install/bin/fastdds")
 
 add_test(NAME TestYomkRpcNodeLifecycle COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcNodeLifecycle>)
 set_tests_properties(TestYomkRpcNodeLifecycle PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)
+
+# =============================================================================
+# 闭环 4：/load_xml 端点生命周期（XML 配置通道服务层可达面）
+# load_xml 五态（合法/不存在/空文件/非法 rc 回显/重复 load 整体替换）+ xmlCache() 白盒读回
+# + 时序语义（load 前 create 现状零改动 / load 后 create 合成链不阻断）+ 非法 serverLocator 回显。
+# QoS 字段级读回（按名/默认档/回退）、直配端到端、双通道合并与连通性在 NodeLifecycle（白盒）。
+# =============================================================================
+add_executable(TestYomkRpcServiceLifecycle TestYomkRpcServiceLifecycle.cpp)
+target_link_libraries(TestYomkRpcServiceLifecycle PRIVATE yomkrpc_under_test)
+
+add_test(NAME TestYomkRpcServiceLifecycle COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcServiceLifecycle>)
+set_tests_properties(TestYomkRpcServiceLifecycle PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
 )
 

@@ -2,6 +2,7 @@
 #define FASTDDSDEBUGNODE_H
 
 #include "YomkRpcService.h"  // DDSQosProfile（端点 QoS 描述，公共头零 fastdds 依赖；平铺引号形式命中 include/，安装树经 YomkRpc/ 前缀提供同一头）
+#include "FastDDSXmlHelper.h"  // ParticipantQosSpec（XML 配置通道 + serverLocator 直配 spec；缺省实参需完整类型，自身引公共头与 fastdds）
 
 #include <chrono>
 #include <cstdint>
@@ -72,7 +73,10 @@ public:
     // 工作线程打，登记路径不阻塞）
     static constexpr uint32_t kPendingHintDelayMs = 3000;
     // 设置 DDS 域并创建 participant（挂发现监听）与 subscriber；仅可成功一次，失败/重复调用返回 false。
-    bool setDomainId(uint32_t domainId);
+    // spec/err 语义同 FastDDSNode::setDomainId（XML 三级提取链——本节点无用户名，按名 profile
+    // 无意义仅默认档可兜底；serverLocator 直配强制 CLIENT，节点唯一名在提取后置入）。
+    bool setDomainId(uint32_t domainId, const yomkrpc_xml::ParticipantQosSpec& spec =
+            yomkrpc_xml::ParticipantQosSpec{}, std::string* err = nullptr);
     // 登记待调试主题：发现匹配的远端 DataWriter 后由工作线程自动解析类型并建立订阅者；
     // 未 setDomainId / 重复登记返回 false；类型解析暂不可用时保持登记，工作线程持续重试。
     // 失败原因经 error 出参回填（可空）：未入域 / subscriber 未建 / 主题名为空 / 重复登记

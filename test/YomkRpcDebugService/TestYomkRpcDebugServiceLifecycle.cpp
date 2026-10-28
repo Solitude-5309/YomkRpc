@@ -347,8 +347,12 @@ int main()
                               infoArrV->d[6].find('|') != std::string::npos,
                           "verbose 第 7 行 GUID 为 FastDDS 原生 prefix|entity 形态");
                     CHECK(infoArrV->d[7] == "QoS profile:", "verbose 第 8 行 QoS profile 段头");
-                    CHECK(infoArrV->d[8].rfind("  Reliability: ", 0) == 0,
-                          "verbose 第 9 行起为两空格缩进 QoS 键值行");
+                    // ROS2 rmw 字段序（闭环 qos-alias-interop 3）：writer 发现数据不携带 history →
+                    // History/Depth 两行显式 not advertised 兕底在前，Reliability 第三
+                    CHECK(infoArrV->d.size() >= 11 && infoArrV->d[8] == "  History: not advertised" &&
+                              infoArrV->d[9] == "  Depth: not advertised" &&
+                              infoArrV->d[10].rfind("  Reliability: ", 0) == 0,
+                          "verbose 第 9-11 行 History/Depth 兕底 + Reliability（ROS2 rmw 字段序）");
                     bool hasSubCount0 = false;
                     for (const auto &line : infoArrV->d)
                     {
@@ -659,6 +663,20 @@ int main()
     CHECK(svc->invoke("/create_node", mkNode(232)).m_status == YomkResponse::eOk,
           "domainId=232 → eOk（有效域上界，FastDDS 端口算术上限）");
     CHECK(svc->invoke("/delete_node").m_status == YomkResponse::eOk, "删除 → eOk（关键不变式：退出前清理）");
+
+    // ---- A-3：闭环 4 serverLocator 尾参直调（DDSDebugNode{domainId, serverLocator} 聚合初始化
+    // 经服务层 createNode 组 spec 直达节点层；server 不在场 CLIENT 仍创建成功，非法串回显不建节点）----
+    CHECK(svc->invoke("/create_node",
+              YomkMkPtr(DDSDebugNode, DDSDebugNode{TEST_DOMAIN, "127.0.0.1:11811"})).m_status ==
+              YomkResponse::eOk,
+          "create_node 尾参 serverLocator 直配 → eOk（CLIENT+127.0.0.1:11811，server 不在场）");
+    CHECK(svc->invoke("/delete_node").m_status == YomkResponse::eOk, "删除尾参直配节点 → eOk");
+
+    auto badLoc = svc->invoke("/create_node",
+                      YomkMkPtr(DDSDebugNode, DDSDebugNode{TEST_DOMAIN, "10.0.0.1:99999"}));
+    CHECK(badLoc.m_status == YomkResponse::eNo &&
+              badLoc.m_msg.find("port out of range") != std::string::npos,
+          "create_node 非法尾参 serverLocator(port 越界) → eNo + 回显（不建节点）");
 
     return testReport("TestYomkRpcDebugServiceLifecycle");
 }
