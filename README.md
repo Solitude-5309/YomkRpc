@@ -9,14 +9,15 @@
 | 宏 API（用户调用） | 功能说明 |
 |--------------------|----------|
 | `YOMKRPC_VERSION()` | URL端点：`/YomkRpcService/version`<br>简述：版本查询<br>详述：宏内部自动解包并打印版本，无返回值 |
-| `YOMKRPC_NODE(nodeName[, domainId])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0） |
+| `YOMKRPC_LOAD_XML(xmlPath)` | URL端点：`/YomkRpcService/load_xml`<br>简述：加载 Fast DDS XML profiles 文件<br>详述：读文件经 `load_XML_profiles_file` 解析校验（返回码显式检查）后缓存，供后续 create_node 的 participant 按**三级提取链**叠加：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。**必须在任何节点创建之前调用**——participant 的发现配置/传输/QoS 在创建时固化，节点创建后加载仅影响后续新建实体，对已建节点不生效；再次调用以最新成功文件整体替换；失败（路径不存在/文件为空/格式非法）返回错误，`m_msg` 携原因与返回码 |
+| `YOMKRPC_NODE(nodeName[, domainId[, serverLocator]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, serverLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；serverLocator 可缺省尾参——发现服务器直配聚合串（逗号分隔 `ip[:port]` 多 server，port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7） |
 | `YOMKRPC_DEL_NODE(nodeName)` | URL端点：`/YomkRpcService/delete_node`<br>简述：删除节点<br>详述：销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
-| `YOMKRPC_PUB_TOPIC(nodeName, topicName, type)` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放） |
-| `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback)` | URL端点：`/YomkRpcService/register_sub_topic`<br>简述：注册订阅主题<br>详述：打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建 |
+| `YOMKRPC_PUB_TOPIC(nodeName, topicName, type[, qos])` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放）；qos 可缺省尾参——端点 QoS 描述 `DDSQosProfile`（8 项 history/depth/reliability/durability/liveliness/deadline/lifespan/liveliness lease 可独立设置，未设置项为哨兵保持底座值）：缺省（全哨兵）=Fast DDS 端点默认底座（现状行为）；`DDSQosProfile::ros2DefaultPublisher()`=ROS2 默认底座（KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3）；可在底座上逐项覆盖（如只设 depth=10），另有 `ros2SensorData()` 传感器档（KEEP_LAST(5)+BEST_EFFORT），用法见 5.6 |
+| `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback[, qos])` | URL端点：`/YomkRpcService/register_sub_topic`<br>简述：注册订阅主题<br>详述：打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建；qos 可缺省尾参语义同 `YOMKRPC_PUB_TOPIC`，订阅端推荐 `DDSQosProfile::ros2DefaultSubscriber()`（BEST_EFFORT requested 对任意 offered 均可匹配） |
 | `YOMKRPC_PUB_MSG(nodeName, topicName, data)` | URL端点：`/YomkRpcService/publish`<br>简述：发布数据<br>详述：打包 `DDSPublish`；data 为数据实例指针（借用，同步写入，caller 保留所有权） |
 | `YOMKRPC_LOAN(nodeName, topicName, outPtr)` | URL端点：`/YomkRpcService/loan`<br>简述：借出发送缓冲<br>详述：outPtr 为输出参数，成功指向 `DDSLoanResult{sample}` 池内样本、失败置 nullptr；仅 plain 类型支持 |
 | `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | URL端点：`/YomkRpcService/discard_loan`<br>简述：归还未发布的借出缓冲<br>详述：打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
-| `YOMKRPC_DEBUG_NODE(domainId)` | URL端点：`/YomkRpcDebugService/create_node`<br>简述：创建调试节点<br>详述：打包 `DDSDebugNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试 |
+| `YOMKRPC_DEBUG_NODE(domainId[, serverLocator])` | URL端点：`/YomkRpcDebugService/create_node`<br>简述：创建调试节点<br>详述：打包 `DDSDebugNode{domainId, serverLocator}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试；serverLocator 可缺省尾参——发现服务器直配聚合串，语义同 `YOMKRPC_NODE` 形态 3（CLIENT 协议强制，非法串创建失败回显，详见 5.7） |
 | `YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output)` | URL端点：`/YomkRpcDebugService/topic_print`<br>简述：登记调试主题<br>详述：打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；登记为发现驱动的延迟行为，主题尚未被发布者上线时仍返回成功（登记约 3s 后仍无发布者则打一次性等待提示）；须先创建调试节点，失败时 `m_msg` 携具体拒绝原因（`debug node not created` / `subscriber not created` / `empty topic name` / `already registered`） |
 | `YOMKRPC_DEBUG_TOPIC_LIST(stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/list_topics`<br>简述：列出域内主题<br>详述：打包 `DDSDebugList{stableRounds, intervalMs}`；自适应收敛查询：内部每 intervalMs（默认 200ms）轮询一次发现缓存快照，连续 stableRounds 次集合不变即返回（0 值钳制默认 5 次/200ms，最长阻塞约 stableRounds\*intervalMs）；远端 DataWriter 与 DataReader 均记录（仅有订阅者而无发布者的主题同样列出）；返回 StringArray 包，每行一个 topicName（仅主题名，不含类型）按主题名排序；须先创建调试节点，列表可为空（域内无 writer/reader） |
 | `YOMKRPC_DEBUG_TOPIC_LIST_T(stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/list_topics`<br>简述：列出域内主题与类型名<br>详述：打包 `DDSDebugList{stableRounds, intervalMs, types=true}`；与 `YOMKRPC_DEBUG_TOPIC_LIST` 同端点同收敛语义，返回 StringArray 每行 `主题名 [类型名]`（单空格 + 方括号，类型名原样输出）；须先创建调试节点 |
@@ -28,10 +29,10 @@
 | `YOMKRPC_DEBUG_INTERFACE_LIST(stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/interface_list`<br>简述：列出全部类型名<br>详述：打包 `DDSDebugInterfaceList{stableRounds, intervalMs}`；独立收敛查询，返回发现缓存中出现的全部类型名（去重字典序排序，每行一个，interface show 配套导航），域内无任何类型返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_TOPIC_EXAMPLE(topicName, stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/topic_example`<br>简述：查询主题发布示例<br>详述：打包 `DDSDebugTopicExample{topicName, stableRounds, intervalMs}`；独立收敛查询，返回三段行集：`Type: <类型名>`、`IDL:` + IDL 行集、`example:` + 可复制发布命令（JSON 默认值模板整体包单引号，改字段值即可发布）；失败 `m_msg` 按三步骤（发现 → 类型重建 → 示例生成）归类携带原因；须先创建调试节点 |
 | `YOMKRPC_DEBUG_TOPIC_MSG(topicName, stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/topic_msg`<br>简述：查询消息描述两要素<br>详述：打包 `DDSDebugTopicMsg{topicName, stableRounds, intervalMs}`；独立收敛查询，返回 StringArray 恰 2 行：d[0]=类型名、d[1]=紧凑 msg JSON（单行，可直接作为发布载荷模板，`topic pub -ef` 导出文件的数据源）；失败按两步骤归类；须先创建调试节点 |
-| `YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes)` | URL端点：`/YomkRpcDebugService/topic_pub`<br>简述：发布 JSON 载荷消息<br>详述：打包 `DDSDebugTopicPub` 7 字段；首轮发现收敛 → 类型重建 + `json_deserialize` 解析载荷 → 临时 RELIABLE+TRANSIENT_LOCAL writer 匹配收敛 → write → 存在 RELIABLE 订阅者时 `wait_for_acknowledgments` 确认送达（未全部确认返回错误，全 BEST_EFFORT 或无订阅者退化尽力而为）；requiredSubscribers>0 为期望建匹配订阅端数门槛（matched 达标才发布否则一直等待，0=自动收敛）；repeatIntervalMs>0 进入持续发布模式（首轮校验后按该周期重复 write 尽力而为，经 `yomk::debugPubStop` 无锁置位退出），maxTimes>0 为条数上限（发满排空 200ms 后返回）；持续模式成功返回 StringArray {"total=N","failed=M"}；未发现主题/载荷不合法/送达未确认返回错误；须先创建调试节点 |
+| `YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes[, qos])` | URL端点：`/YomkRpcDebugService/topic_pub`<br>简述：发布 JSON 载荷消息<br>详述：打包 `DDSDebugTopicPub` 8 字段（qos 为可缺省尾参——临时发布 writer 的 QoS 描述 `DDSQosProfile`，全哨兵=既有固定值 KEEP_LAST(1)+RELIABLE+TRANSIENT_LOCAL，ROS2 底座建议 `ros2DefaultPublisher()`）；首轮发现收敛 → 类型重建 + `json_deserialize` 解析载荷 → 临时 writer（QoS 按 qos 尾参，缺省 RELIABLE+TRANSIENT_LOCAL）匹配收敛 → write → 存在 RELIABLE 订阅者时 `wait_for_acknowledgments` 确认送达（未全部确认返回错误，全 BEST_EFFORT 或无订阅者退化尽力而为）；requiredSubscribers>0 为期望建匹配订阅端数门槛（matched 达标才发布否则一直等待，0=自动收敛）；repeatIntervalMs>0 进入持续发布模式（首轮校验后按该周期重复 write 尽力而为，经 `yomk::debugPubStop` 无锁置位退出），maxTimes>0 为条数上限（发满排空 200ms 后返回）；持续模式成功返回 StringArray {"total=N","failed=M"}；未发现主题/载荷不合法/送达未确认返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_NODE_INFO(nodeName, stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/node_info`<br>简述：查询节点详情<br>详述：打包 `DDSNodeInfo{nodeName, stableRounds, intervalMs}`；独立收敛查询指定节点名参与者的发布/订阅主题清单（归属判定基于 RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"），返回节点名行 + `Subscribers:`/`Publishers:` 两段（每行 `    <主题名>: <类型名>`，类型名原样输出，空段仅打段头，同名多参与者端点合并）；未发现节点名返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_QUIT()` | URL端点：`/YomkRpcDebugService/delete_node`<br>简述：退出调试<br>详述：无参宏（载荷 nullptr）；删除调试节点并销毁其全部 DDS 实体，未创建时返回错误 |
-| `YOMKRPC_BAG_NODE(domainId)` | URL端点：`/YomkRpcBagService/create_node`<br>简述：创建 bag 节点<br>详述：打包 `DDSBagNode{domainId}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域端点可被发现与录制 |
+| `YOMKRPC_BAG_NODE(domainId[, serverLocator])` | URL端点：`/YomkRpcBagService/create_node`<br>简述：创建 bag 节点<br>详述：打包 `DDSBagNode{domainId, serverLocator}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域端点可被发现与录制；serverLocator 可缺省尾参——发现服务器直配聚合串，语义同 `YOMKRPC_NODE` 形态 3（CLIENT 协议强制，非法串创建失败回显，详见 5.7） |
 | `YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize, maxBagDurationSec, maxCacheSize)` | URL端点：`/YomkRpcBagService/bag_record`<br>简述：录制主题列表<br>详述：打包 `DDSBagRecord{topics, outputDir, maxBagSize, maxBagDurationSec, maxCacheSize}`；长驻阻塞至 Ctrl+C（SIGINT 经 `yomk::bagRecordStop` 无锁置位）收尾返回。outputDir 指定 bag 目录名/路径（相对/绝对均可，父目录自动多级创建，已存在报错；空串=缺省当前路径下 `bag_<YYYY-MM-DD_HH-MM-SS_mmm>`）；maxBagSize 单分片最大字节数（>0 写满滚动 `bag_N.mcap` 分片，下限 1024 字节过小报错；0=不分片）；maxBagDurationSec 单分片最大时长秒（0=不分片，无下限校验，与 maxBagSize 同用先到先分）；maxCacheSize 写缓存双缓冲字节数（0=每条直写，>0 回调拷贝入队、独立消费线程写盘，缓存满丢弃新消息并按主题计数）。清单项支持通配模式（恰好一个 `*`：前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre\*suf`，单独 `*` 匹配全部；≥2 个 `*` 返回错误），模式项启动校验时按发现缓存展开为实际主题集合（去重升序、与精确项合并），模式未命中或精确主题无任何端点整体返回错误（不建 bag 目录、不产生任何文件）；通过校验后透传订阅（QoS 跟随远端 offered）直写原始 CDR 字节到 mcap（含 bag_0.mcap 与 metadata.json）；暂停控制经 `yomk::bagRecordPause()`/`bagRecordResume()`（等价 CLI 交互键 p/r 与 `--start-paused` 的 SPACE 启动）。须先创建 bag 节点；成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节" 统计 |
 | `YOMKRPC_BAG_INFO(bagDir)` | URL端点：`/YomkRpcBagService/bag_info`<br>简述：查看 bag 元信息<br>详述：打包 `DDSBagInfo{bagDir}`；读 metadata.json 与目录递归总大小输出多行元信息文本（首行空行）；纯文件读不经 bag 节点（无须 create_node）；成功返回 StringArray（每项一行，首项为空行），路径不存在/无 metadata.json/解析失败返回错误 |
 | `YOMKRPC_BAG_REINDEX(bagDir)` | URL端点：`/YomkRpcBagService/bag_reindex`<br>简述：重建 bag 元信息<br>详述：打包 `DDSBagReindex{bagDir}`；从 mcap 分片（`<前缀>_<编号>.mcap` 编号升序）重建 metadata.json 并无条件覆盖写出（缺失/损坏均可重建）；纯文件操作不经 bag 节点（无须 create_node）；成功返回 eOk（`m_msg == "ok"`，无数据载荷），路径不存在/非目录/无 mcap 分片/读取失败返回错误 |
@@ -292,6 +293,94 @@ ExampleYomkRpcSub
 ExampleYomkRpcPub
 ```
 
+### 5.6 与 ROS2 互通（set_name 类型名直改）
+
+YomkRpc 与 ROS2 在同一 DDS 域内互通（YomkRpc 节点发布、`ros2` 节点订阅，反之亦然）经**类型名直改**实现：构造类型实例后用 `set_name` 把注册类型名改成 ROS2 约定形态，再传给注册宏——链路内 `register_type` 以新名注册、发现数据 `type_name` 即新名，ROS2 侧同名匹配即通：
+
+```cpp
+#include <YomkRpc/YomkRpcAPI.h>
+#include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
+
+YomkRpc::MStringPubSubType type;
+type.set_name("std_msgs::msg::dds_::String_");   // ROS2 命名（须在移交前改）
+YOMKRPC_NODE("interop_pub", 0);
+YOMKRPC_PUB_TOPIC("interop_pub", "/chatter", &type);   // 链路内按新名注册
+// YOMKRPC_PUB_MSG("interop_pub", "/chatter", &msg);   // 之后正常发布
+```
+
+**使用注意**：`set_name` 必须在类型对象移交（传宏）之前调用——宏实参位内联 `new` 无法先改名。
+
+**互通三要素**（任一不一致即不匹配）：
+
+| 要素 | 说明 |
+|---|---|
+| 域 id | ROS2 默认域 0（`ROS_DOMAIN_ID`），YomkRpc 侧对齐（`YOMKRPC_DDS_DOMAIN_ID` 或宏显式 domainId） |
+| topic 名 | 逐字节一致（含前导斜杠的完全限定名，ROS2 `/chatter` 即 YomkRpc `/chatter`） |
+| 类型名 + CDR 布局 | 类型名一致（`set_name` 直改为 `pkg::msg::dds_::Type_` 形态）且两端消息 CDR 编码布局一致（ROS2 msg 严格转 idl 生成即满足；字段结构不同的类型即使同名也不兼容） |
+
+ROS2 侧验证：
+
+```bash
+ros2 topic echo /chatter std_msgs/msg/String
+```
+
+**副作用提示**：
+
+- **原自名失效**：改名后原类型名（如 `YomkRpc::MString`）不再注册——同进程内 YomkRpc 原生话题与互通话题需两个类型实例两个名；
+- **匹配语义**：ROS2 Humble 不注册 TypeObject、不发 TypeInformation，匹配退化为端点 `type_name` 字符串比较，改名全链路一致即通；Fast DDS 对称改名匹配正常，不对称（一端改一端不改）视为不同类型（预期隔离）；Jazzy+ 两端均发 TypeInformation 走类型一致性检查，未验证；
+- **QoS 兼容**：两端默认 RELIABLE+VOLATILE 自然满足 requested≤offered；自定义 QoS 时注意匹配规则（如 RELIABLE 订阅端收不到 BEST_EFFORT 发布端），不当配置可能静默断链；
+- **bag 节点零影响**：bag 录制/回放为透传设计（按发现名动态建类型、payload 字节搬运），与类型名无关。
+
+**根治路径**（可选）：idl 内直接用 ROS2 命名（`module std_msgs { module msg { struct String_ {...} } }`）重新生成——字面量从源头即新名，全链路一致，连 `set_name` 都不需要；代价是该类型以 ROS2 名存在（YomkRpc 原生名与 ROS2 名双类型并存需两份平行 idl）。禁止直接修改生成产物（重新生成必覆盖）。
+
+### 5.7 XML 配置与发现服务器
+
+**XML profiles 加载**（`YOMKRPC_LOAD_XML`）——participant 级发现/传输/QoS 配置经 Fast DDS XML profiles 文件下发：
+
+```cpp
+YOMKRPC_LOAD_XML("/path/to/profiles.xml");   // 必须在任何节点创建之前调用！
+YOMKRPC_NODE("xml_node", 0);                 // 创建时按三级提取链叠加 XML 配置
+```
+
+**时序约束**：participant 的发现配置/传输/QoS 在创建时固化——先 `YOMKRPC_LOAD_XML` 再 `YOMKRPC_NODE`；节点创建后加载仅影响后续新建实体，对已建节点不生效。再次调用以最新成功文件整体替换。
+
+XML profile 两种命中形态（三级提取链）：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。XML 片段示例（participant 档，格式经 Fast DDS XML schema 校验）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <participant profile_name="xml_node" is_default_profile="false">
+        <rtps>
+            <builtin>
+                <discovery_config>
+                    <leaseDuration>
+                        <sec>120</sec>
+                    </leaseDuration>
+                </discovery_config>
+            </builtin>
+        </rtps>
+    </participant>
+</profiles>
+```
+
+**发现服务器直连**（`serverLocator` 尾参）——跨网段/多播受限环境用集中式发现服务器（client 角色）：
+
+```bash
+# server 侧（任一台主机）：fastdds discovery 工具，-i server id、-l 监听地址、-p 监听端口
+fastdds discovery -i 0 -l 127.0.0.1 -p 11811
+```
+
+```cpp
+// client 侧：三节点宏尾参直配（"ip[:port]" 逗号分隔多 server，port 缺省 11811，非法串创建失败回显）
+YOMKRPC_NODE("ds_node", 0, "127.0.0.1:11811");
+YOMKRPC_DEBUG_NODE(0, "127.0.0.1:11811");
+YOMKRPC_BAG_NODE(0, "127.0.0.1:11811");
+```
+
+等价环境变量形态（ROS2 生态通用）：`ROS_DISCOVERY_SERVER=127.0.0.1:11811`（id 即 `-i` 指定的 server 位序）。直配后 participant 以 CLIENT 发现协议运行（禁用多播 PDP，发现流量单播直送 server）；可与 `YOMKRPC_LOAD_XML` 组合（XML 打底，直配 server 项覆盖 XML `discoveryServersList`）。
+
+**域号说明**：DS 模式下 client 的域 id 与 server 无关——server 不做域校验（Fast DDS 源码 PDPClientListener/PDPServerListener："In Discovery Server we don't impose domain ids to be the same"；跨域丢弃仅存在于简单发现 PDPSimple 的基类校验）。本仓连通性测试实证：A/B 两节点异域（201/202）直配同一 server 后正常收发数据。域隔离语义仅在简单发现（多播）路径生效。
+
 ## 6 YomkRpc 调试
 
 `yomkrpc` 命令行工具经 `YomkRpcDebugService` 调试服务观察任意 DDS 域（类型无关，无需 IDL 生成代码）；库用户可在代码中用等价的 `YOMKRPC_DEBUG_*` 宏（定义于 `YomkRpcAPI.h`，全集见第 1 章宏 API 表）实现相同能力，各命令小节附等价宏调用；bag 族（record/info/reindex/convert/play）经 `YomkRpcBagService` bag 服务实现，等价宏为 `YOMKRPC_BAG_*`（分别见 6.7-6.11）。
@@ -300,19 +389,19 @@ ExampleYomkRpcPub
 
 | 命令 | 含义 |
 |---|---|
-| `yomkrpc topic print <主题名>` | 订阅指定主题，消息 JSON 文本逐条直出控制台 |
+| `yomkrpc topic print [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <主题名>` | 订阅指定主题，消息 JSON 文本逐条直出控制台；QoS 经 --qos-ros/--qos-*/--qos-file 可调（缺省 BEST_EFFORT+VOLATILE depth 1），参数详见下方 topic 命令 QoS 参数说明 |
 | `yomkrpc topic list` | 一次性列出域内全部已发现主题（每行一个主题名，按主题名排序） |
 | `yomkrpc topic list [-t]` | 列出域内全部已发现主题（按名称排序；-t 每行附类型名：主题名 [类型名]） |
 | `yomkrpc topic info <主题名>` | 查询单个主题详情（类型名 / 发布者数 / 订阅者数三行；-v 逐端点 Node name/GUID/QoS 详情段） |
 | `yomkrpc topic type <主题名>` | 查询单主题数据类型名（单行裸输出，对齐 ros2 topic type，便于脚本取用） |
 | `yomkrpc topic find <类型名>` | 按数据类型名反查域内主题列表（每行一个主题名，精确匹配，对齐 ros2 topic find） |
-| `yomkrpc topic hz [--window N] <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz；--window 为窗口样本数上限，默认 10000） |
+| `yomkrpc topic hz [--window N] [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <主题名>` | 订阅主题测量接收频率（每秒一行滚动窗口统计，对齐 ros2 topic hz；--window 为窗口样本数上限，默认 10000；reader QoS 经 --qos-ros/--qos-*/--qos-file 可调，缺省 BEST_EFFORT+VOLATILE depth 1，对接高频流建议 --qos-ros 防 depth 1 丢帧偏频） |
 | `yomkrpc interface show <类型名>` | 按类型名输出该类型的 IDL 结构描述（struct 头 + 字段行 + 结尾） |
 | `yomkrpc interface list` | 列出已发现的全部消息类型名（去重字典序排序，interface show 配套导航） |
 | `yomkrpc topic pub -e <主题名>` | 按主题名输出发布示例三段行集（类型名 / IDL / JSON 发布载荷模板） |
 | `yomkrpc topic pub -ef <主题名> [-o 目录]` | 按主题名导出消息描述 JSON 文件（内容即默认值模板 JSON 本身，多行缩进可直接 `$(cat)` 填进发布命令；仅发描述不发布） |
-| `yomkrpc topic pub <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出统计，首轮收敛 + ack 确认；逐条回执附带消息 JSON 内容——从实际待发数据转出，与 topic print 输出同源；`-w N` 期望建匹配订阅端数，计数达到 N 才开始发布否则一直等待（主题未发现时先等待主题出现）；`-r N` 按 N Hz 持续发布；`-t N` 条数上限，发满即停排空 200ms 后退出；`-w`/`-r`/`-t` 可任 意顺序叠加） |
-| `yomkrpc topic pub <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省 1Hz 持续发送，`-w N` 等待订阅者匹配、`-r N` 持续发布、`-t N` 条数上限，语义同直发） |
+| `yomkrpc topic pub [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <主题名> <JSON数据>` | 按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出统计，首轮收敛 + ack 确认；逐条回执附带消息 JSON 内容——从实际待发数据转出，与 topic print 输出同源；`-w N` 期望建匹配订阅端数，计数达到 N 才开始发布否则一直等待（主题未发现时先等待主题出现）；`-r N` 按 N Hz 持续发布；临时 writer QoS 经 --qos-ros/--qos-*/--qos-file 可调（缺省 RELIABLE+TRANSIENT_LOCAL depth 1，参数详见下方 topic 命令 QoS 参数说明）；`-t N` 条数上限，发满即停排空 200ms 后退出；`-w`/`-r`/`-t` 可任 意顺序叠加） |
+| `yomkrpc topic pub [--qos-ros | --qos-KEY VAL ... | --qos-file FILE] <主题名> -f <文件>` | 按主题名发布 JSON 载荷文件（文件内容整体作为载荷，与 topic pub -ef 导出文件对接；缺省 1Hz 持续发送，`-w N` 等待订阅者匹配、`-r N` 持续发布、`-t N` 条数上限，语义同直发；临时 writer QoS 经 --qos-ros/--qos-*/--qos-file 可调） |
 | `yomkrpc node list` | 列出域内全部已发现的命名参与者（每行一个节点名，按名称排序） |
 | `yomkrpc node info <节点名>` | 查询指定节点的发布/订阅主题清单（节点名行 + Subscribers/Publishers 两段，形态对齐 ros2 node info） |
 | `yomkrpc bag record [-o <目录>\|--output <目录>] [-b <字节>\|--max-bag-size <字节>] [-d <秒>\|--max-bag-duration <秒>] [-c <字节>\|--max-cache-size <字节>] [--start-paused] <主题名\|模式> [<主题名\|模式> ...]` | 录制主题列表为 mcap bag（启动校验后透传订阅写入原始 CDR 字节，长驻阻塞至 Ctrl+C 收尾；清单项支持通配——恰好一个 `*` 的前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre*suf` 模式，单独 `*` 匹配全部，按发现缓存展开为实际主题集合去重升序，未命中报错；bag 目录名经 `-o` 指定，缺省按时间戳命名，目录已存在报错退出；`-b <字节>` 单分片最大字节数——写满即滚动 `bag_N.mcap` 分片（0=不分片缺省，下限 1024 字节过小报错，实际分片粒度不小于 chunk 落盘边界）；`-d <秒>`/`--max-bag-duration <秒>` 单分片最大时长秒——时长达限即滚动 `bag_N.mcap` 分片（0=不分片缺省，无下限校验；与 `-b` 同用时先到先分，暂停期不计入分片时长）；`-c <字节>`/`--max-cache-size <字节>` 写缓存双缓冲字节数——回调拷贝入队、独立线程写盘（默认 100 MiB，0=每条直写；最坏占 2 倍内存；缓存满丢弃新消息并按主题计数，停止时打印丢条统计）；`--start-paused` 暂停态启动——订阅与发现照常、收到的消息丢弃不写入；交互键（tty 下）：SPACE 开始录制、p 暂停、r 继续，Ctrl+C 停止；校验失败不建目录不产生文件，详见 6.7） |
@@ -320,6 +409,21 @@ ExampleYomkRpcPub
 | `yomkrpc bag reindex <bag目录>` | 从 mcap 分片重建被删/损坏的 `metadata.json` 并无条件覆盖写出（行为对齐 `ros2 bag reindex`，纯文件操作不经 bag 节点，详见 6.9） |
 | `yomkrpc bag convert -i <bag目录> [-i <bag目录> ...] -o <配置文件>\|--output <配置文件>` | 按输出配置文件把一个或多个输入 bag 过滤/裁剪/合并写为新 bag（纯文件操作不经 bag 节点，详见 6.10） |
 | `yomkrpc bag play [-r <rate>] [--topics T1 T2 ...] [--start-paused] [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>] [--wait-for-all-acked MS] [--remap old:=new ...] [--read-ahead-queue-size N] [--qos-profile-overrides-path FILE] <bag目录>` | 按录制时间轴把 bag 回放为真实 DDS 流量（预扫 metadata.json 后透传发布——QoS 按录制快照恢复，读播解耦按速率倍率定时发布，`-r/--rate` 倍率可调；交互键（tty 下）：SPACE 从暂停态开始、p 暂停、r 恢复、`+`/`-` 键 ±10% 动态调率，Ctrl+C 停止；`--topics` 只回放清单内主题（空格分隔多值，支持 record 同款通配）；`--start-paused` 暂停态启动（读线程照常预读、播放挂起零发出）；`-l/--loop` 循环回放（到尾即回开头无限播放）；`--start-offset SEC` 从 bag 内第 SEC 秒起播（读侧跳过前段消息，支持小数，负值非法）；`-d/--delay SEC` 开播延迟秒（每次开播含每轮循环前先睡 SEC 秒等订阅端匹配就绪，支持小数，须 >0）；`--wait-for-all-acked MS` 退出前等全部 RELIABLE 订阅端确认收齐毫秒（0=永等，>0 超时逐主题各计，超时仅告警不失败）；`--remap old:=new ...` 主题重映射（空格分隔多值，把 bag 里 old 主题的数据发到 new 主题——发布主题名精确匹配，old 不在 bag 静默无效）；`--read-ahead-queue-size N` 预读内存队列深度（读侧吸收磁盘 IO 抖动保证确定性回放，大→占内存但防播放延迟，缺省 1000，须 ≥1）；`--qos-profile-overrides-path FILE` 按主题覆盖发布 QoS 文件（JSON，键=bag 原主题名，值={reliability, durability} 枚举名可独立给——文件命中 > bag 快照 > 回退三档优先级，详见 6.11）；播毕收尾统计；CLI 自动建删 bag 节点，详见 6.11） |
+
+topic 命令 QoS 参数（仅 `topic pub` / `topic print` / `topic hz` 生效；命令行形态 `[--qos-ros | --qos-KEY VAL ... | --qos-file FILE]`）：
+
+- **`--qos-ros`**：整体切 ROS2 底座 QoS——pub 端 KEEP_LAST(10)+RELIABLE+VOLATILE，print/hz 端 KEEP_LAST(10)+BEST_EFFORT+VOLATILE（时间项 ∞）；与 `--qos-*`/`--qos-file` 叠加时作底座被逐项覆盖
+- **8 项逐项覆盖**（值大小写不敏感，ros2 小写与 DDS 大写均收）：
+  - `--qos-reliability REL`：reliable | best_effort
+  - `--qos-durability DUR`：transient_local | volatile
+  - `--qos-history HIST`：keep_last | keep_all
+  - `--qos-depth N`：history depth（须 >=1 整数；keep_all 时忽略；未设 `--qos-history` 时底座即 keep_last，直接生效）
+  - `--qos-deadline SEC`：deadline 周期秒（非负小数，0=∞；下同）
+  - `--qos-lifespan SEC`：lifespan 秒（writer 侧策略，print/hz 订阅端忽略）
+  - `--qos-liveliness KIND`：automatic | manual_by_topic
+  - `--qos-liveliness-lease-duration SEC`：liveliness 租约秒
+- **`--qos-file FILE`**：从 JSON 文件加载逐项覆盖（扁平对象，键为 reliability/durability/history/depth/deadline/lifespan/liveliness/liveliness_lease_duration，值形态同对应 `--qos-*` 选项，如 `{"reliability":"reliable","depth":10,"deadline":0.5}`）
+- **优先级**：命令行逐项 > 文件逐项 > `--qos-ros` 底座 > 默认（pub 临时 writer 缺省 RELIABLE+TRANSIENT_LOCAL depth 1；print/hz 缺省 BEST_EFFORT+VOLATILE depth 1）
 
 公共参数（各命令通用）：
 
@@ -484,13 +588,15 @@ Node name: pub_node
 Endpoint type: PUBLISHER
 GUID: 01.0f.b3.36.8d.c3.21.fa.00.00.00.00|0.0.1.3
 QoS profile:
+  History: not advertised
+  Depth: not advertised
   Reliability: RELIABLE
   Durability: TRANSIENT_LOCAL
   Deadline: Infinite
-  Latency Budget: 0 s
   Lifespan: Infinite
   Liveliness: AUTOMATIC
   Liveliness lease duration: Infinite
+  Latency Budget: 0 s
   Ownership: SHARED
   Ownership Strength: 0
   Destination Order: BY_RECEPTION_TIMESTAMP
@@ -499,11 +605,37 @@ QoS profile:
 Subscription count: 0
 ```
 
-QoS 键值行说明：核心组（Reliability / Durability / Deadline / Latency Budget / Lifespan /
-Liveliness / Liveliness lease duration / Ownership / Ownership Strength——仅发布端 /
-Destination Order / Partition）恒输出；扩展组（History / Resource Limits / Publish Mode /
-Transport Priority 等）仅当发现数据携带时追加。GUID 为 FastDDS 原生格式直出（"12 字节前缀 |
-4 字节实体 ID"点分十六进制，实体段不补零）。
+QoS 键值行分两组输出，字段序对齐 ROS2 `rmw_qos_profile_t`：
+
+**ROS2 对齐组**：每个端点 QoS profile 段恒输出前 8 行（发现数据未携带时输出 `not advertised` 兜底行，键行不缺）：
+
+| # | 键 | 取值口径 |
+|---|---|---|
+| 1 | History | KEEP_LAST / KEEP_ALL；writer 端点（PUBLISHER）的发现数据不携带 history → `not advertised` |
+| 2 | Depth | History 为 KEEP_LAST 时的深度；writer 端点同上 → `not advertised` |
+| 3 | Reliability | RELIABLE / BEST_EFFORT |
+| 4 | Durability | TRANSIENT_LOCAL / VOLATILE |
+| 5 | Deadline | 周期时长，Infinite 表未设置 |
+| 6 | Lifespan | 消息生存期，Infinite 表未设置 |
+| 7 | Liveliness | AUTOMATIC / MANUAL_BY_TOPIC |
+| 8 | Liveliness lease duration | 租约时长，Infinite 表未设置 |
+
+**DDS 扩展组**：紧随其后；值成员恒输出，optional 项仅当发现数据携带时追加（一行不删）：
+
+| 键 | 说明 |
+|---|---|
+| Latency Budget | 时延预算 |
+| Ownership | SHARED / EXCLUSIVE |
+| Ownership Strength | 仅发布端（writer） |
+| Time Based Filter | 仅订阅端（reader） |
+| Destination Order | BY_RECEPTION_TIMESTAMP / BY_SOURCE_TIMESTAMP |
+| Partition | 名单 `[a, b]`，空名单 `[]` |
+| Resource Limits | optional，仅发现数据携带时追加 |
+| Publish Mode / Transport Priority / Writer Data Lifecycle | optional（仅发布端），仅发现数据携带时追加 |
+
+口径三要素：①**数据源**——输出的是对端随发现数据（SPDP/SEDP）声明的 QoS，即“对端宣称值”而非本地配置；②**History/Depth 为 optional**——RTPS 发现协议中 writer 端点不携带 history 字段 → 显式 `not advertised` 兜底行，reader 端点携带 → 输出实际值（如 `KEEP_LAST` / `10`）；③**`not advertised` 含义**——发现数据未携带该项（协议层 optional 字段缺席），非“无 QoS”或“未设置”。
+
+GUID 为 FastDDS 原生格式直出（"12 字节前缀 | 4 字节实体 ID"点分十六进制，实体段不补零）。
 
 目标主题在收敛窗口内始终未被发现时报错退出（`topic [<主题名>] not found`，verbose 模式同）。`-v` 模式对应宏 `YOMKRPC_DEBUG_TOPIC_INFO_V(主题名, 收敛次数, 间隔ms)`，输出内容与 CLI 一致。等价宏调用序列（流程与 list 示例同构，链接库相同，宏定义见上表）：
 
@@ -684,7 +816,7 @@ $ yomkrpc topic pub -t 5 -r 5 -w 1 hello_world '{"data":"hello yomkrpc"}'
 
 非法 JSON 报错退出（`invalid json for type [...]`）；未确认送达报错退出（`not all subscribers acknowledged`）；订阅者在场却无一与发布端匹配报错退出（`subscribers exist but not all matched (suspended or offline)`）；`-f` 文件不存在报错退出（`cannot open json file`），文件内容为空报错退出（`json file is empty`）；`-r/--rate` 频率非法（非数值或 ≤0）报错退出（`非法频率 "..."`），`-r` 后缺参数同用法错误退出；`-w/--wait` 等待被 Ctrl+C 中断报错退出（`waiting for subscribers interrupted`），订阅者数量非法（非数值、0 或溢出）报错退出（`非法订阅者数量 "..."`），`-w` 后缺参数同用法错误退出；`-t/--times` 条数非法（非数值、0 或溢出）报错退出（`非法发布条数 "..."`），`-t` 后缺参数同用法错误退出；收敛判定次数经环境变量 `YOMKRPC_DDS_DISCOVER_ROUNDS` 配置（同其他查询生效）。
 
-等价宏调用：`YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes)`（`-w`/`-r`/`-t` 分别对应 requiredSubscribers/repeatIntervalMs/maxTimes）。
+等价宏调用：`YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes[, qos])`（`-w`/`-r`/`-t` 分别对应 requiredSubscribers/repeatIntervalMs/maxTimes；qos 为临时发布 writer 的 QoS 描述，CLI 侧经 `--qos-ros`/`--qos-*`/`--qos-file` 指定）。
 
 ack 确认的覆盖语义（端到端实测校准）：
 
@@ -749,7 +881,7 @@ message description written: hello_world_msg_2026-09-28-12-14-42-626.json (topic
 
 ### 6.5 列出域内节点（yomkrpc node list）
 
-`yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出；同域其他进程的调试节点与 bag 节点分别以唯一名 `yomkrpc_debug_<uid>` / `yomkrpc_bag_<uid>` 列出（uid 为 12 位随机 hex，多进程各自的调试/录制节点可区分）。节点名称在创建节点时经 `YOMKRPC_NODE(nodeName[, domainId])` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
+`yomkrpc node list` 独立收敛查询域内已发现的命名参与者（与主题查询完全分开的路径），每行输出一个节点名（participant_name 非空且非 "/" 才列出，空名参与者跳过；"/" 是 ROS2 参与者的默认占位名——rmw_fastrtps 把参与者名统一置为根 enclave "/"，其真实节点名走 `ros2 node list` 所依赖的另一通道，`node list` 不输出这类行），按名称排序；调试节点自身不在自身发现回调中，天然不列出；同域其他进程的调试节点与 bag 节点分别以唯一名 `yomkrpc_debug_<uid>` / `yomkrpc_bag_<uid>` 列出（uid 为 12 位随机 hex，多进程各自的调试/录制节点可区分）。节点名称在创建节点时经 `YOMKRPC_NODE(nodeName[, domainId[, serverLocator]])` 下沉到 DDS 参与者（随 SPDP 发现传播给同域对端）：
 
 ```bash
 yomkrpc node list          # 默认域 0
