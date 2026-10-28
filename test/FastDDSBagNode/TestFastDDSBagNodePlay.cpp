@@ -117,6 +117,8 @@
  *      未知字段键忽略+absent 主题键静默无效——照常 20）；P16.3 错误路径三连（非法
  *      枚举 → topic invalid qos string、文件不存在 → open failed、坏 JSON → parse
  *      failed，均 false + stats 清空，对齐 P12.3 形态）。
+ *   P17 set_name 类型 bag 回放（闭环 6）：metadata type 字段为新名 → 回放端按发现名
+ *      重建透传 writer → 订阅端同名透传 reader 收流成功（类型名在录制-回放-订阅全链透传）。
  *
  * 域号 203：与 Lifecycle(200)/Validation(201)/Record(202) 错开，ctest 串行执行互不残留。
  * bag 目录为固定命名（play_p5_* / play_test_*），每用例收尾 remove_all 自清理（不落
@@ -180,6 +182,7 @@ namespace
     const std::string kP8Bag = "play_test_p8";
     const std::string kP11Bag = "play_test_p11";
     const std::string kP13Bag = "play_test_p13";
+    const std::string kP17Bag = "play_test_p17";
     const std::string kP5Missing = "play_p5_miss";      // 不创建（目录不存在）
     const std::string kP5IsFile = "play_p5_isfile";     // 路径是文件
     const std::string kP5NoMeta = "play_p5_nometa";     // 缺 metadata.json
@@ -548,7 +551,7 @@ int main()
             dds::DomainParticipantFactory::get_instance()->delete_participant(participant);
         }
         for (const std::string &dir : {kP1Bag, kP3aBag, kP3bBag, kP3cBag, kP4Bag, kP6Bag,
-                 kP7Bag, kP8Bag, kP11Bag, kP13Bag, kP5NoMeta, kP5BadJson, kP5NoTopics,
+                 kP7Bag, kP8Bag, kP11Bag, kP13Bag, kP17Bag, kP5NoMeta, kP5BadJson, kP5NoTopics,
                  kP5NoShard, kP5BadEnum, kP5MultiComma, kP5Legacy})
         {
             fs::remove_all(dir, ec);
@@ -1662,6 +1665,30 @@ int main()
         std::filesystem::remove(qosBadJson);
     }
     CHECK(p163Stats.empty(), "P16.3 stats 清空（失败即未播放）");
+
+    // ---- P17：set_name 类型 bag 回放（闭环 6）：metadata type 字段为新名 → 回放端按发现名
+    //      重建透传 writer → 订阅端同名透传 reader 收流成功（类型名全链透传实证） ----
+    CHECK(makeBag(kP17Bag,
+              {{"/rt/play_setname", "std_msgs::msg::dds_::String_", "RELIABLE,TRANSIENT_LOCAL", 20}},
+              200 * 1000000ULL),
+          "P17 前置：set_name 新名短回放 bag 构造成功");
+    PlayCountListener snRecv;
+    auto *topicSn = makePlayTopic(participant, "/rt/play_setname",
+        "std_msgs::msg::dds_::String_");
+    auto *readerSn = makePlayReader(subscriber, topicSn, &snRecv,
+        dds::RELIABLE_RELIABILITY_QOS, dds::TRANSIENT_LOCAL_DURABILITY_QOS);
+    CHECK(topicSn != nullptr && readerSn != nullptr, "P17 前置：透传 reader 先建在场");
+    yomk::bagPlayReset();
+    std::vector<FastDDSBagNode::BagTopicStat> p17Stats;
+    std::string p17Error;
+    std::atomic<bool> p17Done{false};
+    bool p17Ok = false;
+    std::thread p17Thread = startPlayThread(node, kP17Bag, p17Stats, p17Error, p17Ok, p17Done);
+    CHECK(waitForCount(snRecv.count, 20),
+          "P17 透传订阅端收满（bag type 新名 → 回放/订阅端按名匹配全通）");
+    joinPlay(p17Thread, p17Done);
+    CHECK(p17Ok, "P17 play 全程完成返回 true");
+    CHECK(p17Stats.size() == 1 && p17Stats[0].count == 20, "P17 stats 单主题 20 条");
 
     cleanup();
     return testReport("TestFastDDSBagNodePlay");

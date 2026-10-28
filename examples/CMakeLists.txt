@@ -34,6 +34,11 @@ target_link_libraries(ExampleYomkRpcPub PRIVATE YomkRpc::YomkRpc YomkServer::Yom
 add_executable(ExampleYomkRpcSub ExampleYomkRpcSub.cpp)
 target_link_libraries(ExampleYomkRpcSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
+# ROS2 互通双模式示例（闭环 6）：set_name 类型名直改，与 ROS2 Humble 同域互通（手动回归
+# 脚本 test/run_ros2_interop.sh 驱动，ctest 树不含）
+add_executable(ExampleRos2Interop ExampleRos2Interop.cpp)
+target_link_libraries(ExampleRos2Interop PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+
 # 命令行工具：yomkrpc topic print/list/info 与 node list/info（观察任意 DDS 主题 / 列出域内主题 /
 # 查询主题详情 / 列出域内节点 / 查询节点详情；类型无关，无需 YomkRpcMsg）
 add_executable(yomkrpc yomkrpc.cpp)
@@ -49,6 +54,7 @@ install(TARGETS
     ExampleYomkRpcTopicLoan
     ExampleYomkRpcPub
     ExampleYomkRpcSub
+    ExampleRos2Interop
     yomkrpc
     RUNTIME DESTINATION bin
 )

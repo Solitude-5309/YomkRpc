@@ -1818,11 +1818,59 @@ int main()
             // reader 建立实证：observer 读回 Subscribers 段 Reliability: RELIABLE
             std::vector<FastDDSDebugNode::EndpointDetail> msDetail;
             const bool seenMs = waitVerbose(MS_TOPIC, false, msDetail);
-            CHECK(seenMs, "反证用例 reader 建立成功（读回端点详情）");
+            CHECK(seenMs, "反证用例 reader 建立 成功（读回端点详情）");
             CHECK(hasQosLine(msDetail, "Reliability", "RELIABLE"),
                   "反证用例 reader 读回 Reliability: RELIABLE（requested 翻译落端点直证）");
         }
     }
-
+    
+    // ---- set_name 改名动态链路用例（闭环 6）：类型 set_name 新名后，发现缓存/动态类型链路按新名全通 ----
+    {
+        constexpr const char *SN_TOPIC = "t_setname_topic";
+        constexpr const char *kRosTypeName = "std_msgs::msg::dds_::String_";
+    
+        // 1. peer 节点：类型对象 new 后、移交前 set_name 新名，节点层注册发布
+        FastDDSNode peer;
+        CHECK(peer.setDomainId(TEST_DOMAIN, "setname-peer"),
+              "set_name 用例发布端 setDomainId → true");
+        auto *pubType = new YomkRpc::MStringPubSubType();
+        pubType->set_name(kRosTypeName);
+        CHECK(peer.registerPubTopic(SN_TOPIC, pubType),
+              "set_name 用例发布端 registerPubTopic(新名类型) → true（新名随发现传播）");
+    
+        // 2. debug 节点 listTopics 收敛 → 该主题类型名为新名（发现缓存按新名匹配）
+        FastDDSDebugNode dbg;
+        CHECK(dbg.setDomainId(TEST_DOMAIN), "set_name 用例被测端 setDomainId → true");
+        std::vector<std::pair<std::string, std::string>> topics;
+        CHECK(dbg.listTopics(topics), "set_name 用例 listTopics 收敛 → true");
+        bool snSeen = false;
+        for (const auto &t : topics)
+        {
+            if (t.first == SN_TOPIC)
+            {
+                snSeen = (t.second == kRosTypeName);
+            }
+        }
+        CHECK(snSeen,
+              "set_name 用例 listTopics 主题类型名 == std_msgs::msg::dds_::String_（发现名即新名）");
+    
+        // 3. interfaceShow(新名) 收敛成功——"tid 恒定"机制实证：TypeObjectRegistry 按 tid
+        //    查型与名字无关，TypeObject 结构元数据完整 → IDL 行集拼装
+        std::vector<std::string> idlLines;
+        CHECK(dbg.interfaceShow(kRosTypeName, idlLines),
+              "set_name 用例 interfaceShow(新名) → true（TypeObject 按 tid 可查，名字无关）");
+        bool structLine = false;
+        for (const auto &line : idlLines)
+        {
+            if (line.find("struct") != std::string::npos) { structLine = true; }
+        }
+        CHECK(structLine, "set_name 用例 interfaceShow 行集含 struct 头（TypeObject 元数据完整）");
+    
+        // 4. topicPub：按发现名重建动态类型 + 临时 writer 发布成功（复用阶段②③设施）
+        std::string snPubErr;
+        CHECK(dbg.topicPub(SN_TOPIC, R"({"data":"setname-pub-payload"})", snPubErr),
+              "set_name 用例 topicPub 按发现名重建动态类型发布 → true");
+    }
+    
     return testReport("TestFastDDSDebugNode");
 }

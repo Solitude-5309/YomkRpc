@@ -56,6 +56,19 @@ set_tests_properties(TestYomkRpcTopic PROPERTIES
 )
 
 # =============================================================================
+# 闭环 6：set_name 类型名直改匹配矩阵（真实 DDS 端到端，域 205 与既有测试错开）
+# S1 对称改名正验证（端到端收流 + topicInfo 新名读回）/ S2 不对称隔离负验证（类型名
+# 不同即隔离收 0）/ S3 typename 探针（库日志观察窗，断言从宽，[OBSERVE] 固化）。
+# =============================================================================
+add_executable(TestYomkRpcSetNaming TestYomkRpcSetNaming.cpp)
+target_link_libraries(TestYomkRpcSetNaming PRIVATE yomkrpc_under_test YomkRpcMsg)
+
+add_test(NAME TestYomkRpcSetNaming COMMAND ${YOMKRPC_TEST_LAUNCHER} $<TARGET_FILE:TestYomkRpcSetNaming>)
+set_tests_properties(TestYomkRpcSetNaming PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp:print_suppressions=0;TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp:print_suppressions=0"
+)
+
+# =============================================================================
 # MC4：loan 借出/归还（plain 类型免序列化路径）
 # 白盒验证 loan/discardLoan 的 plain(MInt32) 借出成功、非 plain(MString) 回退、
 # loan→池内填值→publish 免序列化端到端、discard 归还与守卫；loan sample 为 writer 池借出。

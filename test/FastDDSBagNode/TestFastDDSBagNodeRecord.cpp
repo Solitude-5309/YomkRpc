@@ -1287,6 +1287,113 @@ int main()
         }
     }
 
+    // ---- R16：set_name 类型录制（闭环 6）：远端发布端 MStringPubSubType 先 set_name 新名再
+    //      register_type → 录制成功 + stats.type == 新名（动态透传类型名 = 发现名 = 新名的实证）。
+    //      独立远端 participant：register_type 返回值受 TypeObjectFactory 全局 tid 幂等影响
+    //      （同进程 R2 已注册同 TypeObject 原名，返回 false 但新名注册照常生效，见下方
+    //      OBSERVE），链路断言落在 writer/录制/stats 上 ----
+    {
+        yomk::bagRecordReset();
+        FastDDSBagNode node12;
+        CHECK(node12.setDomainId(TEST_DOMAIN), "R16 新节点 setDomainId(202) 成功");
+
+        auto *peerSn = dds::DomainParticipantFactory::get_instance()->create_participant(
+            TEST_DOMAIN, dds::PARTICIPANT_QOS_DEFAULT);
+        CHECK(peerSn != nullptr, "R16 独立远端发布端 participant 创建成功");
+
+        // 类型对象 new 后、register_type 前 set_name（注册名随新名落发现数据）
+        constexpr auto *kSetnameTopic = "rt/bag_rec_setname";
+        constexpr auto *kRosTypeName = "std_msgs::msg::dds_::String_";
+        dds::TypeSupport tsSetname(new YomkRpc::MStringPubSubType());
+        tsSetname->set_name(kRosTypeName);
+        // register_type 返回值不硬断言（实测固化）：TypeObjectFactory 全局按 tid 幂等——同
+        // 进程 R2 段已注册同 TypeObject 的原名 MString（tid 恒定），set_name 新名再注册返回
+        // false；false 不影响 participant 按新名建 topic/writer（下方 writer/录制/stats
+        // 断言实证链路全通）。跨进程（典型用法）无此问题：SetNaming S1/S2/S3 与
+        // ExampleRos2Interop 均新进程注册成功。
+        const bool regOkSetname = tsSetname.register_type(peerSn);
+        std::cout << "[OBSERVE] R16 register_type(\"" << kRosTypeName << "\") -> "
+                  << (regOkSetname ? "true" : "false (TypeObjectFactory tid 幂等)") << std::endl;
+        auto *pubSn = (peerSn != nullptr)
+                          ? peerSn->create_publisher(dds::PUBLISHER_QOS_DEFAULT)
+                          : nullptr;
+        auto *topicSetname = (peerSn != nullptr)
+                                 ? peerSn->create_topic(
+                                       kSetnameTopic, tsSetname.get_type_name(), dds::TOPIC_QOS_DEFAULT)
+                                 : nullptr;
+        auto *writerSetname = (pubSn != nullptr && topicSetname != nullptr)
+                                  ? pubSn->create_datawriter(topicSetname, dds::DATAWRITER_QOS_DEFAULT)
+                                  : nullptr;
+        CHECK(writerSetname != nullptr, "R16 远端 DataWriter 创建成功（rt/bag_rec_setname）");
+
+        // 发布端：等订阅匹配后 20 条 @150ms（同 R2 口径）
+        std::atomic<bool> pubStop12{false};
+        std::thread pubThread12([&]()
+        {
+            YomkRpc::MString msg;
+            dds::PublicationMatchedStatus matched{};
+            for (int i = 0; i < 100; ++i) // 100×100ms=10s 上限；未匹配照发（用例必失败不掩盖）
+            {
+                if (dds::RETCODE_OK ==
+                        writerSetname->get_publication_matched_status(matched) &&
+                    matched.current_count > 0)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            for (int i = 0; i < 20; ++i)
+            {
+                msg.data("bag-record-setname-" + std::to_string(i));
+                writerSetname->write(&msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPubIntervalMs));
+            }
+            pubStop12.store(true);
+        });
+
+        // 录制窗（同 R15：record → 定时 stop → 收尾 join）
+        std::vector<FastDDSBagNode::BagTopicStat> statsSetname;
+        std::string errorSetname;
+        bool okSetname = false;
+        std::atomic<bool> recDone12{false};
+        std::thread recThread12([&]()
+        {
+            okSetname = node12.record({kSetnameTopic}, statsSetname, &errorSetname);
+            recDone12.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(kRecordMs));
+        yomk::bagRecordStop();
+        for (int i = 0; i < 100 && !recDone12.load(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        recThread12.join();
+        pubStop12.store(true);
+        pubThread12.join();
+
+        CHECK(okSetname, "R16 set_name 类型录制 record → true");
+        CHECK(statsSetname.size() == 1 && statsSetname[0].type == kRosTypeName,
+              "R16 stats.type == std_msgs::msg::dds_::String_（元信息类型名 = 发现名 = 新名）");
+
+        // R16 独立远端清理：writer → publisher → topic → participant
+        if (writerSetname != nullptr && pubSn != nullptr)
+        {
+            pubSn->delete_datawriter(writerSetname);
+        }
+        if (pubSn != nullptr)
+        {
+            peerSn->delete_publisher(pubSn);
+        }
+        if (topicSetname != nullptr)
+        {
+            peerSn->delete_topic(topicSetname);
+        }
+        if (peerSn != nullptr)
+        {
+            dds::DomainParticipantFactory::get_instance()->delete_participant(peerSn);
+        }
+    }
+
     // 远端发布端清理（先于 bag 节点析构亦可，二者独立参与者）
     if (peerParticipant != nullptr)
     {

@@ -299,14 +299,18 @@ YomkRpc 与 ROS2 在同一 DDS 域内互通（YomkRpc 节点发布、`ros2` 节�
 
 ```cpp
 #include <YomkRpc/YomkRpcAPI.h>
+#include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
 
-YomkRpc::MStringPubSubType type;
-type.set_name("std_msgs::msg::dds_::String_");   // ROS2 命名（须在移交前改）
+auto *type = new YomkRpc::MStringPubSubType();
+type->set_name("std_msgs::msg::dds_::String_");   // ROS2 命名（须在移交前改）
 YOMKRPC_NODE("interop_pub", 0);
-YOMKRPC_PUB_TOPIC("interop_pub", "/chatter", &type);   // 链路内按新名注册
-// YOMKRPC_PUB_MSG("interop_pub", "/chatter", &msg);   // 之后正常发布
+// DDS 层话题名带 rt/ 前缀（rmw_fastrtps 对语义名 /chatter 的实际 DDS 名），QoS 用 ROS2 发布端默认底座
+YOMKRPC_PUB_TOPIC("interop_pub", "rt/chatter", type, DDSQosProfile::ros2DefaultPublisher());
+// YOMKRPC_PUB_MSG("interop_pub", "rt/chatter", &msg);   // 之后正常发布（话题名与注册名逐字节一致）
 ```
+
+完整双模式示例（pub/sub + 真机脚本）：`examples/ExampleRos2Interop.cpp` + `test/run_ros2_interop.sh`。
 
 **使用注意**：`set_name` 必须在类型对象移交（传宏）之前调用——宏实参位内联 `new` 无法先改名。
 
@@ -315,7 +319,7 @@ YOMKRPC_PUB_TOPIC("interop_pub", "/chatter", &type);   // 链路内按新名注�
 | 要素 | 说明 |
 |---|---|
 | 域 id | ROS2 默认域 0（`ROS_DOMAIN_ID`），YomkRpc 侧对齐（`YOMKRPC_DDS_DOMAIN_ID` 或宏显式 domainId） |
-| topic 名 | 逐字节一致（含前导斜杠的完全限定名，ROS2 `/chatter` 即 YomkRpc `/chatter`） |
+| topic 名 | 逐字节一致，且须为 **rmw_fastrtps 的 DDS 层话题名**——ROS2 语义名加 `rt/` 前缀（`ros2 topic pub /chatter` 的实际 DDS 名为 `rt/chatter`），YomkRpc 端直接用 `rt/chatter` 注册；无前缀名在 DDS 层与 ROS2 端永不匹配（真机实测：`/chatter_interop` 双向收不到，改 `rt/chatter_interop` 双向即通，见 run_ros2_interop.sh） |
 | 类型名 + CDR 布局 | 类型名一致（`set_name` 直改为 `pkg::msg::dds_::Type_` 形态）且两端消息 CDR 编码布局一致（ROS2 msg 严格转 idl 生成即满足；字段结构不同的类型即使同名也不兼容） |
 
 ROS2 侧验证：
@@ -324,11 +328,14 @@ ROS2 侧验证：
 ros2 topic echo /chatter std_msgs/msg/String
 ```
 
+真机回归脚本（ctest 树不含，手动执行）：`test/run_ros2_interop.sh <ExampleRos2Interop 路径>`——双向对跑以**数据到达**为判定（方向 1 YomkRpc pub → `ros2 topic echo --once` 收到；方向 2 `ros2 topic pub -r 1` → YomkRpc sub 打印 `[RECV]`），退出码即互通结果；前置 humble 环境与编译安装后的 examples 二进制。
+
 **副作用提示**：
 
 - **原自名失效**：改名后原类型名（如 `YomkRpc::MString`）不再注册——同进程内 YomkRpc 原生话题与互通话题需两个类型实例两个名；
-- **匹配语义**：ROS2 Humble 不注册 TypeObject、不发 TypeInformation，匹配退化为端点 `type_name` 字符串比较，改名全链路一致即通；Fast DDS 对称改名匹配正常，不对称（一端改一端不改）视为不同类型（预期隔离）；Jazzy+ 两端均发 TypeInformation 走类型一致性检查，未验证；
-- **QoS 兼容**：两端默认 RELIABLE+VOLATILE 自然满足 requested≤offered；自定义 QoS 时注意匹配规则（如 RELIABLE 订阅端收不到 BEST_EFFORT 发布端），不当配置可能静默断链；
+- **匹配语义**：ROS2 Humble 不注册 TypeObject、不发 TypeInformation，匹配退化为端点 `type_name` 字符串比较，改名全链路一致即通；Fast DDS 3.x 内部对跑：对称/不对称改名均匹配正常（两端均携带 TypeInformation，EDP 按 tid/TypeObject 兼容性匹配而 tid 与名字无关，实测 TestYomkRpcSetNaming S2 固化，不对称改名不隔离）；Jazzy+ 两端均发 TypeInformation 走类型一致性检查，未验证；
+- **图可见性与数据匹配相互独立**：`ros2 topic list`/`node list` 看不到 YomkRpc 端点属正常（机制差异），互通判定以数据到达为准（run_ros2_interop.sh 双向实测 PASS）；
+- **QoS 兼容**：两端默认 RELIABLE+VOLATILE 自然满足 requested≤offered；自定义 QoS 时注意匹配规则（如 RELIABLE 订阅端收不到 BEST_EFFORT 发布端），不当配置可能静默断链；真机实测口径：pub 端 `DDSQosProfile::ros2DefaultPublisher()`（RELIABLE offered）+ sub 端 `ros2DefaultSubscriber()`（BEST_EFFORT requested）对脚本两侧 `ros2 topic echo/pub` 全兼容；
 - **bag 节点零影响**：bag 录制/回放为透传设计（按发现名动态建类型、payload 字节搬运），与类型名无关。
 
 **根治路径**（可选）：idl 内直接用 ROS2 命名（`module std_msgs { module msg { struct String_ {...} } }`）重新生成——字面量从源头即新名，全链路一致，连 `set_name` 都不需要；代价是该类型以 ROS2 名存在（YomkRpc 原生名与 ROS2 名双类型并存需两份平行 idl）。禁止直接修改生成产物（重新生成必覆盖）。
