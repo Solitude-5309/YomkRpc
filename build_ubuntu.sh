@@ -253,7 +253,7 @@ echo " YomkServer 路径: ${YOMK_SERVER_PATH}"
 echo " 动态库缓存:"
 ldconfig -p | grep -i "${PROJECT_NAME}" || true
 echo " 示例程序列表（安装于 ${INSTALL_DIR}/bin）:"
-for _BIN in "${INSTALL_DIR}"/bin/ExampleYomkRpc* "${INSTALL_DIR}"/bin/yomkrpc; do
+for _BIN in "${INSTALL_DIR}"/bin/ExampleYomkRpc* "${INSTALL_DIR}"/bin/ExampleRos2Interop* "${INSTALL_DIR}"/bin/yomkrpc; do
     [ -x "${_BIN}" ] && echo "   - $(basename "${_BIN}")"
 done
 unset _BIN

@@ -310,7 +310,7 @@ YOMKRPC_PUB_TOPIC("interop_pub", "rt/chatter", type, DDSQosProfile::ros2DefaultP
 // YOMKRPC_PUB_MSG("interop_pub", "rt/chatter", &msg);   // 之后正常发布（话题名与注册名逐字节一致）
 ```
 
-完整双模式示例（pub/sub + 真机脚本）：`examples/ExampleRos2Interop.cpp` + `test/run_ros2_interop.sh`。
+示例（发布/订阅独立二进制，无命令行参数，均常驻运行、Ctrl+C/SIGTERM 优雅退出）：`examples/ExampleRos2InteropPub.cpp`（1Hz 持续发布 `rt/chatter_interop`）、`examples/ExampleRos2InteropSub.cpp`（持续监听 `rt/chatter_interop` 逐条打印，退出时打印总收条数）；两端同主题互为对端，也可与 ROS2 CLI 互通。
 
 **使用注意**：`set_name` 必须在类型对象移交（传宏）之前调用——宏实参位内联 `new` 无法先改名。
 
@@ -328,13 +328,13 @@ ROS2 侧验证：
 ros2 topic echo /chatter std_msgs/msg/String
 ```
 
-真机回归脚本（ctest 树不含，手动执行）：`test/run_ros2_interop.sh <ExampleRos2Interop 路径>`——双向对跑以**数据到达**为判定（方向 1 YomkRpc pub → `ros2 topic echo --once` 收到；方向 2 `ros2 topic pub -r 1` → YomkRpc sub 打印 `[RECV]`），退出码即互通结果；前置 humble 环境与编译安装后的 examples 二进制。
+真机回归脚本（ctest 树不含，手动执行）：`./test/run_ros2_interop.sh`（无参默认取 test 树构建产物 `test/build/Ros2Interop/TestRos2InteropPub|Sub`，可选传参覆盖；examples 侧示例仅面向用户教学，不承担判定职责）；两项判定均以**数据到达**为准并逐行列出两侧收发消息流（方向 1 YomkRpc pub 发 30 条 `hello ros2 N` → `ros2 topic echo` 6s 窗口收到多条；方向 2 `ros2 topic pub` 三路各 `-r 1` 发 `hello yomkrpc N`（N=1..3）→ YomkRpc sub 收满 3 条 `[RECV]` 即退），退出码 0=两项全过；前置 humble 环境与 test 树构建产物。
 
 **副作用提示**：
 
 - **原自名失效**：改名后原类型名（如 `YomkRpc::MString`）不再注册——同进程内 YomkRpc 原生话题与互通话题需两个类型实例两个名；
 - **匹配语义**：ROS2 Humble 不注册 TypeObject、不发 TypeInformation，匹配退化为端点 `type_name` 字符串比较，改名全链路一致即通；Fast DDS 3.x 内部对跑：对称/不对称改名均匹配正常（两端均携带 TypeInformation，EDP 按 tid/TypeObject 兼容性匹配而 tid 与名字无关，实测 TestYomkRpcSetNaming S2 固化，不对称改名不隔离）；Jazzy+ 两端均发 TypeInformation 走类型一致性检查，未验证；
-- **图可见性与数据匹配相互独立**：`ros2 topic list`/`node list` 看不到 YomkRpc 端点属正常（机制差异），互通判定以数据到达为准（run_ros2_interop.sh 双向实测 PASS）；
+- **图可见性与数据匹配相互独立**：`ros2 topic list`/`node list` 看不到 YomkRpc 端点属正常（机制差异），互通判定以数据到达为准（run_ros2_interop.sh 两项实测 PASS）；
 - **QoS 兼容**：两端默认 RELIABLE+VOLATILE 自然满足 requested≤offered；自定义 QoS 时注意匹配规则（如 RELIABLE 订阅端收不到 BEST_EFFORT 发布端），不当配置可能静默断链；真机实测口径：pub 端 `DDSQosProfile::ros2DefaultPublisher()`（RELIABLE offered）+ sub 端 `ros2DefaultSubscriber()`（BEST_EFFORT requested）对脚本两侧 `ros2 topic echo/pub` 全兼容；
 - **bag 节点零影响**：bag 录制/回放为透传设计（按发现名动态建类型、payload 字节搬运），与类型名无关。
 

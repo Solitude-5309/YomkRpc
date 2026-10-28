@@ -146,3 +146,5 @@ add_subdirectory(YomkRpcDebugService)
 add_subdirectory(FastDDSBagNode)
 # YomkRpcBagService：bag 服务两层测试（契约 DDS-free + 生命周期真实 DDS）
 add_subdirectory(YomkRpcBagService)
+# Ros2Interop：真机互通回归判定程序（run_ros2_interop.sh 驱动，不 add_test——需 ROS2 环境）
+add_subdirectory(Ros2Interop)

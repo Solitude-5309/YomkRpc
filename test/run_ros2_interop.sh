@@ -4,23 +4,38 @@
 #
 # 前置：
 #   1. /opt/ros/humble 环境可用（ros2 CLI 在 PATH）
-#   2. 本仓编译安装后的 examples 二进制 ExampleRos2Interop（examples/CMakeLists 注册）
+#   2. test 树构建后的判定二进制（test/build/Ros2Interop/TestRos2InteropPub|Sub，
+#      examples 的 ExampleRos2InteropPub|Sub 为用户教学示例，不承担判定职责）
 #
 # 用法：
-#   ./run_ros2_interop.sh /path/to/ExampleRos2Interop
+#   ./test/run_ros2_interop.sh                # 无参：默认取 test 树构建产物
+#   ./test/run_ros2_interop.sh <Pub> [<Sub>]  # 可选：显式覆盖判定程序路径
+#   （默认：本脚本同目录下 build/Ros2Interop/TestRos2InteropPub 与同目录 TestRos2InteropSub；
+#     未构建时先执行 cmake -S test -B test/build -DCMAKE_PREFIX_PATH=/opt/yomk &&
+#     cmake --build test/build --target TestRos2InteropPub TestRos2InteropSub）
 #
-# 流程（双向对跑，退出码即互通结果）：
-#   方向 1：ExampleRos2Interop pub（set_name 新名 + 1Hz 发布）→ ros2 topic echo --once 收到
-#   方向 2：ros2 topic pub -r 1 → ExampleRos2Interop sub（同名 set_name 订阅）打印 [RECV]
+# 两项判定（以数据到达为准；两侧收发消息流逐条一行展示再判 PASS/FAIL）：
+#   方向 1：TestRos2InteropPub（set_name 新名 + 1Hz 发 30 条 "hello ros2 N" 后自退）→ ros2 topic echo（6s 窗口）收到多条
+#   方向 2：ros2 topic pub 三路各 -r 1 发 "hello yomkrpc N"（N=1..3，VOLATILE 不回放故 Sub 先行匹配）→ TestRos2InteropSub 收满 3 条 [RECV] 即退
 #
-# 退出码：0 = 双向互通成功；1 = 某方向失败；2 = 参数错误
+# 退出码：0 = 两项全过；1 = 某方向失败；2 = 参数错误
 # =============================================================================
 
 set -u
 
-EXE="${1:?usage: run_ros2_interop.sh /path/to/ExampleRos2Interop}"
-if [ ! -x "$EXE" ]; then
-    echo "[FAIL] 二进制不存在或不可执行: $EXE"
+# 判定程序路径：无参默认取本脚本同目录 test 树构建产物，可选传参覆盖（路径固定非必输）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PUB_EXE="${1:-${SCRIPT_DIR}/build/Ros2Interop/TestRos2InteropPub}"
+SUB_EXE="${2:-$(dirname "$PUB_EXE")/TestRos2InteropSub}"
+if [ ! -x "$PUB_EXE" ]; then
+    echo "[FAIL] 发布端不存在或不可执行: $PUB_EXE"
+    echo "       先构建 test 树判定程序："
+    echo "         cmake -S $(dirname "$SCRIPT_DIR")/test -B $SCRIPT_DIR/build -DCMAKE_PREFIX_PATH=/opt/yomk"
+    echo "         cmake --build $SCRIPT_DIR/build --target TestRos2InteropPub TestRos2InteropSub"
+    exit 2
+fi
+if [ ! -x "$SUB_EXE" ]; then
+    echo "[FAIL] 订阅端不存在或不可执行: $SUB_EXE"
     exit 2
 fi
 
@@ -42,32 +57,57 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==== 方向 1：YomkRpc pub → ROS2 topic echo ===="
-"$EXE" pub &
+PUB_LOG=/tmp/yomk_interop_pub.log
+"$PUB_EXE" >"$PUB_LOG" 2>&1 &
 PUB_PID=$!
 sleep 2 # discovery 建立窗
-if timeout 15 ros2 topic echo /chatter_interop std_msgs/msg/String --once 2>/dev/null | grep -q "data:"; then
-    echo "[PASS] YomkRpc pub → ros2 topic echo 收到（set_name 新名互通）"
+ECHO_OUT=$(timeout 6 ros2 topic echo /chatter_interop std_msgs/msg/String 2>/dev/null)
+kill -INT "$PUB_PID" 2>/dev/null
+wait "$PUB_PID" 2>/dev/null
+# 收发消息流逐条一行对照：发布侧 [SEND] 序列，接收侧 echo data: 序列
+grep "\[SEND\]" "$PUB_LOG" | sed "s/.*\[SEND\] */[YomkRpc pub] /"
+PUB_TOTAL=$(grep -c "\[SEND\]" "$PUB_LOG")
+rm -f "$PUB_LOG"
+ECHO_N=$(echo "$ECHO_OUT" | grep -c "^data:")
+if [ "$ECHO_N" -gt 0 ]; then
+    echo "$ECHO_OUT" | grep "^data:" | sed "s/^data: */[ros2 echo ] /"
+    echo "[PASS] 方向 1：YomkRpc pub → ros2 topic echo 收到（set_name 新名互通，pub ${PUB_TOTAL} 条 / echo ${ECHO_N} 条）"
 else
-    echo "[FAIL] ROS2 侧未收到 /chatter_interop"
+    echo "[ros2 echo ] （6s 窗口无输出）"
+    echo "[FAIL] 方向 1：ROS2 侧未收到 /chatter_interop（pub ${PUB_TOTAL} 条）"
     exit 1
 fi
-kill "$PUB_PID" 2>/dev/null
-wait "$PUB_PID" 2>/dev/null
 
 echo "==== 方向 2：ROS2 topic pub → YomkRpc sub ===="
-ros2 topic pub /chatter_interop_rev std_msgs/msg/String "{data: hello}" -r 1 &
-ROS_PID=$!
-sleep 2 # discovery 建立窗
-# sub 模式收到即退出（内部最长等 30s）；timeout 40 兜底
-SUB_OUT=$(timeout 40 "$EXE" sub 2>&1)
-SUB_RC=$?
-if echo "$SUB_OUT" | grep -q "\[RECV\]"; then
-    echo "[PASS] ros2 topic pub → YomkRpc sub 收到: $(echo "$SUB_OUT" | grep '\[RECV\]' | head -1)"
+SUB_LOG=/tmp/yomk_interop_sub.log
+"$SUB_EXE" >"$SUB_LOG" 2>&1 &
+SUB_PID=$!
+sleep 2 # Sub discovery 建立窗（VOLATILE 不回放：Sub 先行匹配后再发保证送达）
+# 三路发布：各 -r 1 持续发固定序号内容，每路一行展示
+for i in 1 2 3; do
+    echo "[ros2 pub  ] hello yomkrpc $i（-r 1 持续发布，直到 Sub 收满 3 条）"
+    timeout 8 ros2 topic pub /chatter_interop_rev std_msgs/msg/String "{data: hello yomkrpc $i}" -r 1 >/dev/null 2>&1 &
+    sleep 0.2
+done
+# 等 Sub 收满 3 条自退（最长 30s），等不到自退则 SIGINT 收尾
+for _ in $(seq 1 35); do
+    kill -0 "$SUB_PID" 2>/dev/null || break
+    sleep 1
+done
+kill -INT "$SUB_PID" 2>/dev/null
+wait "$SUB_PID" 2>/dev/null
+RECV_N=$(grep -c "\[RECV\]" "$SUB_LOG")
+if [ "$RECV_N" -ge 3 ]; then
+    grep "\[RECV\]" "$SUB_LOG" | sed "s/.*\[RECV\] */[YomkRpc sub] /"
+    echo "[PASS] 方向 2：ros2 topic pub → YomkRpc sub 收到"
 else
-    echo "[FAIL] YomkRpc 侧未收到 /chatter_interop_rev（sub exit=$SUB_RC）"
-    echo "$SUB_OUT" | tail -5
+    grep "\[RECV\]" "$SUB_LOG" | sed "s/.*\[RECV\] */[YomkRpc sub] /"
+    echo "[FAIL] 方向 2：YomkRpc 侧未收满 3 条 /chatter_interop_rev（共 ${RECV_N} 条）"
+    tail -5 "$SUB_LOG"
+    rm -f "$SUB_LOG"
     exit 1
 fi
+rm -f "$SUB_LOG"
 
-echo "==== 真机互通双向 PASS ===="
+echo "==== 真机互通两项判定全 PASS ===="
 exit 0
