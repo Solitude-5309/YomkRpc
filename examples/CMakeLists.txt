@@ -42,6 +42,15 @@ target_link_libraries(ExampleRos2InteropPub PRIVATE YomkRpc::YomkRpc YomkServer:
 add_executable(ExampleRos2InteropSub ExampleRos2InteropSub.cpp)
 target_link_libraries(ExampleRos2InteropSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
 
+# 发现服务器示例（跨域互通）：发布端域 100 / 订阅端域 200 异域经同一发现服务器互通
+# （serverLocator 直配 CLIENT，域号在 DS 模式下不参与匹配），可选首参传 "ip[:port]" 覆盖；
+# 配套 LaunchDiscoverServer.sh 启动发现服务器（运行方式见 README 5.8）
+add_executable(ExampleDiscoverServerPub ExampleDiscoverServerPub.cpp)
+target_link_libraries(ExampleDiscoverServerPub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+
+add_executable(ExampleDiscoverServerSub ExampleDiscoverServerSub.cpp)
+target_link_libraries(ExampleDiscoverServerSub PRIVATE YomkRpc::YomkRpc YomkServer::YomkServer YomkRpcMsg)
+
 # 命令行工具：yomkrpc topic print/list/info 与 node list/info（观察任意 DDS 主题 / 列出域内主题 /
 # 查询主题详情 / 列出域内节点 / 查询节点详情；类型无关，无需 YomkRpcMsg）
 add_executable(yomkrpc yomkrpc.cpp)
@@ -59,6 +68,11 @@ install(TARGETS
     ExampleYomkRpcSub
     ExampleRos2InteropPub
     ExampleRos2InteropSub
+    ExampleDiscoverServerPub
+    ExampleDiscoverServerSub
     yomkrpc
     RUNTIME DESTINATION bin
 )
+
+# 发现服务器启动脚本随示例一并安装到 <安装路径>/bin
+install(PROGRAMS LaunchDiscoverServer.sh DESTINATION bin)

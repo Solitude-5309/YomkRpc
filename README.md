@@ -99,6 +99,9 @@ YomkRpc/
 │   ├── ExampleYomkRpcTopicLoan.cpp # loan 借出机制演示
 │   ├── ExampleYomkRpcPub.cpp       # 发布端示例程序（每 1s 发布 hello world，Ctrl+C 退出）
 │   ├── ExampleYomkRpcSub.cpp       # 订阅端示例程序（订阅 hello_world，Ctrl+C 退出）
+│   ├── ExampleDiscoverServerPub.cpp # 发现服务器示例发布端（域 100，直配发现服务器，Ctrl+C 退出）
+│   ├── ExampleDiscoverServerSub.cpp # 发现服务器示例订阅端（域 200，直配发现服务器，Ctrl+C 退出）
+│   ├── LaunchDiscoverServer.sh     # 发现服务器启动脚本（--ip/--port，前台运行 Ctrl+C 停止）
 │   └── yomkrpc.cpp                 # yomkrpc 命令行工具（调试观察 + topic pub 发布 + bag 录制/元信息/转换）
 ├── cmake/
 │   └── ProjectConfig.cmake.in  # CMake 导出配置模板
@@ -387,6 +390,23 @@ YOMKRPC_BAG_NODE(0, "127.0.0.1:11811");
 等价环境变量形态（ROS2 生态通用）：`ROS_DISCOVERY_SERVER=127.0.0.1:11811`（id 即 `-i` 指定的 server 位序）。直配后 participant 以 CLIENT 发现协议运行（禁用多播 PDP，发现流量单播直送 server）；可与 `YOMKRPC_LOAD_XML` 组合（XML 打底，直配 server 项覆盖 XML `discoveryServersList`）。
 
 **域号说明**：DS 模式下 client 的域 id 与 server 无关——server 不做域校验（Fast DDS 源码 PDPClientListener/PDPServerListener："In Discovery Server we don't impose domain ids to be the same"；跨域丢弃仅存在于简单发现 PDPSimple 的基类校验）。本仓连通性测试实证：A/B 两节点异域（201/202）直配同一 server 后正常收发数据。域隔离语义仅在简单发现（多播）路径生效。
+
+### 5.8 发现服务器示例（跨域互通）
+
+examples 提供一对发现服务器示例：`ExampleDiscoverServerPub`（域 100 发布端）与 `ExampleDiscoverServerSub`（域 200 订阅端），两者经同一发现服务器以 CLIENT 模式直配互通（异域互通知上节域号说明）。三个终端按序运行：
+
+```bash
+# 终端 1：启动发现服务器（--ip/--port 可选，缺省 127.0.0.1:11811，前台运行 Ctrl+C 停止）
+./examples/LaunchDiscoverServer.sh --ip 127.0.0.1 --port 11811
+
+# 终端 2：订阅端（域 200）
+./examples/build/ExampleDiscoverServerSub
+
+# 终端 3：发布端（域 100）
+./examples/build/ExampleDiscoverServerPub
+```
+
+两示例均可选首参传直配串（如 `./ExampleDiscoverServerPub 192.168.1.10:11811`，格式同 `YOMKRPC_NODE` 尾参），缺省 `127.0.0.1:11811`。运行后发布端每秒打印 `[SEND] hello world N`，订阅端同步打印 `[RECV] hello world N`，数据持续收发，Ctrl+C 优雅退出。
 
 ## 6 YomkRpc 调试
 
