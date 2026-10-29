@@ -10,7 +10,7 @@
 |--------------------|----------|
 | `YOMKRPC_VERSION()` | URL端点：`/YomkRpcService/version`<br>简述：版本查询<br>详述：宏内部自动解包并打印版本，无返回值 |
 | `YOMKRPC_LOAD_XML(xmlPath)` | URL端点：`/YomkRpcService/load_xml`<br>简述：加载 Fast DDS XML profiles 文件<br>详述：读文件经 `load_XML_profiles_file` 解析校验（返回码显式检查）后缓存，供后续 create_node 的 participant 按**三级提取链**叠加：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。**必须在任何节点创建之前调用**——participant 的发现配置/传输/QoS 在创建时固化，节点创建后加载仅影响后续新建实体，对已建节点不生效；再次调用以最新成功文件整体替换；失败（路径不存在/文件为空/格式非法）返回错误，`m_msg` 携原因与返回码 |
-| `YOMKRPC_NODE(nodeName[, domainId[, serverLocator]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, serverLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；serverLocator 可缺省尾参——发现服务器直配聚合串（逗号分隔 `ip[:port]` 多 server，port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7） |
+| `YOMKRPC_NODE(nodeName[, domainId[, serverLocator]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, serverLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；serverLocator 可缺省尾参——发现服务器直配聚合串（分号分隔 `ip[:port]` 多 server，port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7） |
 | `YOMKRPC_DEL_NODE(nodeName)` | URL端点：`/YomkRpcService/delete_node`<br>简述：删除节点<br>详述：销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
 | `YOMKRPC_PUB_TOPIC(nodeName, topicName, type[, qos])` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放）；qos 可缺省尾参——端点 QoS 描述 `DDSQosProfile`（8 项 history/depth/reliability/durability/liveliness/deadline/lifespan/liveliness lease 可独立设置，未设置项为哨兵保持底座值）：缺省（全哨兵）=Fast DDS 端点默认底座（现状行为）；`DDSQosProfile::ros2DefaultPublisher()`=ROS2 默认底座（KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3）；可在底座上逐项覆盖（如只设 depth=10），另有 `ros2SensorData()` 传感器档（KEEP_LAST(5)+BEST_EFFORT），用法见 5.6 |
 | `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback[, qos])` | URL端点：`/YomkRpcService/register_sub_topic`<br>简述：注册订阅主题<br>详述：打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建；qos 可缺省尾参语义同 `YOMKRPC_PUB_TOPIC`，订阅端推荐 `DDSQosProfile::ros2DefaultSubscriber()`（BEST_EFFORT requested 对任意 offered 均可匹配） |
@@ -381,7 +381,7 @@ fastdds discovery -i 0 -l 127.0.0.1 -p 11811
 ```
 
 ```cpp
-// client 侧：三节点宏尾参直配（"ip[:port]" 逗号分隔多 server，port 缺省 11811，非法串创建失败回显）
+// client 侧：三节点宏尾参直配（"ip[:port]" 分号分隔多 server，port 缺省 11811，非法串创建失败回显）
 YOMKRPC_NODE("ds_node", 0, "127.0.0.1:11811");
 YOMKRPC_DEBUG_NODE(0, "127.0.0.1:11811");
 YOMKRPC_BAG_NODE(0, "127.0.0.1:11811");

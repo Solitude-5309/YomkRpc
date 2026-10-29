@@ -19,7 +19,7 @@
 //            读环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超 [0,232] 回落 0）。
 // 形态 2：YOMKRPC_NODE(nodeName, domainId)  —— 显式指定，合法范围 [0,232]。
 // 形态 3：YOMKRPC_NODE(nodeName, domainId, serverLocator) —— 尾参传发现服务器直配聚合串
-//            "ip[:port]"（多 server 逗号分隔，port 缺省 11811）：participant 以 CLIENT
+//            "ip[:port]"（多 server 分号分隔，port 缺省 11811）：participant 以 CLIENT
 //            发现协议直配（可单独使用或配合 YOMKRPC_LOAD_XML；非法串创建失败回显）。
 // nodeName：节点唯一名。仅同域节点可互通。
 #define YOMKRPC_NODE(nodeName, ...) \

@@ -149,7 +149,7 @@ struct DDSNode
     // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0）。
     uint32_t domainId = YomkRpcDefaultDomainId();
     // 发现服务器直配聚合串（可缺省尾参）：空串=不直配（现状行为）；格式 "ip[:port]"，
-    // 多 server 逗号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
+    // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
     std::string serverLocator;
 };

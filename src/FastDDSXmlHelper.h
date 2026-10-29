@@ -25,13 +25,14 @@ namespace yomkrpc_xml
 struct ParticipantQosSpec
 {
     std::string xml;         // 已成功 load 的 XML profiles raw 串；空=未加载，跳过提取
-    std::string serverSpec;  // 发现服务器直配聚合串 "ip[:port],ip[:port]"；空=不直配
+    std::string serverSpec;  // 发现服务器直配聚合串 "ip[:port];ip[:port]"；空=不直配
 };
 
 // serverLocator port 合法上界（UDP 端口上限）
 constexpr uint32_t kDdsPortMax = 65535;
 
-// serverSpec 聚合串解析 → DDSServerInfo 列表：逗号分隔 "ip[:port]" 项，port 缺省 11811，
+// serverSpec 聚合串解析 → DDSServerInfo 列表：分号分隔（对齐 ROS_DISCOVERY_SERVER 官方格式）
+// "ip[:port]" 项，port 缺省 11811，
 // 合法范围 [1,65535]；空项/空 ip/非纯数字/越界 port 均为非法，err 回填具体项文本并返回 false。
 inline bool parseServerLocator(const std::string& spec,
         std::vector<DDSServerInfo>& out, std::string& err)
@@ -41,9 +42,9 @@ inline bool parseServerLocator(const std::string& spec,
     size_t begin = 0;
     while (true)
     {
-        const size_t comma = spec.find(',', begin);
+        const size_t sep = spec.find(';', begin);
         const std::string item =
-            spec.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+            spec.substr(begin, sep == std::string::npos ? std::string::npos : sep - begin);
         if (item.empty())
         {
             err = "empty server item in serverLocator [" + spec + "]";
@@ -74,11 +75,11 @@ inline bool parseServerLocator(const std::string& spec,
             server.port = static_cast<uint32_t>(parsed);
         }
         out.push_back(std::move(server));
-        if (comma == std::string::npos)
+        if (sep == std::string::npos)
         {
             break;
         }
-        begin = comma + 1;
+        begin = sep + 1;
     }
     return true;
 }

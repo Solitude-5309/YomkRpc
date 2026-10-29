@@ -256,10 +256,10 @@ namespace
             CHECK(yomkrpc_xml::parseServerLocator("127.0.0.1", servers, err) &&
                       servers.size() == 1 && servers[0].address == "127.0.0.1" && servers[0].port == 11811,
                   "Part C: 单项无 port → address 原样 + port 缺省 11811");
-            CHECK(yomkrpc_xml::parseServerLocator("10.0.0.1:7400,192.168.1.1:65535", servers, err) &&
+            CHECK(yomkrpc_xml::parseServerLocator("10.0.0.1:7400;192.168.1.1:65535", servers, err) &&
                       servers.size() == 2 && servers[0].port == 7400 && servers[1].port == 65535,
-                  "Part C: 多项带 port → 逐项解析（逗号分隔）");
-            CHECK(!yomkrpc_xml::parseServerLocator("10.0.0.1,,10.0.0.2", servers, err) && !err.empty(),
+                  "Part C: 多项带 port → 逐项解析（分号分隔）");
+            CHECK(!yomkrpc_xml::parseServerLocator("10.0.0.1;;10.0.0.2", servers, err) && !err.empty(),
                   "Part C: 空项 → false + err 非空");
             CHECK(!yomkrpc_xml::parseServerLocator(":7400", servers, err) && !err.empty(),
                   "Part C: 空 ip → false + err 非空");
