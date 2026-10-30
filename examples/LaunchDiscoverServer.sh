@@ -1,9 +1,10 @@
 #!/bin/bash
 # LaunchDiscoverServer.sh —— 启动 Fast DDS 发现服务器（Discovery Server）
 #
-# 用法: LaunchDiscoverServer.sh [--ip <监听IP>] [--port <监听端口>]
+# 用法: LaunchDiscoverServer.sh [--ip <监听IP>] [--port <监听端口>] [--type <udp|tcp>]
 #   --ip   监听地址，缺省 127.0.0.1
-#   --port 监听端口，缺省 11811（与示例 client serverLocator 缺省端口一致）
+#   --port 监听端口，缺省随 --type（udp→11811，tcp→42100）
+#   --type 监听协议，缺省 udp；tcp 模式 client 走 YOMKRPC_TCP_DISCOVER_SERVERS 直配
 # 前台运行，Ctrl+C 停止；server id 固定 -i 0。
 #
 # 二进制定位：按序探测 YomkServer/Fast DDS 安装（thirdparty/Fast-DDS 编译安装产物）中的
@@ -16,12 +17,19 @@
 set -u
 
 IP="127.0.0.1"
-PORT="11811"
+TYPE="udp"
+PORT=""  # 缺省随 TYPE：udp→11811 / tcp→42100，参数解析后回填
+
+# 端口缺省值：与发现服务器工具缺省同源（udp: -p 11811；tcp: -q 42100）
+default_port() {
+    [ "$1" = "tcp" ] && echo "42100" || echo "11811"
+}
 
 usage() {
-    echo "用法: $(basename "$0") [--ip <监听IP>] [--port <监听端口>]"
+    echo "用法: $(basename "$0") [--ip <监听IP>] [--port <监听端口>] [--type <udp|tcp>]"
     echo "  --ip   监听地址，缺省 ${IP}"
-    echo "  --port 监听端口，缺省 ${PORT}"
+    echo "  --port 监听端口，缺省 $(default_port "${TYPE}")（随 --type：udp→11811 / tcp→42100）"
+    echo "  --type 监听协议，缺省 ${TYPE}"
 }
 
 # ===== 参数解析 =====
@@ -33,12 +41,23 @@ while [ $# -gt 0 ]; do
         --port)
             [ $# -ge 2 ] || { echo "错误: --port 缺少参数值"; usage; exit 1; }
             PORT="$2"; shift 2 ;;
+        --type)
+            [ $# -ge 2 ] || { echo "错误: --type 缺少参数值"; usage; exit 1; }
+            TYPE="$2"; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         *)
             echo "错误: 未知参数 '$1'"; usage; exit 1 ;;
     esac
 done
+
+if [ "${TYPE}" != "udp" ] && [ "${TYPE}" != "tcp" ]; then
+    echo "错误: --type 仅支持 udp 或 tcp，当前为 '${TYPE}'"
+    exit 1
+fi
+if [ -z "${PORT}" ]; then
+    PORT="$(default_port "${TYPE}")"
+fi
 
 if [ -z "${IP}" ]; then
     echo "错误: --ip 不能为空"
@@ -88,10 +107,21 @@ if [ ! -x "${DS_BIN}" ]; then
 fi
 
 # ===== 启动（前台运行，Ctrl+C 停止） =====
+if [ "${TYPE}" = "tcp" ]; then
+    DS_TYPE_DESC="TCP（-t 监听地址 / -q 监听端口）"
+    DS_ENV_HINT="export YOMKRPC_TCP_DISCOVER_SERVERS=${IP}:${PORT}"
+else
+    DS_TYPE_DESC="UDP（-l 监听地址 / -p 监听端口）"
+    DS_ENV_HINT="export YOMKRPC_UDP_DISCOVER_SERVERS=${IP}:${PORT}"
+fi
 echo "============================================================"
 echo " Fast DDS Discovery Server"
+echo "   监听协议: ${DS_TYPE_DESC}"
 echo "   监听地址: ${IP}:${PORT}"
 echo "   client 等价直配串: ${IP}:${PORT}"
+echo "   client 环境变量自动直配（另开终端执行）："
+echo "     export YOMKRPC_USE_DISCOVER_SERVER=true"
+echo "     ${DS_ENV_HINT}"
 echo "   （另开两个终端运行 ExampleDiscoverServerPub/Sub，"
 echo "     域 id 100/200 跨域互通，详见 README 5.8）"
 echo "============================================================"
@@ -99,7 +129,12 @@ echo "============================================================"
 # Fast DDS 3.x 的 fast-discovery-server 要求首个参数为整数命令索引（42=SERVER，
 # 见安装包 tools/fastdds/discovery/parser.py 的 command_to_int 映射），2.x 旧版工具
 # 则直接解析 -i/-l/-p；以 "42 -h" 探测协议后附加对应前缀。
-DS_ARGS=(-i 0 -l "${IP}" -p "${PORT}")
+# udp 模式起 -l/-p（UDP 通道）；tcp 模式起 -t/-q（TCP 监听口）。
+if [ "${TYPE}" = "tcp" ]; then
+    DS_ARGS=(-i 0 -t "${IP}" -q "${PORT}")
+else
+    DS_ARGS=(-i 0 -l "${IP}" -p "${PORT}")
+fi
 if "${DS_BIN}" 42 -h > /dev/null 2>&1; then
     DS_ARGS=(42 "${DS_ARGS[@]}")
 fi

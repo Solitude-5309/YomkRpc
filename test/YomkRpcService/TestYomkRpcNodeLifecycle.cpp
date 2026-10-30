@@ -27,6 +27,11 @@
  *     全链路不校验 domain_id（PDPClientListener/PDPServerListener 源码注释："In Discovery
  *     Server we don't impose domain ids to be the same"；跨域丢弃仅存在于简单发现
  *     PDPSimple 的基类校验），互通即域号与 server 无关的实证；多播 PDP 被禁，发现必经 server。
+ *   Part G（闭环 1 env 直配端到端）：C-2d 白盒（开关门控/大小写与 1 兼容/server 串透传/
+ *     DDSNode 缺省尾参聚合初始化器读回）+ 服务级端到端——setenv 开关+UDP 串后经
+ *     /create_node 创建（请求不携带 locator，聚合初始化器自动读 env），spawn 同款
+ *     discovery server 子进程（组杀模式同 Part F，端口 11812 非缺省值实证 env 串 port
+ *     解析全链路），A/B 双节点 env 直配 CLIENT 异域（203/204）互通收发。
  *
  * 关键不变式：每个 eOk 创建的节点必须在 main 返回前经 /delete_node 显式删除；Part B/D 的
  *   FastDDSNode 为栈对象、在 main 返回前离开作用域析构。以规避 YOMK 框架 atexit 服务析构
@@ -342,6 +347,60 @@ namespace
                           qosMulti.transport().user_transports[0]) != nullptr,
                   "Part C: 多 TCP server → TCPv4 描述符仍只注入一个");
 
+            // C-2d 环境变量直配 helper 白盒（闭环 1）：开关门控 + 大小写/1 兼容 + server 串
+            // 原样透传（解析校验在节点层）+ DDSNode 缺省尾参聚合初始化器读回。
+            // setenv/unsetenv 直接驱动，收尾全清避免 env 残留影响后续 Part
+            {
+                // 三变量全未设置 → 开关 false、双 server 串恒空（=不直配，现状行为）
+                unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
+                unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
+                unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
+                CHECK(!YomkRpcUseDiscoverServer() && YomkRpcDefaultUdpDiscoverServers().empty() &&
+                          YomkRpcDefaultTcpDiscoverServers().empty(),
+                      "Part C: 三 env 全未设置 → 开关 false + 双 server 串空（不直配=现状行为）");
+
+                // 开关 true + UDP 串：原样返回（含多项分号串）；TCP 未设 → 空串
+                setenv("YOMKRPC_USE_DISCOVER_SERVER", "true", 1);
+                setenv("YOMKRPC_UDP_DISCOVER_SERVERS", "10.0.0.9:11811;10.0.0.8", 1);
+                CHECK(YomkRpcDefaultUdpDiscoverServers() == "10.0.0.9:11811;10.0.0.8" &&
+                          YomkRpcDefaultTcpDiscoverServers().empty(),
+                      "Part C: 开关 true → UDP 串原样返回 + TCP 未设为空");
+                setenv("YOMKRPC_TCP_DISCOVER_SERVERS", "10.0.0.7", 1);
+                CHECK(YomkRpcDefaultTcpDiscoverServers() == "10.0.0.7",
+                      "Part C: 开关 true → TCP 串原样返回（port 缺省由节点层解析）");
+
+                // DDSNode 缺省尾参聚合初始化：双通道字段经默认成员初始化器读 env
+                DDSNode envProbe{"env_probe"};
+                CHECK(envProbe.udpDiscoverServerLocator == "10.0.0.9:11811;10.0.0.8" &&
+                          envProbe.tcpDiscoverServerLocator == "10.0.0.7",
+                      "Part C: DDSNode 缺省尾参聚合初始化 → 双通道字段经 env 初始化器读回");
+
+                // 开关 false：两 server 串变量被忽略恒空（即使已设置）
+                setenv("YOMKRPC_USE_DISCOVER_SERVER", "false", 1);
+                DDSNode offProbe{"off_probe"};
+                CHECK(YomkRpcDefaultUdpDiscoverServers().empty() &&
+                          YomkRpcDefaultTcpDiscoverServers().empty() &&
+                          offProbe.udpDiscoverServerLocator.empty() &&
+                          offProbe.tcpDiscoverServerLocator.empty(),
+                      "Part C: 开关 false → server 串被忽略，helper 与 DDSNode 字段均恒空");
+
+                // 开关取值兼容矩阵：TRUE/1 → 开；yes/空串 → 关
+                setenv("YOMKRPC_USE_DISCOVER_SERVER", "TRUE", 1);
+                CHECK(YomkRpcUseDiscoverServer(), "Part C: 开关 TRUE（大写）→ 开（大小写不敏感）");
+                setenv("YOMKRPC_USE_DISCOVER_SERVER", "1", 1);
+                CHECK(YomkRpcUseDiscoverServer(), "Part C: 开关 1 → 开");
+                setenv("YOMKRPC_USE_DISCOVER_SERVER", "yes", 1);
+                CHECK(!YomkRpcUseDiscoverServer(), "Part C: 开关 yes → 关（仅 true/1 视为开）");
+                setenv("YOMKRPC_USE_DISCOVER_SERVER", "", 1);
+                CHECK(!YomkRpcUseDiscoverServer(), "Part C: 开关空串 → 关");
+
+                // 收尾全清：不留 env 残留影响后续 Part
+                unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
+                unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
+                unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
+                CHECK(!YomkRpcUseDiscoverServer(), "Part C: 收尾 unsetenv 三变量 → 开关回落 false");
+            }
+
             // C-3 participantQosFromXml 三态（leaseDuration 为最简可观察字段）
             dds::DomainParticipantQos byName = dds::PARTICIPANT_QOS_DEFAULT;
             yomkrpc_xml::participantQosFromXml(byName, "xml_by_name", kWhiteboxXml);
@@ -514,6 +573,108 @@ namespace
             kill(-serverPid, SIGTERM);
             waitpid(serverPid, nullptr, 0);
       }
+
+      // Part G：闭环 1 env 直配端到端（服务级）——setenv 开关+UDP 串后经 /create_node 创建
+      // （请求不携带 locator，DDSNode 聚合初始化器自动读 env），spawn 同款 discovery server
+      // 子进程（组杀模式同 Part F）。端口用 11812 非缺省值：实证 env 串 port 解析全链路
+      //（C-1 仅白盒覆盖解析）；A/B 故意异域（203/204，同 Part F——DS 不校验 domain_id，
+      // 但须在服务层合法范围 [0,232] 内）
+      void testEnvDrivenConnectivity(YomkRpcService *svc)
+      {
+            pid_t serverPid = fork();
+            CHECK(serverPid >= 0, "Part G: fork discovery server 子进程");
+            if (serverPid < 0)
+            {
+                  return;
+            }
+            if (serverPid == 0)
+            {
+                  // 子进程：setpgid 独立进程组 + exec fastdds discovery CLI（模式同 Part F）
+                  if (setpgid(0, 0) != 0)
+                  {
+                        _exit(126);
+                  }
+                  execl(TEST_FASTDDS_DISCOVERY_BIN, "fastdds", "discovery", "-i", "0", "-l",
+                        "127.0.0.1", "-p", "11812", static_cast<char *>(nullptr));
+                  _exit(127);
+            }
+
+            // server 就绪探测：3s 窗内每 200ms 探存活（模式同 Part F）
+            for (int i = 0; i < 15 && kill(serverPid, 0) == 0; ++i)
+            {
+                  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            const bool serverAlive = kill(serverPid, 0) == 0;
+            CHECK(serverAlive, "Part G: server 启动后存活（UDP 11812 监听，提前退出=exec 失败/端口被占）");
+            if (!serverAlive)
+            {
+                  waitpid(serverPid, nullptr, 0);
+                  unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
+                  unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
+                  unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
+                  return;
+            }
+
+            // env 直配：开关 + UDP 串（port 11812 非缺省）。此后 DDSNode 聚合初始化器自动
+            // 读 env——A/B 创建请求不携带 locator
+            setenv("YOMKRPC_USE_DISCOVER_SERVER", "true", 1);
+            setenv("YOMKRPC_UDP_DISCOVER_SERVERS", "127.0.0.1:11812", 1);
+
+            // 聚合读回探针：创建请求即此形态（缺省尾参字段经 env 初始化器取值）
+            DDSNode envProbe{"env_probe"};
+            CHECK(envProbe.udpDiscoverServerLocator == "127.0.0.1:11812" &&
+                      envProbe.tcpDiscoverServerLocator.empty(),
+                  "Part G: DDSNode 缺省尾参聚合初始化 → udp 串 127.0.0.1:11812 / tcp 空");
+
+            // 服务级创建（无 locator）：聚合初始化器读 env → 双节点直配 CLIENT 连 11812 server
+            CHECK(svc->invoke("/create_node", mkNode(203, "env_pub_node")).m_status == YomkResponse::eOk,
+                  "Part G: 创建 env_pub_node（域 203，请求无 locator）→ eOk（env 直配 CLIENT）");
+            CHECK(svc->invoke("/create_node", mkNode(204, "env_sub_node")).m_status == YomkResponse::eOk,
+                  "Part G: 创建 env_sub_node（域 204，请求无 locator）→ eOk（env 直配 CLIENT）");
+
+            std::atomic<int> recvCount{0};
+            CHECK(svc->invoke("/register_sub_topic",
+                      YomkMkPtr(DDSSubRequest,
+                          DDSSubRequest{"env_sub_node", "env_conn_topic", new YomkRpc::MStringPubSubType(),
+                              [&recvCount](const void *) { recvCount.fetch_add(1, std::memory_order_relaxed); }}))
+                      .m_status == YomkResponse::eOk,
+                  "Part G: env_sub_node 登记 env_conn_topic 订阅（收到即计数）");
+            CHECK(svc->invoke("/register_pub_topic",
+                      YomkMkPtr(DDSTopic,
+                          DDSTopic{"env_pub_node", "env_conn_topic", new YomkRpc::MStringPubSubType()}))
+                      .m_status == YomkResponse::eOk,
+                  "Part G: env_pub_node 登记 env_conn_topic 发布");
+
+            // 主线程同步发布（100ms×60=6s 收流窗 ≥5s server 发现收敛；不经发布线程，
+            // invoke 主线程逐次调用无并发问题）
+            YomkRpc::MString msg;
+            bool received = false;
+            for (int i = 0; i < 60 && !received; ++i)
+            {
+                  msg.data("env-conn-" + std::to_string(i));
+                  (void)svc->invoke("/publish",
+                        YomkMkPtr(DDSPublish, DDSPublish{"env_pub_node", "env_conn_topic", &msg}));
+                  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                  received = recvCount.load(std::memory_order_relaxed) > 0;
+            }
+            CHECK(received,
+                  "Part G: env_sub_node 在 6s 超时窗内收到 ≥1 条（无 locator 请求经 env 直配互通的实证）");
+            if (!received)
+            {
+                  std::cout << "[OBSERVE] env 连通性超时：recvCount=" << recvCount.load() << std::endl;
+            }
+
+            // 收尾：删节点（关键不变式）→ 清 env → 组杀 server 整组（模式同 Part F）
+            CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "env_pub_node")).m_status == YomkResponse::eOk,
+                  "Part G: 删除 env_pub_node → eOk");
+            CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "env_sub_node")).m_status == YomkResponse::eOk,
+                  "Part G: 删除 env_sub_node → eOk");
+            unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
+            unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
+            unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
+            kill(-serverPid, SIGTERM);
+            waitpid(serverPid, nullptr, 0);
+      }
 } // namespace
 
 int main()
@@ -531,6 +692,7 @@ int main()
       testServerLocatorE2E();
       testDualChannelMerge();
       testDiscoveryServerConnectivity();
+      testEnvDrivenConnectivity(svc);
 
       return testReport("TestYomkRpcNodeLifecycle");
 }

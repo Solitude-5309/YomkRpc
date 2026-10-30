@@ -3,6 +3,7 @@
 // 订阅回调类型 DDSCallbackFunc，以及服务类 YomkRpcService 的声明。用户通常直接使用 YomkRpcAPI.h 中的宏。
 #include <YomkServer/YomkAPI.h>
 
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -72,6 +73,50 @@ inline uint32_t YomkRpcDefaultDomainId()
         return 0;
     }
     return static_cast<uint32_t>(n);
+}
+
+// 发现服务器直配总开关：读环境变量 YOMKRPC_USE_DISCOVER_SERVER。大小写不敏感的
+// "true"/"1" 视为开启；未设置/空/"false"/"0"/其余任意值一律视为关闭，静默不打印
+// 日志（纯头文件内联，不引入日志依赖）。关闭时两个 YomkRpcDefault*DiscoverServers
+// 恒返回空串（=不直配），server 串环境变量被忽略。
+inline bool YomkRpcUseDiscoverServer()
+{
+    const char* v = std::getenv("YOMKRPC_USE_DISCOVER_SERVER");
+    if (!v)
+    {
+        return false;
+    }
+    std::string s(v);
+    for (char& c : s)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s == "true" || s == "1";
+}
+
+// 缺省 UDP 通道发现服务器聚合串：总开关开启时原样返回 YOMKRPC_UDP_DISCOVER_SERVERS
+// （未设置/空 → 空串=不直配），关闭时恒空串。串合法性不在本层校验——由节点创建时的
+// serverLocator 解析校验，非法串（空项/空 ip/越界 port）创建失败并回显，不静默回落，
+// 避免误配退化成多播发现而"看似正常实则不通"。
+inline std::string YomkRpcDefaultUdpDiscoverServers()
+{
+    if (!YomkRpcUseDiscoverServer())
+    {
+        return {};
+    }
+    const char* v = std::getenv("YOMKRPC_UDP_DISCOVER_SERVERS");
+    return v ? std::string(v) : std::string();
+}
+
+// 缺省 TCP 通道发现服务器聚合串：同上，读 YOMKRPC_TCP_DISCOVER_SERVERS。
+inline std::string YomkRpcDefaultTcpDiscoverServers()
+{
+    if (!YomkRpcUseDiscoverServer())
+    {
+        return {};
+    }
+    const char* v = std::getenv("YOMKRPC_TCP_DISCOVER_SERVERS");
+    return v ? std::string(v) : std::string();
 }
 
 // ===== 端点 QoS 描述（公共头零 fastdds 依赖） =====
@@ -151,11 +196,14 @@ struct DDSNode
     // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配（现状行为）；格式 "ip[:port]"，
     // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
-    std::string udpDiscoverServerLocator;
+    // 缺省（YOMKRPC_NODE 省略该尾参）经类内缺省初始化器读环境变量：总开关
+    // YOMKRPC_USE_DISCOVER_SERVER=true 时取 YOMKRPC_UDP_DISCOVER_SERVERS，否则空串。
+    std::string udpDiscoverServerLocator = YomkRpcDefaultUdpDiscoverServers();
     // 发现服务器直配聚合串（可缺省尾参，TCP 通道）：格式同上，port 为 server 的 TCP 监听口。
     // 非空时 participant 补注入 TCPv4 传输（与内置 UDPv4/SHM 共存）并以 TCPv4 locator 直配，
-    // 可与 UDP 通道同时使用（任一通道 server 在场即完成发现）。
-    std::string tcpDiscoverServerLocator;
+    // 可与 UDP 通道同时使用（任一通道 server 在场即完成发现）。缺省读 YOMKRPC_TCP_DISCOVER_SERVERS，
+    // 门控同 UDP 通道。
+    std::string tcpDiscoverServerLocator = YomkRpcDefaultTcpDiscoverServers();
 };
 
 // load_xml 请求负载。

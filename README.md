@@ -10,7 +10,7 @@
 |--------------------|----------|
 | `YOMKRPC_VERSION()` | URL端点：`/YomkRpcService/version`<br>简述：版本查询<br>详述：宏内部自动解包并打印版本，无返回值 |
 | `YOMKRPC_LOAD_XML(xmlPath)` | URL端点：`/YomkRpcService/load_xml`<br>简述：加载 Fast DDS XML profiles 文件<br>详述：读文件经 `load_XML_profiles_file` 解析校验（返回码显式检查）后缓存，供后续 create_node 的 participant 按**三级提取链**叠加：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。**必须在任何节点创建之前调用**——participant 的发现配置/传输/QoS 在创建时固化，节点创建后加载仅影响后续新建实体，对已建节点不生效；再次调用以最新成功文件整体替换；失败（路径不存在/文件为空/格式非法）返回错误，`m_msg` 携原因与返回码 |
-| `YOMKRPC_NODE(nodeName[, domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；udpDiscoverServerLocator/tcpDiscoverServerLocator 可缺省尾参——UDP/TCP 发现服务器直配聚合串（格式均为分号分隔 `ip[:port]` 多 server，port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7）；TCP 通道 port 为 server 的 TCP 监听口，非空时 participant 自动补注入 TCPv4 传输（与内置 UDPv4/SHM 共存，数据通道不受影响），两通道可同时使用，仅 TCP 直配时 UDP 传空串占位 |
+| `YOMKRPC_NODE(nodeName[, domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；udpDiscoverServerLocator/tcpDiscoverServerLocator 可缺省尾参——缺省时经类内缺省初始化器读环境变量自动直配：总开关 `YOMKRPC_USE_DISCOVER_SERVER` 为 true/1（大小写不敏感）时分别取 `YOMKRPC_UDP_DISCOVER_SERVERS`/`YOMKRPC_TCP_DISCOVER_SERVERS`，开关关闭时两串变量被忽略恒空（=不直配，详见 5.7 环境变量自动直配）；显式直配聚合串格式为分号分隔 `ip[:port]` 多 server（port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7）；TCP 通道 port 为 server 的 TCP 监听口，非空时 participant 自动补注入 TCPv4 传输（与内置 UDPv4/SHM 共存，数据通道不受影响），两通道可同时使用，仅 TCP 直配时 UDP 传空串占位 |
 | `YOMKRPC_DEL_NODE(nodeName)` | URL端点：`/YomkRpcService/delete_node`<br>简述：删除节点<br>详述：销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
 | `YOMKRPC_PUB_TOPIC(nodeName, topicName, type[, qos])` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放）；qos 可缺省尾参——端点 QoS 描述 `DDSQosProfile`（8 项 history/depth/reliability/durability/liveliness/deadline/lifespan/liveliness lease 可独立设置，未设置项为哨兵保持底座值）：缺省（全哨兵）=Fast DDS 端点默认底座（现状行为）；`DDSQosProfile::ros2DefaultPublisher()`=ROS2 默认底座（KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3）；可在底座上逐项覆盖（如只设 depth=10），另有 `ros2SensorData()` 传感器档（KEEP_LAST(5)+BEST_EFFORT），用法见 5.6 |
 | `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback[, qos])` | URL端点：`/YomkRpcService/register_sub_topic`<br>简述：注册订阅主题<br>详述：打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建；qos 可缺省尾参语义同 `YOMKRPC_PUB_TOPIC`，订阅端推荐 `DDSQosProfile::ros2DefaultSubscriber()`（BEST_EFFORT requested 对任意 offered 均可匹配） |
@@ -101,7 +101,7 @@ YomkRpc/
 │   ├── ExampleYomkRpcSub.cpp       # 订阅端示例程序（订阅 hello_world，Ctrl+C 退出）
 │   ├── ExampleDiscoverServerPub.cpp # 发现服务器示例发布端（域 100，直配发现服务器，Ctrl+C 退出）
 │   ├── ExampleDiscoverServerSub.cpp # 发现服务器示例订阅端（域 200，直配发现服务器，Ctrl+C 退出）
-│   ├── LaunchDiscoverServer.sh     # 发现服务器启动脚本（--ip/--port，前台运行 Ctrl+C 停止）
+│   ├── LaunchDiscoverServer.sh     # 发现服务器启动脚本（--type udp/tcp + --ip/--port 端口缺省随类型 11811/42100，前台运行 Ctrl+C 停止）
 │   └── yomkrpc.cpp                 # yomkrpc 命令行工具（调试观察 + topic pub 发布 + bag 录制/元信息/转换）
 ├── cmake/
 │   └── ProjectConfig.cmake.in  # CMake 导出配置模板
@@ -393,26 +393,37 @@ YOMKRPC_NODE("ds_tcp_only_node", 0, "", "10.0.0.2:42100");
 
 等价环境变量形态（ROS2 生态通用）：`ROS_DISCOVERY_SERVER=127.0.0.1:11811`（id 即 `-i` 指定的 server 位序）。直配后 participant 以 CLIENT 发现协议运行（禁用多播 PDP，发现流量单播直送 server）；可与 `YOMKRPC_LOAD_XML` 组合（XML 打底，直配 server 项覆盖 XML `discoveryServersList`）。
 
+**环境变量自动直配**（进程级，无需改代码）：三环境变量控制节点创建时发现服务器直配缺省值——总开关 `YOMKRPC_USE_DISCOVER_SERVER`（`true`/`1` 视为开启，大小写不敏感；未设置/空/`false`/`0`/其余任意值关闭）+ 两通道 server 聚合串 `YOMKRPC_UDP_DISCOVER_SERVERS`/`YOMKRPC_TCP_DISCOVER_SERVERS`（格式同宏尾参直配串：`ip[:port]` 分号分隔多 server）。开关开启时，`YOMKRPC_NODE` 缺省（省略）的 serverLocator 尾参自动取对应环境变量值；开关关闭时两串变量被忽略恒空（=不直配，行为同未设置）。语义要点：显式尾参覆盖对应通道 env 缺省（按通道独立——仅显式传 UDP 尾参时，TCP 通道缺省仍读 env，需关闭通道直配时显式传空串或保持开关关闭）；非法串不静默回落——节点创建失败并回显，避免误配退化成多播发现而"看似正常实则不通"。与 `YOMKRPC_DDS_DOMAIN_ID` 同为"不改代码、进程级配置"通道，适合容器/CI 批量注入：
+
+```bash
+export YOMKRPC_USE_DISCOVER_SERVER=true
+export YOMKRPC_UDP_DISCOVER_SERVERS="192.168.1.10:11811;192.168.1.11"  # TCP 场景换 YOMKRPC_TCP_DISCOVER_SERVERS
+```
+
 **TCP 通道说明**：内置传输默认集不含 TCPv4——任一 TCP 直配项存在时 participant 自动补注入 TCPv4 传输描述符（与内置 UDPv4/SHM "alongside" 共存，UDP/SHM 数据通道不受影响；XML 提取已注入 TCPv4 描述符时不重复注入）。两通道各自可分号分隔多 server，任一通道 server 在场即完成发现。
 
 **域号说明**：DS 模式下 client 的域 id 与 server 无关——server 不做域校验（Fast DDS 源码 PDPClientListener/PDPServerListener："In Discovery Server we don't impose domain ids to be the same"；跨域丢弃仅存在于简单发现 PDPSimple 的基类校验）。本仓连通性测试实证：A/B 两节点异域（201/202）直配同一 server 后正常收发数据。域隔离语义仅在简单发现（多播）路径生效。
 
 ### 5.8 发现服务器示例（跨域互通）
 
-examples 提供一对发现服务器示例：`ExampleDiscoverServerPub`（域 100 发布端）与 `ExampleDiscoverServerSub`（域 200 订阅端），两者经同一发现服务器以 CLIENT 模式直配互通（异域互通知上节域号说明）。三个终端按序运行：
+examples 提供一对发现服务器示例：`ExampleDiscoverServerPub`（域 100 发布端）与 `ExampleDiscoverServerSub`（域 200 订阅端），节点创建不携带直配尾参——经 5.7 环境变量自动直配（启动前 export），两者经同一发现服务器以 CLIENT 模式直配互通（异域互通知上节域号说明）。三个终端按序运行：
 
 ```bash
-# 终端 1：启动发现服务器（--ip/--port 可选，缺省 127.0.0.1:11811，前台运行 Ctrl+C 停止）
+# 终端 1：启动发现服务器（--type udp/tcp 可选缺省 udp；--ip/--port 可选，端口缺省随类型 11811/42100；前台运行 Ctrl+C 停止）
 ./examples/LaunchDiscoverServer.sh --ip 127.0.0.1 --port 11811
 
-# 终端 2：订阅端（域 200）
+# 终端 2：订阅端（域 200，env 直配；export 两行可直接复制终端 1 启动横幅提示）
+export YOMKRPC_USE_DISCOVER_SERVER=true
+export YOMKRPC_UDP_DISCOVER_SERVERS="127.0.0.1:11811"
 ./examples/build/ExampleDiscoverServerSub
 
-# 终端 3：发布端（域 100）
+# 终端 3：发布端（域 100，env 直配，同组环境变量）
+export YOMKRPC_USE_DISCOVER_SERVER=true
+export YOMKRPC_UDP_DISCOVER_SERVERS="127.0.0.1:11811"
 ./examples/build/ExampleDiscoverServerPub
 ```
 
-两示例均可选首参传 UDP 直配串（如 `./ExampleDiscoverServerPub 192.168.1.10:11811`，格式同 `YOMKRPC_NODE` 形态 3 尾参），缺省 `127.0.0.1:11811`；TCP 通道直配用 `YOMKRPC_NODE` 形态 4（见 5.7 TCP 通道说明）。运行后发布端每秒打印 `[SEND] hello world N`，订阅端同步打印 `[RECV] hello world N`，数据持续收发，Ctrl+C 优雅退出。
+TCP 场景：终端 1 换 `--type tcp --port 42100` 启动，终端 2/3 换 export `YOMKRPC_TCP_DISCOVER_SERVERS="127.0.0.1:42100"`（开关不变）。未配置环境变量时两示例回落多播发现，域 100/200 跨域不通属预期（缺省域隔离语义）。`LaunchDiscoverServer.sh` 启动横幅打印当次传输类型对应的 export 提示（总开关 + 对应通道 server 串），可直接复制到终端 2/3。运行后发布端每秒打印 `[SEND] hello world N`，订阅端同步打印 `[RECV] hello world N`，数据持续收发，Ctrl+C 优雅退出。
 
 ## 6 YomkRpc 调试
 

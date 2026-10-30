@@ -19,22 +19,23 @@ static void onSignal(int)
 }
 
 // 发现服务器示例·订阅端：演示 跨域经发现服务器互通 的订阅侧代码流程——节点域 id 固定 200，
-// 以 CLIENT 角色直配发现服务器（YOMKRPC_NODE 形态 3 尾参 serverLocator），与域 id 100 的
-// ExampleDiscoverServerPub 互通（DS 模式下 server 不校验域 id，原理见 README 5.7/5.8）。
-// 用法: ExampleDiscoverServerSub [serverLocator]  // "ip[:port]"，缺省 127.0.0.1:11811，
-//                                                // 须与 LaunchDiscoverServer.sh 启动的 server 一致
+// 以 CLIENT 角色直配发现服务器，与域 id 100 的 ExampleDiscoverServerPub 互通（DS 模式下
+// server 不校验域 id，原理见 README 5.7/5.8）。
+// 直配串经环境变量自动填入（YOMKRPC_NODE 形态 2，双通道尾参缺省读 env）：
+//   export YOMKRPC_USE_DISCOVER_SERVER=true
+//   export YOMKRPC_UDP_DISCOVER_SERVERS=127.0.0.1:11811   // 须与 LaunchDiscoverServer.sh
+//                                                         // 启动的 server 一致；TCP 场景改用
+//                                                         // YOMKRPC_TCP_DISCOVER_SERVERS
+// 未配置时回落多播发现，本示例跨域 100/200 场景将无法互通，运行前务必先 export。
 // 三终端运行方式（先启动发现服务器，再 Sub/Pub 任意顺序）见 README 5.8。
-int main(int argc, char* argv[])
+int main()
 {
-    // 发现服务器直配串：可选首参覆盖，缺省 127.0.0.1:11811（fastdds discovery 缺省端口）
-    const std::string serverLocator = argc > 1 ? argv[1] : "127.0.0.1:11811";
-
     YOMK_INIT();
     YOMK_NEW_SERVICE(YomkRpcService);
 
-    // 1. 创建节点：域 id 显式 200（DS 模式下可与对端异域），尾参直配发现服务器
-    //    （"ip[:port]" 聚合串，participant 以 CLIENT 发现协议运行）
-    auto resp = YOMKRPC_NODE("ds_sub_node", 200, serverLocator);
+    // 1. 创建节点：域 id 显式 200（DS 模式下可与对端异域）；省略双通道尾参 →
+    //    直配串自动取环境变量（总开关开启时生效，participant 以 CLIENT 发现协议运行）
+    auto resp = YOMKRPC_NODE("ds_sub_node", 200);
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("ExampleDiscoverServerSub", "create node failed: ", resp.m_msg);
