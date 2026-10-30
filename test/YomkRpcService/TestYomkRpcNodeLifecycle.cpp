@@ -28,7 +28,8 @@
  *     Server we don't impose domain ids to be the same"；跨域丢弃仅存在于简单发现
  *     PDPSimple 的基类校验），互通即域号与 server 无关的实证；多播 PDP 被禁，发现必经 server。
  *   Part G（闭环 1 env 直配端到端）：C-2d 白盒（开关门控/大小写与 1 兼容/server 串透传/
- *     DDSNode 缺省尾参聚合初始化器读回）+ 服务级端到端——setenv 开关+UDP 串后经
+ *     DDSNode 缺省尾参与 DDSDebugNode/DDSBagNode 无参全缺省聚合初始化器读回——闭环 2
+ *     三字段对齐）+ 服务级端到端——setenv 开关+UDP 串后经
  *     /create_node 创建（请求不携带 locator，聚合初始化器自动读 env），spawn 同款
  *     discovery server 子进程（组杀模式同 Part F，端口 11812 非缺省值实证 env 串 port
  *     解析全链路），A/B 双节点 env 直配 CLIENT 异域（203/204）互通收发。
@@ -44,6 +45,8 @@
 #include "TestCheck.h"
 #include "YomkRpcService.h" // 服务/DDSNode/String/YOMK_* 宏
 #include "FastDDSNode.h"    // Part B 直接单元测试 setDomainId
+#include "YomkRpcDebugService.h" // C-2d：DDSDebugNode 无参全缺省聚合初始化 env 读回（闭环 2）
+#include "YomkRpcBagService.h"   // C-2d：DDSBagNode 无参全缺省聚合初始化 env 读回（闭环 2）
 #include "FastDDSXmlHelper.h" // Part C-E 白盒：yomkrpc_xml 三件套（parseServerLocator/applyDiscoveryServers/participantQosFromXml）
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // Part F 收发类型
@@ -355,6 +358,7 @@ namespace
                 unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
                 unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
                 unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
+                unsetenv("YOMKRPC_DDS_DOMAIN_ID");  // 闭环 2：域号一并隔离（收尾同清）
                 CHECK(!YomkRpcUseDiscoverServer() && YomkRpcDefaultUdpDiscoverServers().empty() &&
                           YomkRpcDefaultTcpDiscoverServers().empty(),
                       "Part C: 三 env 全未设置 → 开关 false + 双 server 串空（不直配=现状行为）");
@@ -375,14 +379,35 @@ namespace
                           envProbe.tcpDiscoverServerLocator == "10.0.0.7",
                       "Part C: DDSNode 缺省尾参聚合初始化 → 双通道字段经 env 初始化器读回");
 
-                // 开关 false：两 server 串变量被忽略恒空（即使已设置）
+                // Debug/Bag 节点同款对齐（闭环 2）：无参全缺省聚合初始化 → 三字段均经
+                // 默认成员初始化器读 env（域号 + 开关门控双 server 串）
+                setenv("YOMKRPC_DDS_DOMAIN_ID", "5", 1);
+                DDSDebugNode dbgProbe{};
+                DDSBagNode bagProbe{};
+                CHECK(dbgProbe.domainId == 5 &&
+                          dbgProbe.udpDiscoverServerLocator == "10.0.0.9:11811;10.0.0.8" &&
+                          dbgProbe.tcpDiscoverServerLocator == "10.0.0.7" &&
+                          bagProbe.domainId == 5 &&
+                          bagProbe.udpDiscoverServerLocator == "10.0.0.9:11811;10.0.0.8" &&
+                          bagProbe.tcpDiscoverServerLocator == "10.0.0.7",
+                      "Part C: DDSDebugNode/DDSBagNode 无参聚合初始化 → 三字段均经 env 初始化器读回");
+
+                // 开关 false：两 server 串变量被忽略恒空（即使已设置）；域号 helper 不受
+                // 开关门控（Debug/Bag 同款字段一并读回验证）
                 setenv("YOMKRPC_USE_DISCOVER_SERVER", "false", 1);
                 DDSNode offProbe{"off_probe"};
+                DDSDebugNode dbgOff{};
+                DDSBagNode bagOff{};
                 CHECK(YomkRpcDefaultUdpDiscoverServers().empty() &&
                           YomkRpcDefaultTcpDiscoverServers().empty() &&
                           offProbe.udpDiscoverServerLocator.empty() &&
-                          offProbe.tcpDiscoverServerLocator.empty(),
-                      "Part C: 开关 false → server 串被忽略，helper 与 DDSNode 字段均恒空");
+                          offProbe.tcpDiscoverServerLocator.empty() &&
+                          dbgOff.udpDiscoverServerLocator.empty() &&
+                          dbgOff.tcpDiscoverServerLocator.empty() &&
+                          bagOff.udpDiscoverServerLocator.empty() &&
+                          bagOff.tcpDiscoverServerLocator.empty() && dbgOff.domainId == 5 &&
+                          bagOff.domainId == 5,
+                      "Part C: 开关 false → server 串被忽略，三类节点 server 字段均恒空（域号仍读 env）");
 
                 // 开关取值兼容矩阵：TRUE/1 → 开；yes/空串 → 关
                 setenv("YOMKRPC_USE_DISCOVER_SERVER", "TRUE", 1);
@@ -398,7 +423,8 @@ namespace
                 unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
                 unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
                 unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
-                CHECK(!YomkRpcUseDiscoverServer(), "Part C: 收尾 unsetenv 三变量 → 开关回落 false");
+                unsetenv("YOMKRPC_DDS_DOMAIN_ID");
+                CHECK(!YomkRpcUseDiscoverServer(), "Part C: 收尾 unsetenv 四变量 → 开关回落 false");
             }
 
             // C-3 participantQosFromXml 三态（leaseDuration 为最简可观察字段）

@@ -144,6 +144,14 @@
  *   （仅当其中无该变量时）；值须为 >=1 的整数，非法报错退出。生效命令：topic list、
  *   topic info、topic type、topic find、interface show、interface list、topic pub -e、
  *   topic pub -ef、topic pub、node list、node info（topic print/topic hz 不用）。
+ *
+ * 发现服务器直配三环境变量（与域 id 同机制对齐）：
+ *   YOMKRPC_USE_DISCOVER_SERVER（默认 false，大小写不敏感 true/1 视为开启）、
+ *   YOMKRPC_UDP_DISCOVER_SERVERS（默认空，UDP 直配聚合串，分号分隔多 server）、
+ *   YOMKRPC_TCP_DISCOVER_SERVERS（默认空，TCP 直配聚合串，分号分隔多 server）；
+ *   启动时无则分别创建并设默认值，同时幂等写入 ~/.bashrc（仅当其中无该变量时），
+ *   使新开任意终端可 echo 查看并继承。默认值与未设置行为完全一致（回落多播发现），
+ *   仅保证可见性；接 DS 时 export 开关为 true 并填 server 串即可（见 README 5.7）。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>
@@ -221,13 +229,19 @@ static void printUsage(std::ostream &os)
           "  yomkrpc -h | --help\n"
           "\n"
           "Options:\n"
-          "  环境变量             域号经 YOMKRPC_DDS_DOMAIN_ID 配置（合法范围 [0,232]，默认 0；启动时\n"
-          "                      无则创建并写入 .bashrc，值非法报错退出）\n"
-          "                      收敛判定次数经 YOMKRPC_DDS_DISCOVER_ROUNDS 配置（连续 N 次\n"
+          "  -D, --domain <N>    手动指定 DDS 域号 N（合法范围 [0,232]）；显式指定优先于环境变量，\n"
+          "                      未指定时域号经 YOMKRPC_DDS_DOMAIN_ID 配置（默认 0；启动时无则\n"
+          "                      创建并写入 .bashrc，值非法报错退出）\n"
+          "  环境变量             收敛判定次数经 YOMKRPC_DDS_DISCOVER_ROUNDS 配置（连续 N 次\n"
           "                      200ms 快照不变即输出，默认 5，topic list、topic info、topic type、\n"
           "                      topic find、interface show、interface list、topic pub -e、\n"
           "                      topic pub -ef、topic pub、node list 与 node info 生效；启动时无则\n"
           "                      创建默认并写入 .bashrc，值非法报错退出）\n"
+          "  环境变量             发现服务器直配（语义见 README 5.7）：YOMKRPC_USE_DISCOVER_SERVER\n"
+          "                      总开关（默认 false，true/1 开启）、YOMKRPC_UDP_DISCOVER_SERVERS\n"
+          "                      与 YOMKRPC_TCP_DISCOVER_SERVERS 直配聚合串（默认空，分号分隔\n"
+          "                      多 server）；启动时无则创建默认值并写入 .bashrc，任意终端可查看\n"
+          "                      可继承，默认值与未设置行为一致（回落多播发现）\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -373,15 +387,28 @@ static void printUsage(std::ostream &os)
           "  yomkrpc bag play bag_2026-01-01_12-00-00_000 --topics hello_world   # 只回放指定主题\n"
           "  export YOMKRPC_DDS_DOMAIN_ID=5    # 域号环境变量（写入 .bashrc 可持久化）\n"
           "  yomkrpc topic list                # 此后自动使用域号 5\n"
-          "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n";
+          "  yomkrpc --domain 5 topic list     # 或单次显式指定域号（优先于环境变量）\n"
+          "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n"
+          "  export YOMKRPC_USE_DISCOVER_SERVER=true   # 发现服务器总开关（写入 .bashrc 可持久化）\n"
+          "  export YOMKRPC_UDP_DISCOVER_SERVERS=127.0.0.1:11811  # UDP 直配串，须与 DS 一致\n";
 }
 
-// 域 id 环境变量：唯一域号来源（启动时无则创建并设默认值 0，并幂等持久化到 ~/.bashrc）
+// 域 id 环境变量：CLI 未显式 --domain/-D 时的域号来源（启动时无则创建并设默认值 0，
+// 并幂等持久化到 ~/.bashrc）
 static constexpr char kDomainEnv[] = "YOMKRPC_DDS_DOMAIN_ID";
 
 // 发现收敛次数环境变量：查询类命令收敛判定次数（连续 N 次 200ms 快照不变即输出，
 // 默认 5）；启动时无则创建并设默认值 5；该变量为收敛次数唯一配置入口
 static constexpr char kDiscoverRoundsEnv[] = "YOMKRPC_DDS_DISCOVER_ROUNDS";
+
+// 发现服务器直配三环境变量：总开关 + UDP/TCP 双通道 server 聚合串（节点创建时经
+// DDSNode/DDSDebugNode/DDSBagNode 类内缺省初始化器读取，见 include/YomkRpcService.h）。
+// 启动时无则分别创建并设默认值 false/空/空（进程内生效），并幂等持久化到 ~/.bashrc
+// 使新开任意终端可查看可继承；默认值与"未设置"行为完全一致（开关非 true/1、串空均
+// 回落多播发现），仅保证可见性，用户 export 改值即刻生效
+static constexpr char kUseDiscoverServerEnv[] = "YOMKRPC_USE_DISCOVER_SERVER";
+static constexpr char kUdpDiscoverServersEnv[] = "YOMKRPC_UDP_DISCOVER_SERVERS";
+static constexpr char kTcpDiscoverServersEnv[] = "YOMKRPC_TCP_DISCOVER_SERVERS";
 
 // 将默认环境变量持久化到 ~/.bashrc（幂等）：仅当 .bashrc 中不存在该变量（任一行含
 // name 即视为已存在）时追加一次 export 行，使新开任意终端可直接 echo 查看并自动继承。
@@ -2118,8 +2145,33 @@ int main(int argc, char *argv[])
                           "discovery stable rounds for query commands (default 5)");
     }
 
-    // ---- 参数解析：-h/--help 即刻退出；位置参数（域号与收敛次数均无 CLI 选项，恒读环境变量） ----
+    // ---- 发现服务器三环境变量：无则创建并设默认值（总开关 false、UDP/TCP server 串空，
+    // 进程内生效），并幂等持久化到 ~/.bashrc 使新开终端可见可继承；默认值与"未设置"
+    // 行为完全一致（开关非 true/1、串空均回落多播发现），仅保证可见性不改行为；
+    // 用户 export YOMKRPC_USE_DISCOVER_SERVER=true 且填 server 串后即切 DS 直配 ----
+    if (std::getenv(kUseDiscoverServerEnv) == nullptr)
+    {
+        ::setenv(kUseDiscoverServerEnv, "false", 1);
+        persistDefaultEnv(kUseDiscoverServerEnv, "false",
+                          "discover server master switch (true/1 enables direct config, default false)");
+    }
+    if (std::getenv(kUdpDiscoverServersEnv) == nullptr)
+    {
+        ::setenv(kUdpDiscoverServersEnv, "", 1);
+        persistDefaultEnv(kUdpDiscoverServersEnv, "\"\"",
+                          "UDP discover server locators, semicolon separated (default empty)");
+    }
+    if (std::getenv(kTcpDiscoverServersEnv) == nullptr)
+    {
+        ::setenv(kTcpDiscoverServersEnv, "", 1);
+        persistDefaultEnv(kTcpDiscoverServersEnv, "\"\"",
+                          "TCP discover server locators, semicolon separated (default empty)");
+    }
+
+    // ---- 参数解析：-h/--help 即刻退出；位置参数（收敛次数无 CLI 选项恒读环境变量；
+    //      域号另有 -D/--domain 显式选项，未给时恒读环境变量） ----
     uint32_t domainId = 0;
+    bool hasDomainArg = false;  // 显式 --domain/-D 在场：域号解析跳过 env 恒读（显式优先）
     uint32_t waitRounds = 5; // 收敛判定次数（从环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS 读取；查询类命令生效）
     bool verbose = false;    // 端点详情模式（-v/--verbose；仅 topic info 生效）
     bool types = false;      // 类型名模式（-t/--types；仅 topic list 生效）
@@ -2716,6 +2768,26 @@ int main(int argc, char *argv[])
             maxCacheSize = value;
             continue;
         }
+        if (arg == "--domain" || arg == "-D")
+        {
+            // 域号显式选项（参照 -c 模式：紧跟值、解析校验、非法报错退出码 2）；
+            // 校验复用 parseDomain（十进制、无尾随字符、[0,232]）
+            if (i + 1 >= argc)
+            {
+                std::cerr << "yomkrpc: " << arg << " 缺少域号参数\n";
+                printUsage(std::cerr);
+                return 2;
+            }
+            uint32_t value = 0;
+            if (!parseDomain(argv[++i], value))
+            {
+                std::cerr << "yomkrpc: 非法域号 \"" << argv[i] << "\"（合法范围 [0,232]）\n";
+                return 2;
+            }
+            hasDomainArg = true;
+            domainId = value;
+            continue;
+        }
         if (arg == "--remap" || arg == "-m")
         {
             // 语境分流（对齐 --topics 先例；record 解析区已先行拦截非 play 语境，此处
@@ -2766,7 +2838,9 @@ int main(int argc, char *argv[])
         pos.push_back(arg);
     }
 
-    // ---- 域 id 解析：恒从环境变量 YOMKRPC_DDS_DOMAIN_ID 读取（无则默认 0） ----
+    // ---- 域 id 解析：显式 --domain/-D 优先；未给时恒从环境变量 YOMKRPC_DDS_DOMAIN_ID
+    //      读取（无则默认 0，现状语义不变） ----
+    if (!hasDomainArg)
     {
         const char *envVal = std::getenv(kDomainEnv);
         if (!parseDomain(envVal, domainId))

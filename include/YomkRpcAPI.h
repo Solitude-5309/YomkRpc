@@ -98,13 +98,16 @@
 // ===== YomkRpcDebugService 调试 API（端点定义见 YomkRpcDebugService.h） =====
 
 // 创建调试节点（单节点模型：一个进程至多一个，重复创建须先删除）。
-// domainId：DDS 域号，合法范围 [0,232]，仅同域节点的主题可被调试。调试节点以唯一名
-// yomkrpc_debug_<uid> 入域（uid 为 12 位随机 hex，可被 yomkrpc node list 列出）。
+// 全可变参 ([domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]]])：无参形态三字段
+// 均经 DDSDebugNode 类内缺省初始化器读环境变量（YOMKRPC_DDS_DOMAIN_ID 与开关
+// YOMKRPC_USE_DISCOVER_SERVER 门控的双 server 串，语义同 YOMKRPC_NODE）；显式 domainId
+// 的旧调用完全兼容。domainId：DDS 域号，合法范围 [0,232]，仅同域节点的主题可被调试。
+// 调试节点以唯一名 yomkrpc_debug_<uid> 入域（uid 为 12 位随机 hex，可被 yomkrpc node list 列出）。
 // udpDiscoverServerLocator（可缺省尾参）：UDP 发现服务器直配聚合串，语义同 YOMKRPC_NODE 形态 3 尾参；
 // tcpDiscoverServerLocator（可再缺省尾参）：TCP 发现服务器直配聚合串，语义同形态 4 第 4 参
 // （调试节点无用户名，XML 提取链仅默认档可兑底）。返回 YomkResponse。
-#define YOMKRPC_DEBUG_NODE(domainId, ...) \
-    YOMK_REQUEST("/YomkRpcDebugService/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{domainId, ##__VA_ARGS__}))
+#define YOMKRPC_DEBUG_NODE(...) \
+    YOMK_REQUEST("/YomkRpcDebugService/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{__VA_ARGS__}))
 
 // 登记调试主题：发现匹配的远端 DataWriter 后自动解析类型并建立订阅，消息 JSON 文本逐条投递
 // output（DDSDebugOutputFunc，用户自定义，服务层不打印）；须先创建调试节点，重复登记同一主题返回错误。
@@ -258,13 +261,15 @@
 // ===== YomkRpcBagService 录制 API（端点定义见 YomkRpcBagService.h） =====
 
 // 创建 bag 节点（单节点模型：一个进程至多一个，重复创建须先删除）。
-// domainId：DDS 域号，合法范围 [0,232]。bag 节点以唯一名 yomkrpc_bag_<uid> 入域（uid 为
-// 12 位随机 hex，可被 yomkrpc node list 列出。
+// 全可变参 ([domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]]])：无参形态三字段
+// 均经 DDSBagNode 类内缺省初始化器读环境变量（语义同 YOMKRPC_DEBUG_NODE）；显式 domainId
+// 的旧调用完全兼容。domainId：DDS 域号，合法范围 [0,232]。bag 节点以唯一名
+// yomkrpc_bag_<uid> 入域（uid 为 12 位随机 hex，可被 yomkrpc node list 列出。
 // udpDiscoverServerLocator（可缺省尾参）：UDP 发现服务器直配聚合串，语义同 YOMKRPC_NODE 形态 3 尾参；
 // tcpDiscoverServerLocator（可再缺省尾参）：TCP 发现服务器直配聚合串，语义同形态 4 第 4 参
 // （bag 节点无用户名，XML 提取链仅默认档可兑底）。返回 YomkResponse。
-#define YOMKRPC_BAG_NODE(domainId, ...) \
-    YOMK_REQUEST("/YomkRpcBagService/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{domainId, ##__VA_ARGS__}))
+#define YOMKRPC_BAG_NODE(...) \
+    YOMK_REQUEST("/YomkRpcBagService/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{__VA_ARGS__}))
 
 // 录制主题列表（长驻阻塞：调用线程阻塞至录制收尾完成，SIGINT 经 yomk::bagRecordStop
 // 无锁置位后收尾返回）。清单项支持通配模式（恰好一个 '*'：前缀 pre* / 后缀 *suf /

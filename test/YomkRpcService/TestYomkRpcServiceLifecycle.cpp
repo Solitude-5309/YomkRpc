@@ -162,7 +162,7 @@ int main()
     auto badPort = svc->invoke("/create_node", mkNode(TEST_DOMAIN, "srv_bad_node", "127.0.0.1:99999"));
     CHECK(badPort.m_status == YomkResponse::eNo && badPort.m_msg.find("port out of range") != std::string::npos,
           "serverLocator port=99999 越界 → eNo 回显 port out of range（setDomainId err 带出）");
-    auto emptyItem = svc->invoke("/create_node", mkNode(TEST_DOMAIN, "srv_bad_node2", "10.0.0.1,,10.0.0.2"));
+    auto emptyItem = svc->invoke("/create_node", mkNode(TEST_DOMAIN, "srv_bad_node2", "10.0.0.1;;10.0.0.2"));
     CHECK(emptyItem.m_status == YomkResponse::eNo && emptyItem.m_msg.find("empty server item") != std::string::npos,
           "serverLocator 空项 → eNo 回显 empty server item");
     std::cout << "[OBSERVE] 越界 port msg=\"" << badPort.m_msg << "\"" << std::endl;

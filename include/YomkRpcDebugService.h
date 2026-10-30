@@ -68,14 +68,19 @@ using DDSDebugOutputFunc = std::function<void(const std::string&)>;
 // create_node 请求负载。
 struct DDSDebugNode
 {
-    uint32_t domainId;  // DDS 域号，合法范围 [0,232]
+    // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_DEBUG_NODE 无参形态）经类内缺省初始化器读
+    // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0），语义同 DDSNode。
+    uint32_t domainId = YomkRpcDefaultDomainId();
     // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配（现状行为）；格式 "ip[:port]"，
     // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
-    std::string udpDiscoverServerLocator;
+    // 缺省（YOMKRPC_DEBUG_NODE 省略该尾参）经类内缺省初始化器读环境变量：总开关
+    // YOMKRPC_USE_DISCOVER_SERVER=true 时取 YOMKRPC_UDP_DISCOVER_SERVERS，否则空串。
+    std::string udpDiscoverServerLocator = YomkRpcDefaultUdpDiscoverServers();
     // 发现服务器直配聚合串（可缺省尾参，TCP 通道）：格式同上，port 为 server 的 TCP 监听口，
     // 非空时 participant 补注入 TCPv4 传输并以 TCPv4 locator 直配。语义同 DDSNode。
-    std::string tcpDiscoverServerLocator;
+    // 缺省读 YOMKRPC_TCP_DISCOVER_SERVERS，门控同 UDP 通道。
+    std::string tcpDiscoverServerLocator = YomkRpcDefaultTcpDiscoverServers();
 };
 
 // topic_print 请求负载。
