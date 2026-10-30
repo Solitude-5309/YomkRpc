@@ -10,9 +10,13 @@
 // load_XML_profiles_file 解析校验后缓存 raw 串（成功仅证明文件可解析；须在节点创建前调用，
 // 后续本进程内 create_node 的 participant 均按三级提取链叠加——按节点名 profile →
 // is_default_profile 默认档 → 均未命中保持默认底座）。再次调用以最新成功文件整体替换。
+// 形态 1：YOMKRPC_LOAD_XML(xmlPath) —— 显式路径（相对/绝对均可）。
+// 形态 2：YOMKRPC_LOAD_XML()        —— 无参缺省，经 DDSXmlLoad 类内缺省初始化器读环境
+//            变量：总开关 YOMKRPC_USE_XML_PROFILE=true 时取 YOMKRPC_XML_PROFILE_PATH，
+//            否则空串（服务端报 xml path is empty）。
 // 失败（路径不存在/文件为空/格式非法）返回 eNo，m_msg 携带原因与 rc。返回 YomkResponse。
-#define YOMKRPC_LOAD_XML(xmlPath) \
-    YOMK_REQUEST("/YomkRpcService/load_xml", YomkMkPtr(DDSXmlLoad, DDSXmlLoad{(xmlPath)}))
+#define YOMKRPC_LOAD_XML(...) \
+    YOMK_REQUEST("/YomkRpcService/load_xml", YomkMkPtr(DDSXmlLoad, DDSXmlLoad{##__VA_ARGS__}))
 
 // 创建 DDS 节点（每节点对应一个独立的 DDS 参与者）。
 // 形态 1：YOMKRPC_NODE(nodeName)            —— domainId 缺省，经 DDSNode 类内缺省初始化器

@@ -155,7 +155,8 @@ inline bool applyDiscoveryServers(eprosima::fastdds::dds::DomainParticipantQos& 
 // → ②默认档（is_default_profile=true 兜底，factory 单值槽位语义，建议至多一个默认档）
 // → ③两级全落空保持 DEFAULT 底座（回退现状，非错误）。节点名下沉由调用点既有逻辑在
 // 提取后执行（XML 提取会整体填充 qos 含 name，节点名必须最终覆盖，不可被 XML 顶掉；
-// xml 为空=未加载现状直接返回）。Debug/Bag 节点无用户名，按名 profile 无意义仅默认档可兜底。
+// xml 为空=未加载现状直接返回）。Debug/Bag 节点无用户名：按名 profile 无意义且 Fast DDS
+// 对空 profile 名固定打错误日志后拒绝（必然失败），空名直接跳过第①级仅默认档兜底。
 inline void participantQosFromXml(eprosima::fastdds::dds::DomainParticipantQos& qos,
         const std::string& nodeName, const std::string& xml)
 {
@@ -164,8 +165,9 @@ inline void participantQosFromXml(eprosima::fastdds::dds::DomainParticipantQos& 
         return;
     }
     auto* factory = eprosima::fastdds::dds::DomainParticipantFactory::get_instance();
-    if (factory->get_participant_qos_from_xml(xml, qos, nodeName) !=
-            eprosima::fastdds::dds::RETCODE_OK &&
+    if ((!nodeName.empty() &&
+            factory->get_participant_qos_from_xml(xml, qos, nodeName) !=
+                    eprosima::fastdds::dds::RETCODE_OK) &&
         factory->get_default_participant_qos_from_xml(xml, qos) !=
             eprosima::fastdds::dds::RETCODE_OK)
     {

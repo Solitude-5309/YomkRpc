@@ -9,7 +9,7 @@
 | 宏 API（用户调用） | 功能说明 |
 |--------------------|----------|
 | `YOMKRPC_VERSION()` | URL端点：`/YomkRpcService/version`<br>简述：版本查询<br>详述：宏内部自动解包并打印版本，无返回值 |
-| `YOMKRPC_LOAD_XML(xmlPath)` | URL端点：`/YomkRpcService/load_xml`<br>简述：加载 Fast DDS XML profiles 文件<br>详述：读文件经 `load_XML_profiles_file` 解析校验（返回码显式检查）后缓存，供后续 create_node 的 participant 按**三级提取链**叠加：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。**必须在任何节点创建之前调用**——participant 的发现配置/传输/QoS 在创建时固化，节点创建后加载仅影响后续新建实体，对已建节点不生效；再次调用以最新成功文件整体替换；失败（路径不存在/文件为空/格式非法）返回错误，`m_msg` 携原因与返回码 |
+| `YOMKRPC_LOAD_XML([xmlPath])` | URL端点：`/YomkRpcService/load_xml`<br>简述：加载 Fast DDS XML profiles 文件<br>详述：读文件经 `load_XML_profiles_file` 解析校验（返回码显式检查）后缓存，供后续 create_node 的 participant 按**三级提取链**叠加：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。xmlPath 可缺省——缺省（无参形态）经 `DDSXmlLoad` 类内缺省初始化器读环境变量自动加载：总开关 `YOMKRPC_USE_XML_PROFILE` 为 true/1（大小写不敏感）时取 `YOMKRPC_XML_PROFILE_PATH`，开关关闭时路径变量被忽略恒空（服务端报 `xml path is empty`，详见 5.7 环境变量自动加载）；**必须在任何节点创建之前调用**——participant 的发现配置/传输/QoS 在创建时固化，节点创建后加载仅影响后续新建实体，对已建节点不生效；再次调用以最新成功文件整体替换；失败（路径不存在/文件为空/格式非法）返回错误，`m_msg` 携原因与返回码 |
 | `YOMKRPC_NODE(nodeName[, domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；udpDiscoverServerLocator/tcpDiscoverServerLocator 可缺省尾参——缺省时经类内缺省初始化器读环境变量自动直配：总开关 `YOMKRPC_USE_DISCOVER_SERVER` 为 true/1（大小写不敏感）时分别取 `YOMKRPC_UDP_DISCOVER_SERVERS`/`YOMKRPC_TCP_DISCOVER_SERVERS`，开关关闭时两串变量被忽略恒空（=不直配，详见 5.7 环境变量自动直配）；显式直配聚合串格式为分号分隔 `ip[:port]` 多 server（port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7）；TCP 通道 port 为 server 的 TCP 监听口，非空时 participant 自动补注入 TCPv4 传输（与内置 UDPv4/SHM 共存，数据通道不受影响），两通道可同时使用，仅 TCP 直配时 UDP 传空串占位 |
 | `YOMKRPC_DEL_NODE(nodeName)` | URL端点：`/YomkRpcService/delete_node`<br>简述：删除节点<br>详述：销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
 | `YOMKRPC_PUB_TOPIC(nodeName, topicName, type[, qos])` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放）；qos 可缺省尾参——端点 QoS 描述 `DDSQosProfile`（8 项 history/depth/reliability/durability/liveliness/deadline/lifespan/liveliness lease 可独立设置，未设置项为哨兵保持底座值）：缺省（全哨兵）=Fast DDS 端点默认底座（现状行为）；`DDSQosProfile::ros2DefaultPublisher()`=ROS2 默认底座（KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3）；可在底座上逐项覆盖（如只设 depth=10），另有 `ros2SensorData()` 传感器档（KEEP_LAST(5)+BEST_EFFORT），用法见 5.6 |
@@ -348,11 +348,19 @@ ros2 topic echo /chatter std_msgs/msg/String
 **XML profiles 加载**（`YOMKRPC_LOAD_XML`）——participant 级发现/传输/QoS 配置经 Fast DDS XML profiles 文件下发：
 
 ```cpp
-YOMKRPC_LOAD_XML("/path/to/profiles.xml");   // 必须在任何节点创建之前调用！
+YOMKRPC_LOAD_XML("/path/to/profiles.xml");   // 形态 1：显式路径；必须在任何节点创建之前调用！
+YOMKRPC_LOAD_XML();                          // 形态 2：无参缺省，读下方两环境变量（总开关+路径）
 YOMKRPC_NODE("xml_node", 0);                 // 创建时按三级提取链叠加 XML 配置
 ```
 
 **时序约束**：participant 的发现配置/传输/QoS 在创建时固化——先 `YOMKRPC_LOAD_XML` 再 `YOMKRPC_NODE`；节点创建后加载仅影响后续新建实体，对已建节点不生效。再次调用以最新成功文件整体替换。
+
+**环境变量自动加载**（与发现服务器自动直配同机制对齐，进程级无需改代码）：双环境变量控制 XML profiles 缺省加载——总开关 `YOMKRPC_USE_XML_PROFILE`（默认 `false`，`true`/`1` 视为开启，大小写不敏感；未设置/空/`false`/`0`/其余任意值关闭）+ profiles 文件路径 `YOMKRPC_XML_PROFILE_PATH`（默认空，相对/绝对均可）。开关开启时 `YOMKRPC_LOAD_XML` 无参形态经 `DDSXmlLoad` 类内缺省初始化器自动取该路径（显式传参覆盖 env 缺省，语义同 serverLocator 尾参）；路径空静默不加载（同发现服务器空串=不直配），路径不存在/文件为空/格式非法失败回显不静默降级。`yomkrpc` CLI 与该双环境变量对齐：启动时无则创建默认值并幂等写入 `~/.bashrc`（仅可见性，行为同未设置），且各子命令创建调试/bag 节点前自动加载（开关关闭或路径空行为不变），适合容器/CI 批量注入：
+
+```bash
+export YOMKRPC_USE_XML_PROFILE=true
+export YOMKRPC_XML_PROFILE_PATH="/path/to/profiles.xml"
+```
 
 XML profile 两种命中形态（三级提取链）：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。XML 片段示例（participant 档，格式经 Fast DDS XML schema 校验）：
 

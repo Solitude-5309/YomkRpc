@@ -119,6 +119,39 @@ inline std::string YomkRpcDefaultTcpDiscoverServers()
     return v ? std::string(v) : std::string();
 }
 
+// XML profiles 自动加载总开关：读环境变量 YOMKRPC_USE_XML_PROFILE。大小写不敏感的
+// "true"/"1" 视为开启；未设置/空/"false"/"0"/其余任意值一律视为关闭，静默不打印日志
+// （纯头文件内联，不引入日志依赖）。关闭时 YomkRpcDefaultXmlProfilePath 恒返回空串
+// （=不自动加载），XML 路径环境变量被忽略。
+inline bool YomkRpcUseXmlProfile()
+{
+    const char* v = std::getenv("YOMKRPC_USE_XML_PROFILE");
+    if (!v)
+    {
+        return false;
+    }
+    std::string s(v);
+    for (char& c : s)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s == "true" || s == "1";
+}
+
+// 缺省 XML profiles 路径：总开关开启时原样返回 YOMKRPC_XML_PROFILE_PATH（未设置/空 →
+// 空串=不加载），关闭时恒空串。路径合法性不在本层校验——由 load_xml 端点校验，路径
+// 不存在/文件为空/格式非法失败回显；空串由调用方静默跳过（同发现服务器空串=不直配
+// 语义，避免开关误开退化成"看似生效实则未加载"）。
+inline std::string YomkRpcDefaultXmlProfilePath()
+{
+    if (!YomkRpcUseXmlProfile())
+    {
+        return {};
+    }
+    const char* v = std::getenv("YOMKRPC_XML_PROFILE_PATH");
+    return v ? std::string(v) : std::string();
+}
+
 // ===== 端点 QoS 描述（公共头零 fastdds 依赖） =====
 
 // 端点 QoS 枚举：enum class 禁止隐式整型转换，用户只能取枚举项（裸数字编译期报错）；
@@ -209,7 +242,10 @@ struct DDSNode
 // load_xml 请求负载。
 struct DDSXmlLoad
 {
-    std::string xmlPath;  // Fast DDS XML profiles 文件路径（相对/绝对均可）
+    // Fast DDS XML profiles 文件路径（相对/绝对均可）。缺省（YOMKRPC_LOAD_XML 无参形态）
+    // 经类内缺省初始化器读环境变量：总开关 YOMKRPC_USE_XML_PROFILE=true 时取
+    // YOMKRPC_XML_PROFILE_PATH，否则空串（服务端报 "xml path is empty"）；显式传参完全兼容。
+    std::string xmlPath = YomkRpcDefaultXmlProfilePath();
 };
 
 // register_pub_topic 请求负载。

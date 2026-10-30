@@ -152,6 +152,13 @@
  *   启动时无则分别创建并设默认值，同时幂等写入 ~/.bashrc（仅当其中无该变量时），
  *   使新开任意终端可 echo 查看并继承。默认值与未设置行为完全一致（回落多播发现），
  *   仅保证可见性；接 DS 时 export 开关为 true 并填 server 串即可（见 README 5.7）。
+ *
+ * XML profiles 自动加载双环境变量（与发现服务器同机制对齐）：
+ *   YOMKRPC_USE_XML_PROFILE（默认 false，大小写不敏感 true/1 视为开启）、
+ *   YOMKRPC_XML_PROFILE_PATH（默认空，Fast DDS XML profiles 文件路径，相对/绝对均可）；
+ *   启动时无则分别创建并设默认值，同时幂等写入 ~/.bashrc（仅当其中无该变量时）。
+ *   开关开启且路径非空时各子命令创建调试/bag 节点前先自动加载该 profiles（空路径
+ *   静默跳过，加载失败报错退出），participant 发现/传输/QoS 配置经三级提取链叠加生效。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>
@@ -242,6 +249,11 @@ static void printUsage(std::ostream &os)
           "                      与 YOMKRPC_TCP_DISCOVER_SERVERS 直配聚合串（默认空，分号分隔\n"
           "                      多 server）；启动时无则创建默认值并写入 .bashrc，任意终端可查看\n"
           "                      可继承，默认值与未设置行为一致（回落多播发现）\n"
+          "  环境变量             XML profiles 自动加载（语义见 README）：YOMKRPC_USE_XML_PROFILE\n"
+          "                      总开关（默认 false，true/1 开启）、YOMKRPC_XML_PROFILE_PATH\n"
+          "                      profiles 文件路径（默认空，相对/绝对均可）；开关开启且路径\n"
+          "                      非空时创建节点前自动加载（空路径静默跳过，加载失败报错退出），\n"
+          "                      启动时无则创建默认值并写入 .bashrc，任意终端可查看可继承\n"
           "  -v, --verbose       端点详情模式（仅 topic info 生效）：追加逐端点 Node name、\n"
           "                      Endpoint type、GUID 与 QoS profile 详情段\n"
           "  -t, --types         类型名模式（仅 topic list 生效）：每行输出 \"主题名 [类型名]\"\n"
@@ -390,7 +402,9 @@ static void printUsage(std::ostream &os)
           "  yomkrpc --domain 5 topic list     # 或单次显式指定域号（优先于环境变量）\n"
           "  export YOMKRPC_DDS_DISCOVER_ROUNDS=7  # 收敛判定次数（写入 .bashrc 可持久化）\n"
           "  export YOMKRPC_USE_DISCOVER_SERVER=true   # 发现服务器总开关（写入 .bashrc 可持久化）\n"
-          "  export YOMKRPC_UDP_DISCOVER_SERVERS=127.0.0.1:11811  # UDP 直配串，须与 DS 一致\n";
+          "  export YOMKRPC_UDP_DISCOVER_SERVERS=127.0.0.1:11811  # UDP 直配串，须与 DS 一致\n"
+          "  export YOMKRPC_USE_XML_PROFILE=true       # XML profiles 自动加载开关\n"
+          "  export YOMKRPC_XML_PROFILE_PATH=/path/to/profiles.xml  # profiles 文件路径\n";
 }
 
 // 域 id 环境变量：CLI 未显式 --domain/-D 时的域号来源（启动时无则创建并设默认值 0，
@@ -409,6 +423,15 @@ static constexpr char kDiscoverRoundsEnv[] = "YOMKRPC_DDS_DISCOVER_ROUNDS";
 static constexpr char kUseDiscoverServerEnv[] = "YOMKRPC_USE_DISCOVER_SERVER";
 static constexpr char kUdpDiscoverServersEnv[] = "YOMKRPC_UDP_DISCOVER_SERVERS";
 static constexpr char kTcpDiscoverServersEnv[] = "YOMKRPC_TCP_DISCOVER_SERVERS";
+
+// XML profiles 自动加载双环境变量：总开关 + profiles 文件路径（YOMKRPC_LOAD_XML 无参形态
+// 经 DDSXmlLoad 类内缺省初始化器读取，见 include/YomkRpcService.h）。启动时无则分别创建
+// 并设默认值 false/空（进程内生效），并幂等持久化到 ~/.bashrc 使新开任意终端可查看可
+// 继承；开关开启且路径非空时各子命令创建节点前自动加载该 profiles（见 autoLoadXmlProfile），
+// 默认值与"未设置"行为完全一致（开关非 true/1 即不加载），仅保证可见性，用户 export
+// 改值即刻生效
+static constexpr char kUseXmlProfileEnv[] = "YOMKRPC_USE_XML_PROFILE";
+static constexpr char kXmlProfilePathEnv[] = "YOMKRPC_XML_PROFILE_PATH";
 
 // 将默认环境变量持久化到 ~/.bashrc（幂等）：仅当 .bashrc 中不存在该变量（任一行含
 // name 即视为已存在）时追加一次 export 行，使新开任意终端可直接 echo 查看并自动继承。
@@ -441,6 +464,35 @@ static void persistDefaultEnv(const char *name, const char *value, const char *n
     }
     out << "\n# added by yomkrpc: " << note << "\n"
         << "export " << name << "=" << value << "\n";
+}
+
+// XML profiles 自动加载：总开关 YOMKRPC_USE_XML_PROFILE=true 且 YOMKRPC_XML_PROFILE_PATH
+// 非空时，在各子命令创建调试/bag 节点前先经 YOMKRPC_LOAD_XML 无参形态（环境变量缺省）
+// 加载一次 profiles，server 侧 xmlCache 供本进程后续全部节点的三级提取链取用；开关关闭
+// 或路径空静默跳过（同发现服务器空串=不直配语义），加载失败报错返回 false（路径非法不
+// 静默降级，对齐 serverLocator 非法串创建失败回显）。返回 true=可继续创建节点。
+static bool autoLoadXmlProfile()
+{
+    const std::string path = YomkRpcDefaultXmlProfilePath();
+    if (path.empty())
+    {
+        return true;
+    }
+    // load_xml 端点在 /YomkRpcService 上，而本工具按需只注册调试/bag 服务——首次
+    // 触发自动加载时补注册 RPC 服务（static 守卫保证全进程仅注册一次）
+    static const bool rpcServiceReady = (YOMK_NEW_SERVICE(YomkRpcService) == 0);
+    if (!rpcServiceReady)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "register /YomkRpcService failed");
+        return false;
+    }
+    auto resp = YOMKRPC_LOAD_XML();
+    if (resp.m_status != YomkResponse::eOk)
+    {
+        YOMK_ERROR_TAG("yomkrpc", "auto load xml profile [", path, "] failed: ", resp.m_msg);
+        return false;
+    }
+    return true;
 }
 
 // 解析域号：十进制、无尾随非数字字符、合法范围 [0,232]
@@ -766,6 +818,10 @@ static int runPrint(uint32_t domainId, const std::string &topicName, const DDSQo
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -824,6 +880,10 @@ static int runRecord(uint32_t domainId, const std::vector<std::string> &topics,
     if (startPaused)
     {
         yomk::bagRecordPause(); // 暂停态启动：先置位再发起录制（订阅照常，写入暂停）
+    }
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
     }
     auto resp = YOMKRPC_BAG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
@@ -1011,6 +1071,10 @@ static int runBagPlay(uint32_t domainId, const std::string &bagDir, double playb
     if (startPaused)
     {
         yomk::bagPlayPause();
+    }
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
     }
     auto resp = YOMKRPC_BAG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
@@ -1277,6 +1341,10 @@ static int runHz(uint32_t domainId, const std::string &topicName, size_t windowS
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1372,6 +1440,10 @@ static int runList(uint32_t domainId, uint32_t waitRounds, bool types = false)
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1437,6 +1509,10 @@ static int runInfo(uint32_t domainId, const std::string &topicName, uint32_t wai
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1493,6 +1569,10 @@ static int runTopicType(uint32_t domainId, const std::string &topicName, uint32_
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1546,6 +1626,10 @@ static int runTopicFind(uint32_t domainId, const std::string &typeName, uint32_t
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1594,6 +1678,10 @@ static int runInterfaceShow(uint32_t domainId, const std::string &typeName, uint
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1641,6 +1729,10 @@ static int runInterfaceList(uint32_t domainId, uint32_t waitRounds)
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1760,6 +1852,10 @@ static int runTopicPubMsgFile(uint32_t domainId, const std::string &topicName,
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1845,6 +1941,10 @@ static int runTopicPubExample(uint32_t domainId, const std::string &topicName, u
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -1908,6 +2008,10 @@ static int runTopicPub(uint32_t domainId, const std::string &topicName, const st
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -2028,6 +2132,10 @@ static int runNodeList(uint32_t domainId, uint32_t waitRounds)
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -2085,6 +2193,10 @@ static int runNodeInfo(uint32_t domainId, const std::string &nodeName, uint32_t 
     YOMK_NEW_SERVICE(YomkRpcDebugService);
 
     // 1. 创建调试节点（单节点模型：重复创建须先删除）
+    if (!autoLoadXmlProfile())
+    {
+        return 1;
+    }
     auto resp = YOMKRPC_DEBUG_NODE(domainId);
     if (resp.m_status != YomkResponse::eOk)
     {
@@ -2166,6 +2278,23 @@ int main(int argc, char *argv[])
         ::setenv(kTcpDiscoverServersEnv, "", 1);
         persistDefaultEnv(kTcpDiscoverServersEnv, "\"\"",
                           "TCP discover server locators, semicolon separated (default empty)");
+    }
+
+    // ---- XML profiles 双环境变量：无则创建并设默认值（总开关 false、路径空，进程内
+    // 生效），并幂等持久化到 ~/.bashrc 使新开终端可见可继承；默认值与"未设置"行为
+    // 完全一致（开关非 true/1 即不加载），仅保证可见性不改行为；用户 export
+    // YOMKRPC_USE_XML_PROFILE=true 且填 profiles 路径后各子命令创建节点前即自动加载 ----
+    if (std::getenv(kUseXmlProfileEnv) == nullptr)
+    {
+        ::setenv(kUseXmlProfileEnv, "false", 1);
+        persistDefaultEnv(kUseXmlProfileEnv, "false",
+                          "xml profiles auto-load master switch (true/1 enables load, default false)");
+    }
+    if (std::getenv(kXmlProfilePathEnv) == nullptr)
+    {
+        ::setenv(kXmlProfilePathEnv, "", 1);
+        persistDefaultEnv(kXmlProfilePathEnv, "\"\"",
+                          "Fast DDS XML profiles file path (default empty)");
     }
 
     // ---- 参数解析：-h/--help 即刻退出；位置参数（收敛次数无 CLI 选项恒读环境变量；
