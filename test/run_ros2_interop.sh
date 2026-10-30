@@ -1,9 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# 闭环 6 用例 4b：ROS2 Humble 真机互通手动回归脚本（ctest 树不含，用户裁定）
+# 闭环 6 用例 4b：ROS2 真机互通手动回归脚本（ctest 树不含，用户裁定）
 #
 # 前置：
-#   1. /opt/ros/humble 环境可用（ros2 CLI 在 PATH）
+#   1. ROS2 环境（脚本自动探测版本：优先继承当前终端已 source 的 ROS_DISTRO，
+#      否则取 /opt/ros/* 字典序最后一个发行版；缺失时 exit 2 并提示安装后重跑）
 #   2. test 树构建后的判定二进制（test/build/Ros2Interop/TestRos2InteropPub|Sub，
 #      examples 的 ExampleRos2InteropPub|Sub 为用户教学示例，不承担判定职责）
 #
@@ -18,7 +19,7 @@
 #   方向 1：TestRos2InteropPub（set_name 新名 + 1Hz 发 30 条 "hello ros2 N" 后自退）→ ros2 topic echo（6s 窗口）收到多条
 #   方向 2：ros2 topic pub 三路各 -r 1 发 "hello yomkrpc N"（N=1..3，VOLATILE 不回放故 Sub 先行匹配）→ TestRos2InteropSub 收满 3 条 [RECV] 即退
 #
-# 退出码：0 = 两项全过；1 = 某方向失败；2 = 参数错误
+# 退出码：0 = 两项全过；1 = 某方向失败；2 = 参数错误/ROS2 环境不可用
 # =============================================================================
 
 set -u
@@ -39,11 +40,36 @@ if [ ! -x "$SUB_EXE" ]; then
     exit 2
 fi
 
-# ROS2 setup.bash 内部引用未定义变量（AMENT_TRACE_SETUP_FILES 等），与 set -u 不兼容，
+# ROS2 预检：自动搜索可用发行版（/opt/ros/*/setup.bash）。优先继承当前终端已 source 的
+# ROS_DISTRO（对应 setup.bash 存在时），否则取字典序最后一个发行版（foxy < galactic <
+# humble < iron < jazzy ... 按字母序近似发布序）；全部缺失时告知用户并提示安装后重跑。
+ROS_SETUP=""
+if [ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+    ROS_SETUP="/opt/ros/${ROS_DISTRO}/setup.bash" # 已 source 的发行版优先
+else
+    for setup in /opt/ros/*/setup.bash; do # 无匹配时 glob 保持字面量，由 [ -f ] 过滤
+        [ -f "$setup" ] && ROS_SETUP="$setup"
+    done
+fi
+if [ -z "$ROS_SETUP" ]; then
+    echo "[FAIL] 未检测到 ROS2 环境（/opt/ros/*/setup.bash 均不存在）"
+    echo "       本脚本验证 YomkRpc 与 ROS2 的 DDS 层互通，须先安装 ROS2"
+    echo "       （Ubuntu 22.04 示例：sudo apt install ros-humble-desktop），"
+    echo "       安装完成后重跑本脚本验证：./test/run_ros2_interop.sh"
+    exit 2
+fi
+
+# setup.bash 内部引用未定义变量（AMENT_TRACE_SETUP_FILES 等），与 set -u 不兼容，
 # source 前后临时关闭/恢复（ROS2 环境脚本与 strict mode 的经典冲突）
 set +u
-source /opt/ros/humble/setup.bash
+source "$ROS_SETUP"
 set -u
+# source 成功 != 可用：再验 ros2 CLI 已进 PATH（残缺安装兜底拦截）
+if ! command -v ros2 >/dev/null 2>&1; then
+    echo "[FAIL] 已 source $ROS_SETUP 但 ros2 CLI 不可用，请检查 ROS2 安装完整性"
+    echo "       （重装/补装后重跑本脚本验证：./test/run_ros2_interop.sh）"
+    exit 2
+fi
 
 # 清理收尾：杀全部本脚本后台进程并等待（防孤儿持有管道/残留 DDS 实体）
 cleanup() {

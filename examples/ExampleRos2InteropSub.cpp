@@ -22,7 +22,6 @@
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
-
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -32,7 +31,7 @@
 
 using namespace yomk;
 
-static std::atomic<bool> g_stop{false}; // SIGINT/SIGTERM 退出标志
+static std::atomic<bool> g_stop{false};  // SIGINT/SIGTERM 退出标志
 
 static void onSignal(int)
 {
@@ -54,18 +53,18 @@ int main()
 
     // 类型对象 new 后、移交前 set_name 成 ROS2 约定名（宏实参位内联 new 无法先改名）
     std::atomic<int> received{0};
-    auto *type = new YomkRpc::MStringPubSubType();
+    auto* type = new YomkRpc::MStringPubSubType();
     type->set_name("std_msgs::msg::dds_::String_");
-    auto onMessage = [&](const void *data)
+    auto onMessage = [&](const void* data)
     {
-        auto *msg = static_cast<const YomkRpc::MString *>(data);
+        auto* msg = static_cast<const YomkRpc::MString*>(data);
         received++;
-        std::cout << "[RECV] " << msg->data() << std::endl;
+        YOMK_INFO_TAG("ExampleRos2InteropSub", "[RECV] ", msg->data());
     };
     // QoS 用 ROS2 订阅端默认底座：BEST_EFFORT requested 对任意 offered（含 ros2 topic
     // pub 与 YomkRpc pub 的 RELIABLE）均可匹配（头文件 YOMKRPC_SUB_TOPIC 注释同口径）
-    resp = YOMKRPC_SUB_TOPIC("interop_sub", "rt/chatter_interop", type, onMessage,
-                             DDSQosProfile::ros2DefaultSubscriber());
+    resp =
+        YOMKRPC_SUB_TOPIC("interop_sub", "rt/chatter_interop", type, onMessage, DDSQosProfile::ros2DefaultSubscriber());
     if (resp.m_status != YomkResponse::eOk)
     {
         YOMK_ERROR_TAG("ExampleRos2InteropSub", "register sub topic failed: ", resp.m_msg);
