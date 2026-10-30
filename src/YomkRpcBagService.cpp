@@ -71,11 +71,12 @@ YomkResponse YomkRpcBagService::createNode(YomkPkgPtr pkg)
     }
 
     auto node = std::make_unique<FastDDSBagNode>();
-    // XML 配置通道 + serverLocator 直配（闭环 4）：xmlCache 经 YomkRpcService::xmlCache()
-    // 单例取用（load_xml 端点成功后非空）；serverLocator 空串=不直配现状
-    yomkrpc_xml::ParticipantQosSpec spec;
+    // XML 配置通道 + 发现服务器直配（闭环 4）：xmlCache 经 YomkRpcService::xmlCache()
+    // 单例取用（load_xml 端点成功后非空）；双直配串空串=不直配现状
+    auto spec = yomkrpc_xml::ParticipantQosSpec{};
     spec.xml = YomkRpcService::xmlCache();
-    spec.serverSpec = p->msg.serverLocator;
+    spec.udpServerSpec = p->msg.udpDiscoverServerLocator;
+    spec.tcpServerSpec = p->msg.tcpDiscoverServerLocator;
     std::string nodeErr;
     if (!node->setDomainId(p->msg.domainId, spec, &nodeErr))
     {

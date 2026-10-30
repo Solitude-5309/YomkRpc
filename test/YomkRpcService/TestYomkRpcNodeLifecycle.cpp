@@ -13,11 +13,11 @@
  *   Part B（直接单测 FastDDSNode）：setDomainId 重复设置守卫（participant_!=nullptr → false）
  *     与非法域 UINT32_MAX（create_participant 返回 null → false）；O1 后服务层已短路非法域，
  *     故 setDomainId 的 participant==null 分支改由此直接单测覆盖。
- *   Part C（闭环 4 helper 白盒）：parseServerLocator 容错矩阵 / applyDiscoveryServers 读回
- *     CLIENT+locator 逐项（非法 spec 不改动 qos）/ participantQosFromXml 三态（按名
- *     profile → 默认档兑底 → 保持 DEFAULT 回退）与 xml 空串直返。
+ *   Part C（闭环 4 helper 白盒）：parseServerLocator 容错矩阵 / applyDiscoveryServers（UDP+TCP
+ *     双通道，TCP 项自动补注入 TCPv4 传输）读回 CLIENT+locator 逐项（非法 spec 不改动 qos）/
+ *     participantQosFromXml 三态（按名 profile → 默认档兑底 → 保持 DEFAULT 回退）与 xml 空串直返。
  *   Part D（闭环 4 直配端到端）：FastDDSNode 白盒带 spec 创建（server 不在场 CLIENT 模式
- *     仍创建成功）+ 非法 serverLocator false + err 回显。
+ *     仍创建成功）+ 非法 UDP/TCP serverLocator false + err 回显。
  *   Part E（闭环 4 双通道合并）：XML discoveryServersList 提取打底 → 直配重建覆盖
  *     （合并语义：直配 > XML 打底 > 默认）。
  *   Part F（闭环 4 连通性）：spawn 项目自带 discovery server 子进程（fastdds discovery CLI，
@@ -272,8 +272,8 @@ namespace
 
             // C-2 applyDiscoveryServers 读回（合法 → CLIENT+locator 逐项；非法 → false 且不改动 qos）
             dds::DomainParticipantQos qos = dds::PARTICIPANT_QOS_DEFAULT;
-            CHECK(yomkrpc_xml::applyDiscoveryServers(qos, "127.0.0.1:11811", err) && err.empty(),
-                  "Part C: 合法 spec → true");
+            CHECK(yomkrpc_xml::applyDiscoveryServers(qos, "127.0.0.1:11811", "", err) && err.empty(),
+                  "Part C: 合法 UDP spec → true");
             CHECK(qos.wire_protocol().builtin.discovery_config.discoveryProtocol ==
                       rtps::DiscoveryProtocol::CLIENT,
                   "Part C: 读回 discoveryProtocol == CLIENT（直配强制 client 角色）");
@@ -282,12 +282,65 @@ namespace
             const rtps::Locator &loc = *qos.wire_protocol().builtin.discovery_config.m_DiscoveryServers.begin();
             CHECK(rtps::IPLocator::toIPv4string(loc) == "127.0.0.1" && loc.port == 11811,
                   "Part C: 读回 locator 逐项 → ip 127.0.0.1 / port 11811");
-            CHECK(!yomkrpc_xml::applyDiscoveryServers(qos, "10.0.0.1:xyz", err) && !err.empty(),
+            CHECK(!yomkrpc_xml::applyDiscoveryServers(qos, "10.0.0.1:xyz", "", err) && !err.empty(),
                   "Part C: 非法 spec → false + err 非空");
             CHECK(qos.wire_protocol().builtin.discovery_config.m_DiscoveryServers.size() == 1 &&
                       rtps::IPLocator::toIPv4string(
                           *qos.wire_protocol().builtin.discovery_config.m_DiscoveryServers.begin()) == "127.0.0.1",
                   "Part C: 非法 spec 不改动 qos（原 locator 保留）");
+
+            // C-2b TCP 通道：TCPv4 locator 读回 + participant 侧自动补注入 TCPv4 传输
+            //（builtin 默认集不含 TCP，不可达；注入与 builtin UDPv4/SHM alongside 共存）
+            dds::DomainParticipantQos qosTcp = dds::PARTICIPANT_QOS_DEFAULT;
+            CHECK(yomkrpc_xml::applyDiscoveryServers(qosTcp, "", "10.0.0.2:42100", err) && err.empty(),
+                  "Part C: 合法 TCP spec → true");
+            CHECK(qosTcp.wire_protocol().builtin.discovery_config.m_DiscoveryServers.size() == 1 &&
+                      qosTcp.wire_protocol().builtin.discovery_config.m_DiscoveryServers.begin()->kind ==
+                          LOCATOR_KIND_TCPv4 &&
+                      rtps::IPLocator::toIPv4string(
+                          *qosTcp.wire_protocol().builtin.discovery_config.m_DiscoveryServers.begin()) ==
+                          "10.0.0.2" &&
+                      qosTcp.wire_protocol().builtin.discovery_config.m_DiscoveryServers.begin()->port == 42100,
+                  "Part C: TCP 通道读回 → TCPv4 locator 10.0.0.2:42100");
+            CHECK(qosTcp.transport().user_transports.size() == 1 &&
+                      std::dynamic_pointer_cast<rtps::TCPv4TransportDescriptor>(
+                          qosTcp.transport().user_transports[0]) != nullptr,
+                  "Part C: TCP 通道自动补注入 TCPv4TransportDescriptor");
+            CHECK(yomkrpc_xml::applyDiscoveryServers(qosTcp, "10.0.0.3:11811", "10.0.0.4:42100", err) &&
+                      qosTcp.transport().user_transports.size() == 1 &&
+                      qosTcp.wire_protocol().builtin.discovery_config.m_DiscoveryServers.size() == 2,
+                  "Part C: 二次叠加（UDP+TCP）→ 已有 TCPv4 描述符不重复注入，locator 双通道并存");
+
+            // C-2c 多 server：双通道各多项 spec → locator 逐项按序入表，TCPv4 描述符仍只注入一次
+            dds::DomainParticipantQos qosMulti = dds::PARTICIPANT_QOS_DEFAULT;
+            CHECK(yomkrpc_xml::applyDiscoveryServers(qosMulti, "10.0.0.1:7400;192.168.1.1:7401",
+                      "10.0.0.2:42100;10.0.0.5:42101", err) && err.empty(),
+                  "Part C: 多 UDP+多 TCP spec → true");
+            {
+                const auto &multiServers =
+                    qosMulti.wire_protocol().builtin.discovery_config.m_DiscoveryServers;
+                CHECK(multiServers.size() == 4,
+                      "Part C: 多 server 读回 m_DiscoveryServers size==4（UDP 先于 TCP 按序）");
+                const char *expectIp[4] = {"10.0.0.1", "192.168.1.1", "10.0.0.2", "10.0.0.5"};
+                uint32_t expectPort[4] = {7400, 7401, 42100, 42101};
+                int32_t expectKind[4] = {LOCATOR_KIND_UDPv4, LOCATOR_KIND_UDPv4, LOCATOR_KIND_TCPv4,
+                    LOCATOR_KIND_TCPv4};
+                bool multiOk = multiServers.size() == 4;
+                size_t idx = 0;
+                for (const auto &locator : multiServers)
+                {
+                    multiOk = multiOk && idx < 4 &&
+                              rtps::IPLocator::toIPv4string(locator) == expectIp[idx] &&
+                              locator.port == expectPort[idx] && locator.kind == expectKind[idx];
+                    ++idx;
+                }
+                multiOk = multiOk && idx == 4;
+                CHECK(multiOk, "Part C: 多 server 逐项读回 ip/port/kind 按序匹配");
+            }
+            CHECK(qosMulti.transport().user_transports.size() == 1 &&
+                      std::dynamic_pointer_cast<rtps::TCPv4TransportDescriptor>(
+                          qosMulti.transport().user_transports[0]) != nullptr,
+                  "Part C: 多 TCP server → TCPv4 描述符仍只注入一个");
 
             // C-3 participantQosFromXml 三态（leaseDuration 为最简可观察字段）
             dds::DomainParticipantQos byName = dds::PARTICIPANT_QOS_DEFAULT;
@@ -325,24 +378,29 @@ namespace
                   "Part C: 双默认档 → 先档生效（leaseDuration=456，raw 串直提取首个默认档，实测固化）");
       }
 
-      // Part D：serverLocator 直配端到端（真实 create_participant with CLIENT+servers；
+      // Part D：发现服务器直配端到端（真实 create_participant with CLIENT+servers；
       // server 不在场 CLIENT 模式仍创建成功——连接失败仅影响发现不影响创建）
       void testServerLocatorE2E()
       {
             std::string err;
             FastDDSNode node;
             CHECK(node.setDomainId(TEST_DOMAIN, "ds_direct_node",
-                      yomkrpc_xml::ParticipantQosSpec{"", "127.0.0.1:11811"}, &err),
-                  "Part D: 直配 setDomainId(200, CLIENT+127.0.0.1:11811, server 不在场) → true");
+                      yomkrpc_xml::ParticipantQosSpec{"", "127.0.0.1:11811", ""}, &err),
+                  "Part D: 直配 setDomainId(200, CLIENT+UDP 127.0.0.1:11811, server 不在场) → true");
             CHECK(!node.setDomainId(TEST_DOMAIN, "ds_direct_node",
-                      yomkrpc_xml::ParticipantQosSpec{"", "127.0.0.1:11811"}),
+                      yomkrpc_xml::ParticipantQosSpec{"", "127.0.0.1:11811", ""}),
                   "Part D: 重复 setDomainId → false（既有 participant_!=nullptr 守卫）");
 
             FastDDSNode badNode;
             CHECK(!badNode.setDomainId(TEST_DOMAIN, "ds_bad_node",
-                      yomkrpc_xml::ParticipantQosSpec{"", "127.0.0.1:99999"}, &err) &&
+                      yomkrpc_xml::ParticipantQosSpec{"", "127.0.0.1:99999", ""}, &err) &&
                       err.find("port out of range") != std::string::npos,
-                  "Part D: 非法 serverLocator(port 越界) → false + err 回显（不建 participant）");
+                  "Part D: 非法 UDP serverLocator(port 越界) → false + err 回显（不建 participant）");
+            FastDDSNode badTcpNode;
+            CHECK(!badTcpNode.setDomainId(TEST_DOMAIN, "ds_bad_tcp_node",
+                      yomkrpc_xml::ParticipantQosSpec{"", "", "10.0.0.1:99999"}, &err) &&
+                      err.find("port out of range") != std::string::npos,
+                  "Part D: 非法 TCP serverLocator(port 越界) → false + err 回显（不建 participant）");
       }
 
       // Part E：双通道合并——XML discoveryServersList 提取打底 → 直配重建覆盖
@@ -356,7 +414,7 @@ namespace
                   "Part E: XML discoveryServersList 提取打底 → 192.168.1.1:7411");
 
             std::string err;
-            CHECK(yomkrpc_xml::applyDiscoveryServers(qos, "10.0.0.1:1234", err),
+            CHECK(yomkrpc_xml::applyDiscoveryServers(qos, "10.0.0.1:1234", "", err),
                   "Part E: 直配叠加 → true");
             CHECK(qos.wire_protocol().builtin.discovery_config.discoveryProtocol ==
                           rtps::DiscoveryProtocol::CLIENT &&
@@ -410,7 +468,7 @@ namespace
 
             // A/B 双节点直配（白盒直调节点层；故意异域——域号不参与 DS 校验，见函数头注释）
             FastDDSNode nodeA, nodeB;
-            const yomkrpc_xml::ParticipantQosSpec dsSpec{"", "127.0.0.1:11811"};
+            const yomkrpc_xml::ParticipantQosSpec dsSpec{"", "127.0.0.1:11811", ""};
             CHECK(nodeA.setDomainId(201, "ds_conn_a", dsSpec), "Part F: 节点 A 直配 CLIENT（域 201）→ true");
             CHECK(nodeB.setDomainId(202, "ds_conn_b", dsSpec), "Part F: 节点 B 直配 CLIENT（域 202）→ true");
 

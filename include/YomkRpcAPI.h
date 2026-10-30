@@ -18,9 +18,13 @@
 // 形态 1：YOMKRPC_NODE(nodeName)            —— domainId 缺省，经 DDSNode 类内缺省初始化器
 //            读环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超 [0,232] 回落 0）。
 // 形态 2：YOMKRPC_NODE(nodeName, domainId)  —— 显式指定，合法范围 [0,232]。
-// 形态 3：YOMKRPC_NODE(nodeName, domainId, serverLocator) —— 尾参传发现服务器直配聚合串
-//            "ip[:port]"（多 server 分号分隔，port 缺省 11811）：participant 以 CLIENT
-//            发现协议直配（可单独使用或配合 YOMKRPC_LOAD_XML；非法串创建失败回显）。
+// 形态 3：YOMKRPC_NODE(nodeName, domainId, udpDiscoverServerLocator) —— 尾参传 UDP 发现服务器
+//            直配聚合串 "ip[:port]"（多 server 分号分隔，port 缺省 11811）：participant 以
+//            CLIENT 发现协议直配（可单独使用或配合 YOMKRPC_LOAD_XML；非法串创建失败回显）。
+// 形态 4：YOMKRPC_NODE(nodeName, domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator)
+//            —— 再传 TCP 发现服务器直配聚合串（port 为 server 的 TCP 监听口）：participant
+//            补注入 TCPv4 传输并以 TCPv4 locator 直配；两通道可同时使用，任一通道 server
+//            在场即完成发现（仅 TCP 直配时 UDP 通道传空串占位）。
 // nodeName：节点唯一名。仅同域节点可互通。
 #define YOMKRPC_NODE(nodeName, ...) \
     YOMK_REQUEST("/YomkRpcService/create_node", YomkMkPtr(DDSNode, DDSNode{nodeName, ##__VA_ARGS__}))
@@ -96,7 +100,8 @@
 // 创建调试节点（单节点模型：一个进程至多一个，重复创建须先删除）。
 // domainId：DDS 域号，合法范围 [0,232]，仅同域节点的主题可被调试。调试节点以唯一名
 // yomkrpc_debug_<uid> 入域（uid 为 12 位随机 hex，可被 yomkrpc node list 列出）。
-// serverLocator（可缺省尾参）：发现服务器直配聚合串，语义同 YOMKRPC_NODE 形态 3 尾参
+// udpDiscoverServerLocator（可缺省尾参）：UDP 发现服务器直配聚合串，语义同 YOMKRPC_NODE 形态 3 尾参；
+// tcpDiscoverServerLocator（可再缺省尾参）：TCP 发现服务器直配聚合串，语义同形态 4 第 4 参
 // （调试节点无用户名，XML 提取链仅默认档可兑底）。返回 YomkResponse。
 #define YOMKRPC_DEBUG_NODE(domainId, ...) \
     YOMK_REQUEST("/YomkRpcDebugService/create_node", YomkMkPtr(DDSDebugNode, DDSDebugNode{domainId, ##__VA_ARGS__}))
@@ -255,7 +260,8 @@
 // 创建 bag 节点（单节点模型：一个进程至多一个，重复创建须先删除）。
 // domainId：DDS 域号，合法范围 [0,232]。bag 节点以唯一名 yomkrpc_bag_<uid> 入域（uid 为
 // 12 位随机 hex，可被 yomkrpc node list 列出。
-// serverLocator（可缺省尾参）：发现服务器直配聚合串，语义同 YOMKRPC_NODE 形态 3 尾参
+// udpDiscoverServerLocator（可缺省尾参）：UDP 发现服务器直配聚合串，语义同 YOMKRPC_NODE 形态 3 尾参；
+// tcpDiscoverServerLocator（可再缺省尾参）：TCP 发现服务器直配聚合串，语义同形态 4 第 4 参
 // （bag 节点无用户名，XML 提取链仅默认档可兑底）。返回 YomkResponse。
 #define YOMKRPC_BAG_NODE(domainId, ...) \
     YOMK_REQUEST("/YomkRpcBagService/create_node", YomkMkPtr(DDSBagNode, DDSBagNode{domainId, ##__VA_ARGS__}))

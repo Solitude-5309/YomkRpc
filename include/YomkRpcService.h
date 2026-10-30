@@ -148,10 +148,14 @@ struct DDSNode
     // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_NODE 单参形态）经类内缺省初始化器读
     // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0）。
     uint32_t domainId = YomkRpcDefaultDomainId();
-    // 发现服务器直配聚合串（可缺省尾参）：空串=不直配（现状行为）；格式 "ip[:port]"，
+    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配（现状行为）；格式 "ip[:port]"，
     // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
-    std::string serverLocator;
+    std::string udpDiscoverServerLocator;
+    // 发现服务器直配聚合串（可缺省尾参，TCP 通道）：格式同上，port 为 server 的 TCP 监听口。
+    // 非空时 participant 补注入 TCPv4 传输（与内置 UDPv4/SHM 共存）并以 TCPv4 locator 直配，
+    // 可与 UDP 通道同时使用（任一通道 server 在场即完成发现）。
+    std::string tcpDiscoverServerLocator;
 };
 
 // load_xml 请求负载。

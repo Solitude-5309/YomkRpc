@@ -288,11 +288,12 @@ bool FastDDSNode::setDomainId(uint32_t domainId, const std::string& nodeName,
     DomainParticipantQos qos = PARTICIPANT_QOS_DEFAULT;
     yomkrpc_xml::participantQosFromXml(qos, nodeName, spec.xml);
     // 发现服务器直配（仅 client 角色）：CLIENT + m_DiscoveryServers 重建，覆盖 XML
-    // discoveryServersList（合并语义：直配 > XML 提取打底）；serverSpec 非法则整体失败
-    if (!spec.serverSpec.empty())
+    // discoveryServersList（合并语义：直配 > XML 提取打底）；UDP/TCP 双通道任一非空即叠加，
+    // TCP 通道自动补注入 TCPv4 传输；任一 spec 非法则整体失败
+    if (!spec.udpServerSpec.empty() || !spec.tcpServerSpec.empty())
     {
         std::string serverErr;
-        if (!yomkrpc_xml::applyDiscoveryServers(qos, spec.serverSpec, serverErr))
+        if (!yomkrpc_xml::applyDiscoveryServers(qos, spec.udpServerSpec, spec.tcpServerSpec, serverErr))
         {
             if (err != nullptr)
             {

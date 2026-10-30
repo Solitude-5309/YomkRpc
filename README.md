@@ -10,14 +10,14 @@
 |--------------------|----------|
 | `YOMKRPC_VERSION()` | URL端点：`/YomkRpcService/version`<br>简述：版本查询<br>详述：宏内部自动解包并打印版本，无返回值 |
 | `YOMKRPC_LOAD_XML(xmlPath)` | URL端点：`/YomkRpcService/load_xml`<br>简述：加载 Fast DDS XML profiles 文件<br>详述：读文件经 `load_XML_profiles_file` 解析校验（返回码显式检查）后缓存，供后续 create_node 的 participant 按**三级提取链**叠加：按节点名 `profile_name` 精确匹配 → `is_default_profile="true"` 默认档兜底（同文件多默认档取首个）→ 均未命中保持默认底座；命中后节点名仍最后覆盖。**必须在任何节点创建之前调用**——participant 的发现配置/传输/QoS 在创建时固化，节点创建后加载仅影响后续新建实体，对已建节点不生效；再次调用以最新成功文件整体替换；失败（路径不存在/文件为空/格式非法）返回错误，`m_msg` 携原因与返回码 |
-| `YOMKRPC_NODE(nodeName[, domainId[, serverLocator]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, serverLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；serverLocator 可缺省尾参——发现服务器直配聚合串（分号分隔 `ip[:port]` 多 server，port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7） |
+| `YOMKRPC_NODE(nodeName[, domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]]])` | URL端点：`/YomkRpcService/create_node`<br>简述：创建节点<br>详述：打包 `DDSNode{nodeName, domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator}`，每节点一个独立 DDS 参与者；domainId 合法范围 [0,232]、nodeName 不可为空，否则返回错误；domainId 可缺省——缺省时经 DDSNode 类内缺省初始化器读环境变量 `YOMKRPC_DDS_DOMAIN_ID`（未设置/为空/非法/超范围回落 0）；udpDiscoverServerLocator/tcpDiscoverServerLocator 可缺省尾参——UDP/TCP 发现服务器直配聚合串（格式均为分号分隔 `ip[:port]` 多 server，port 缺省 11811、合法范围 [1,65535]，非法串创建失败回显），participant 以 CLIENT 发现协议直配（禁用多播 PDP，发现流量单播直送 server；可单独使用或配合 `YOMKRPC_LOAD_XML`，直配 server 项覆盖 XML 打底，详见 5.7）；TCP 通道 port 为 server 的 TCP 监听口，非空时 participant 自动补注入 TCPv4 传输（与内置 UDPv4/SHM 共存，数据通道不受影响），两通道可同时使用，仅 TCP 直配时 UDP 传空串占位 |
 | `YOMKRPC_DEL_NODE(nodeName)` | URL端点：`/YomkRpcService/delete_node`<br>简述：删除节点<br>详述：销毁节点及其全部 DDS 实体，不存在的节点返回错误 |
 | `YOMKRPC_PUB_TOPIC(nodeName, topicName, type[, qos])` | URL端点：`/YomkRpcService/register_pub_topic`<br>简述：注册发布主题<br>详述：打包 `DDSTopic`；type 为 `new XxxPubSubType()`，所有权移交服务端（调用后 caller 不再持有/释放）；qos 可缺省尾参——端点 QoS 描述 `DDSQosProfile`（8 项 history/depth/reliability/durability/liveliness/deadline/lifespan/liveliness lease 可独立设置，未设置项为哨兵保持底座值）：缺省（全哨兵）=Fast DDS 端点默认底座（现状行为）；`DDSQosProfile::ros2DefaultPublisher()`=ROS2 默认底座（KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3）；可在底座上逐项覆盖（如只设 depth=10），另有 `ros2SensorData()` 传感器档（KEEP_LAST(5)+BEST_EFFORT），用法见 5.6 |
 | `YOMKRPC_SUB_TOPIC(nodeName, topicName, type, callback[, qos])` | URL端点：`/YomkRpcService/register_sub_topic`<br>简述：注册订阅主题<br>详述：打包 `DDSSubRequest`；type 同上移交所有权，callback 收到消息时回调，接收缓冲 data 由内部自动创建；qos 可缺省尾参语义同 `YOMKRPC_PUB_TOPIC`，订阅端推荐 `DDSQosProfile::ros2DefaultSubscriber()`（BEST_EFFORT requested 对任意 offered 均可匹配） |
 | `YOMKRPC_PUB_MSG(nodeName, topicName, data)` | URL端点：`/YomkRpcService/publish`<br>简述：发布数据<br>详述：打包 `DDSPublish`；data 为数据实例指针（借用，同步写入，caller 保留所有权） |
 | `YOMKRPC_LOAN(nodeName, topicName, outPtr)` | URL端点：`/YomkRpcService/loan`<br>简述：借出发送缓冲<br>详述：outPtr 为输出参数，成功指向 `DDSLoanResult{sample}` 池内样本、失败置 nullptr；仅 plain 类型支持 |
 | `YOMKRPC_DISCARD_LOAN(nodeName, topicName, sample)` | URL端点：`/YomkRpcService/discard_loan`<br>简述：归还未发布的借出缓冲<br>详述：打包 `DDSLoan{nodeName, topicName, sample}`，归还未发布样本避免池泄漏 |
-| `YOMKRPC_DEBUG_NODE(domainId[, serverLocator])` | URL端点：`/YomkRpcDebugService/create_node`<br>简述：创建调试节点<br>详述：打包 `DDSDebugNode{domainId, serverLocator}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试；serverLocator 可缺省尾参——发现服务器直配聚合串，语义同 `YOMKRPC_NODE` 形态 3（CLIENT 协议强制，非法串创建失败回显，详见 5.7） |
+| `YOMKRPC_DEBUG_NODE(domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]])` | URL端点：`/YomkRpcDebugService/create_node`<br>简述：创建调试节点<br>详述：打包 `DDSDebugNode{domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域节点的主题可被调试；两 serverLocator 可缺省尾参——UDP/TCP 发现服务器直配聚合串，语义同 `YOMKRPC_NODE` 形态 3/4（CLIENT 协议强制，非法串创建失败回显，详见 5.7） |
 | `YOMKRPC_DEBUG_TOPIC_PRINT(topicName, output)` | URL端点：`/YomkRpcDebugService/topic_print`<br>简述：登记调试主题<br>详述：打包 `DDSDebugTopic{topicName, output}`；发现匹配的远端 DataWriter 后自动解析类型建立订阅（类型无关，无需 IDL 生成代码），消息文本逐条投递 output（用户自定义回调，服务层不打印）；登记为发现驱动的延迟行为，主题尚未被发布者上线时仍返回成功（登记约 3s 后仍无发布者则打一次性等待提示）；须先创建调试节点，失败时 `m_msg` 携具体拒绝原因（`debug node not created` / `subscriber not created` / `empty topic name` / `already registered`） |
 | `YOMKRPC_DEBUG_TOPIC_LIST(stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/list_topics`<br>简述：列出域内主题<br>详述：打包 `DDSDebugList{stableRounds, intervalMs}`；自适应收敛查询：内部每 intervalMs（默认 200ms）轮询一次发现缓存快照，连续 stableRounds 次集合不变即返回（0 值钳制默认 5 次/200ms，最长阻塞约 stableRounds\*intervalMs）；远端 DataWriter 与 DataReader 均记录（仅有订阅者而无发布者的主题同样列出）；返回 StringArray 包，每行一个 topicName（仅主题名，不含类型）按主题名排序；须先创建调试节点，列表可为空（域内无 writer/reader） |
 | `YOMKRPC_DEBUG_TOPIC_LIST_T(stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/list_topics`<br>简述：列出域内主题与类型名<br>详述：打包 `DDSDebugList{stableRounds, intervalMs, types=true}`；与 `YOMKRPC_DEBUG_TOPIC_LIST` 同端点同收敛语义，返回 StringArray 每行 `主题名 [类型名]`（单空格 + 方括号，类型名原样输出）；须先创建调试节点 |
@@ -32,7 +32,7 @@
 | `YOMKRPC_DEBUG_TOPIC_PUB(topicName, json, stableRounds, intervalMs, repeatIntervalMs, requiredSubscribers, maxTimes[, qos])` | URL端点：`/YomkRpcDebugService/topic_pub`<br>简述：发布 JSON 载荷消息<br>详述：打包 `DDSDebugTopicPub` 8 字段（qos 为可缺省尾参——临时发布 writer 的 QoS 描述 `DDSQosProfile`，全哨兵=既有固定值 KEEP_LAST(1)+RELIABLE+TRANSIENT_LOCAL，ROS2 底座建议 `ros2DefaultPublisher()`）；首轮发现收敛 → 类型重建 + `json_deserialize` 解析载荷 → 临时 writer（QoS 按 qos 尾参，缺省 RELIABLE+TRANSIENT_LOCAL）匹配收敛 → write → 存在 RELIABLE 订阅者时 `wait_for_acknowledgments` 确认送达（未全部确认返回错误，全 BEST_EFFORT 或无订阅者退化尽力而为）；requiredSubscribers>0 为期望建匹配订阅端数门槛（matched 达标才发布否则一直等待，0=自动收敛）；repeatIntervalMs>0 进入持续发布模式（首轮校验后按该周期重复 write 尽力而为，经 `yomk::debugPubStop` 无锁置位退出），maxTimes>0 为条数上限（发满排空 200ms 后返回）；持续模式成功返回 StringArray {"total=N","failed=M"}；未发现主题/载荷不合法/送达未确认返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_NODE_INFO(nodeName, stableRounds, intervalMs)` | URL端点：`/YomkRpcDebugService/node_info`<br>简述：查询节点详情<br>详述：打包 `DDSNodeInfo{nodeName, stableRounds, intervalMs}`；独立收敛查询指定节点名参与者的发布/订阅主题清单（归属判定基于 RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"），返回节点名行 + `Subscribers:`/`Publishers:` 两段（每行 `    <主题名>: <类型名>`，类型名原样输出，空段仅打段头，同名多参与者端点合并）；未发现节点名返回错误；须先创建调试节点 |
 | `YOMKRPC_DEBUG_QUIT()` | URL端点：`/YomkRpcDebugService/delete_node`<br>简述：退出调试<br>详述：无参宏（载荷 nullptr）；删除调试节点并销毁其全部 DDS 实体，未创建时返回错误 |
-| `YOMKRPC_BAG_NODE(domainId[, serverLocator])` | URL端点：`/YomkRpcBagService/create_node`<br>简述：创建 bag 节点<br>详述：打包 `DDSBagNode{domainId, serverLocator}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域端点可被发现与录制；serverLocator 可缺省尾参——发现服务器直配聚合串，语义同 `YOMKRPC_NODE` 形态 3（CLIENT 协议强制，非法串创建失败回显，详见 5.7） |
+| `YOMKRPC_BAG_NODE(domainId[, udpDiscoverServerLocator[, tcpDiscoverServerLocator]])` | URL端点：`/YomkRpcBagService/create_node`<br>简述：创建 bag 节点<br>详述：打包 `DDSBagNode{domainId, udpDiscoverServerLocator, tcpDiscoverServerLocator}`；单节点模型（一个进程至多一个，重复创建须先删除）；domainId 合法范围 [0,232]，仅同域端点可被发现与录制；两 serverLocator 可缺省尾参——UDP/TCP 发现服务器直配聚合串，语义同 `YOMKRPC_NODE` 形态 3/4（CLIENT 协议强制，非法串创建失败回显，详见 5.7） |
 | `YOMKRPC_BAG_RECORD(topics, outputDir, maxBagSize, maxBagDurationSec, maxCacheSize)` | URL端点：`/YomkRpcBagService/bag_record`<br>简述：录制主题列表<br>详述：打包 `DDSBagRecord{topics, outputDir, maxBagSize, maxBagDurationSec, maxCacheSize}`；长驻阻塞至 Ctrl+C（SIGINT 经 `yomk::bagRecordStop` 无锁置位）收尾返回。outputDir 指定 bag 目录名/路径（相对/绝对均可，父目录自动多级创建，已存在报错；空串=缺省当前路径下 `bag_<YYYY-MM-DD_HH-MM-SS_mmm>`）；maxBagSize 单分片最大字节数（>0 写满滚动 `bag_N.mcap` 分片，下限 1024 字节过小报错；0=不分片）；maxBagDurationSec 单分片最大时长秒（0=不分片，无下限校验，与 maxBagSize 同用先到先分）；maxCacheSize 写缓存双缓冲字节数（0=每条直写，>0 回调拷贝入队、独立消费线程写盘，缓存满丢弃新消息并按主题计数）。清单项支持通配模式（恰好一个 `*`：前缀 `hello_*` / 后缀 `*_hello` / 中间 `pre\*suf`，单独 `*` 匹配全部；≥2 个 `*` 返回错误），模式项启动校验时按发现缓存展开为实际主题集合（去重升序、与精确项合并），模式未命中或精确主题无任何端点整体返回错误（不建 bag 目录、不产生任何文件）；通过校验后透传订阅（QoS 跟随远端 offered）直写原始 CDR 字节到 mcap（含 bag_0.mcap 与 metadata.json）；暂停控制经 `yomk::bagRecordPause()`/`bagRecordResume()`（等价 CLI 交互键 p/r 与 `--start-paused` 的 SPACE 启动）。须先创建 bag 节点；成功返回 StringArray 包：首行 bag 目录名，其后每主题一行 "topic: N 条 / M 字节" 统计 |
 | `YOMKRPC_BAG_INFO(bagDir)` | URL端点：`/YomkRpcBagService/bag_info`<br>简述：查看 bag 元信息<br>详述：打包 `DDSBagInfo{bagDir}`；读 metadata.json 与目录递归总大小输出多行元信息文本（首行空行）；纯文件读不经 bag 节点（无须 create_node）；成功返回 StringArray（每项一行，首项为空行），路径不存在/无 metadata.json/解析失败返回错误 |
 | `YOMKRPC_BAG_REINDEX(bagDir)` | URL端点：`/YomkRpcBagService/bag_reindex`<br>简述：重建 bag 元信息<br>详述：打包 `DDSBagReindex{bagDir}`；从 mcap 分片（`<前缀>_<编号>.mcap` 编号升序）重建 metadata.json 并无条件覆盖写出（缺失/损坏均可重建）；纯文件操作不经 bag 节点（无须 create_node）；成功返回 eOk（`m_msg == "ok"`，无数据载荷），路径不存在/非目录/无 mcap 分片/读取失败返回错误 |
@@ -373,7 +373,7 @@ XML profile 两种命中形态（三级提取链）：按节点名 `profile_name
 </profiles>
 ```
 
-**发现服务器直连**（`serverLocator` 尾参）——跨网段/多播受限环境用集中式发现服务器（client 角色）：
+**发现服务器直连**（`udpDiscoverServerLocator`/`tcpDiscoverServerLocator` 尾参）——跨网段/多播受限环境用集中式发现服务器（client 角色）：
 
 ```bash
 # server 侧（任一台主机）：fastdds discovery 工具，-i server id、-l 监听地址、-p 监听端口
@@ -381,13 +381,19 @@ fastdds discovery -i 0 -l 127.0.0.1 -p 11811
 ```
 
 ```cpp
-// client 侧：三节点宏尾参直配（"ip[:port]" 分号分隔多 server，port 缺省 11811，非法串创建失败回显）
-YOMKRPC_NODE("ds_node", 0, "127.0.0.1:11811");
+// client 侧：三节点宏尾参直配（UDP/TCP 通道格式一致："ip[:port]" 分号分隔多 server，
+// UDP port 缺省 11811，非法串创建失败回显）
+YOMKRPC_NODE("ds_node", 0, "127.0.0.1:11811");            // 形态 3：仅 UDP 通道
 YOMKRPC_DEBUG_NODE(0, "127.0.0.1:11811");
 YOMKRPC_BAG_NODE(0, "127.0.0.1:11811");
+// 形态 4：UDP+TCP 双通道（TCP port 为 server 的 TCP 监听口；仅 TCP 直配时 UDP 传空串占位）
+YOMKRPC_NODE("ds_dual_node", 0, "127.0.0.1:11811", "127.0.0.1:42100");
+YOMKRPC_NODE("ds_tcp_only_node", 0, "", "10.0.0.2:42100");
 ```
 
 等价环境变量形态（ROS2 生态通用）：`ROS_DISCOVERY_SERVER=127.0.0.1:11811`（id 即 `-i` 指定的 server 位序）。直配后 participant 以 CLIENT 发现协议运行（禁用多播 PDP，发现流量单播直送 server）；可与 `YOMKRPC_LOAD_XML` 组合（XML 打底，直配 server 项覆盖 XML `discoveryServersList`）。
+
+**TCP 通道说明**：内置传输默认集不含 TCPv4——任一 TCP 直配项存在时 participant 自动补注入 TCPv4 传输描述符（与内置 UDPv4/SHM "alongside" 共存，UDP/SHM 数据通道不受影响；XML 提取已注入 TCPv4 描述符时不重复注入）。两通道各自可分号分隔多 server，任一通道 server 在场即完成发现。
 
 **域号说明**：DS 模式下 client 的域 id 与 server 无关——server 不做域校验（Fast DDS 源码 PDPClientListener/PDPServerListener："In Discovery Server we don't impose domain ids to be the same"；跨域丢弃仅存在于简单发现 PDPSimple 的基类校验）。本仓连通性测试实证：A/B 两节点异域（201/202）直配同一 server 后正常收发数据。域隔离语义仅在简单发现（多播）路径生效。
 
@@ -406,7 +412,7 @@ examples 提供一对发现服务器示例：`ExampleDiscoverServerPub`（域 10
 ./examples/build/ExampleDiscoverServerPub
 ```
 
-两示例均可选首参传直配串（如 `./ExampleDiscoverServerPub 192.168.1.10:11811`，格式同 `YOMKRPC_NODE` 尾参），缺省 `127.0.0.1:11811`。运行后发布端每秒打印 `[SEND] hello world N`，订阅端同步打印 `[RECV] hello world N`，数据持续收发，Ctrl+C 优雅退出。
+两示例均可选首参传 UDP 直配串（如 `./ExampleDiscoverServerPub 192.168.1.10:11811`，格式同 `YOMKRPC_NODE` 形态 3 尾参），缺省 `127.0.0.1:11811`；TCP 通道直配用 `YOMKRPC_NODE` 形态 4（见 5.7 TCP 通道说明）。运行后发布端每秒打印 `[SEND] hello world N`，订阅端同步打印 `[RECV] hello world N`，数据持续收发，Ctrl+C 优雅退出。
 
 ## 6 YomkRpc 调试
 

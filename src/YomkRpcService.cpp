@@ -130,11 +130,12 @@ YomkResponse YomkRpcService::createNode(YomkPkgPtr pkg)
     }
 
     auto node = std::make_unique<FastDDSNode>();
-    // XML 配置通道 + serverLocator 直配（闭环 4）：spec 组装——xmlCache_ 空串=未加载，提取链
-    // 跳过回退现状；serverLocator 空串=不直配现状。非法 serverSpec 经 err 回显具体非法项
+    // XML 配置通道 + 发现服务器直配（闭环 4）：spec 组装——xmlCache_ 空串=未加载，提取链
+    // 跳过回退现状；双直配串空串=不直配现状。非法 serverSpec 经 err 回显具体非法项
     yomkrpc_xml::ParticipantQosSpec spec;
     spec.xml = xmlCache_;
-    spec.serverSpec = p->msg.serverLocator;
+    spec.udpServerSpec = p->msg.udpDiscoverServerLocator;
+    spec.tcpServerSpec = p->msg.tcpDiscoverServerLocator;
     std::string nodeErr;
     if (!node->setDomainId(p->msg.domainId, p->msg.nodeName, spec, &nodeErr))
     {

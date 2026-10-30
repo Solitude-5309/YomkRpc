@@ -8,6 +8,7 @@
 
 #include <fastdds/rtps/attributes/RTPSParticipantAttributes.hpp>
 #include <fastdds/rtps/common/Locator.hpp>
+#include <fastdds/rtps/transport/TCPv4TransportDescriptor.hpp>  // TCP 直配项的 participant 侧传输注入
 #include <fastdds/utils/IPLocator.hpp>
 
 #include <cstdint>
@@ -21,11 +22,12 @@ namespace yomkrpc_xml
 {
 
 // participant 级配置来源：服务层从 YomkRpcService::xmlCache()（已成功加载的 XML raw 串）与
-// 负载 serverLocator 聚合串组装后传入 setDomainId；两字段均可为空（=现状行为，零改动兼容）。
+// 负载发现服务器直配聚合串组装后传入 setDomainId；各字段均可为空（=现状行为，零改动兼容）。
 struct ParticipantQosSpec
 {
-    std::string xml;         // 已成功 load 的 XML profiles raw 串；空=未加载，跳过提取
-    std::string serverSpec;  // 发现服务器直配聚合串 "ip[:port];ip[:port]"；空=不直配
+    std::string xml;            // 已成功 load 的 XML profiles raw 串；空=未加载，跳过提取
+    std::string udpServerSpec;  // UDP 发现服务器直配聚合串 "ip[:port];ip[:port]"；空=不直配
+    std::string tcpServerSpec;  // TCP 发现服务器直配聚合串（格式同上，port 为 TCP 监听口）；空=不直配
 };
 
 // serverLocator port 合法上界（UDP 端口上限）
@@ -86,26 +88,64 @@ inline bool parseServerLocator(const std::string& spec,
 
 // 发现服务器直配叠加：CLIENT 协议 + m_DiscoveryServers 重建（覆盖 XML discoveryServersList，
 // 双通道合并语义：直配 > XML 提取打底 > 默认）。3.6.1 client 连接 server 只需 ip:port +
-// CLIENT 协议（server 响应自报 GUID）；serverSpec 非法时 err 回填返回 false（不改动 qos）。
+// CLIENT 协议（server 响应自报 GUID）。UDP/TCP 两聚合串分别解析：UDP 项填默认 UDPv4 locator，
+// TCP 项填 TCPv4 locator——participant 必须具备 TCPv4 传输才可达，builtin 默认集不含 TCP，
+// 故补注入 TCPv4TransportDescriptor（3.6 transport().user_transports 与 builtin "alongside"
+// 共存，UDP/SHM 数据通道不受影响；XML 提取已注入 TCPv4 描述符时跳过防重复）。任一 spec 非法时 err 回填
+// 返回 false（不改动 qos）；双空串=不直配（幂等返回 true）。
 inline bool applyDiscoveryServers(eprosima::fastdds::dds::DomainParticipantQos& qos,
-        const std::string& serverSpec, std::string& err)
+        const std::string& udpServerSpec, const std::string& tcpServerSpec, std::string& err)
 {
-    std::vector<DDSServerInfo> servers;
-    if (!parseServerLocator(serverSpec, servers, err))
+    std::vector<DDSServerInfo> udpServers;
+    std::vector<DDSServerInfo> tcpServers;
+    // 空 spec = 该通道不直配（跳过解析，非错误）；parseServerLocator 本身视空 spec 为非法
+    if ((!udpServerSpec.empty() && !parseServerLocator(udpServerSpec, udpServers, err)) ||
+        (!tcpServerSpec.empty() && !parseServerLocator(tcpServerSpec, tcpServers, err)))
     {
         return false;
+    }
+    if (udpServers.empty() && tcpServers.empty())
+    {
+        return true;
     }
     using eprosima::fastdds::rtps::DiscoveryProtocol;
     using eprosima::fastdds::rtps::IPLocator;
     using eprosima::fastdds::rtps::Locator;
+    using eprosima::fastdds::rtps::TCPv4TransportDescriptor;
     qos.wire_protocol().builtin.discovery_config.discoveryProtocol = DiscoveryProtocol::CLIENT;
-    qos.wire_protocol().builtin.discovery_config.m_DiscoveryServers.clear();
-    for (const auto& server : servers)
+    auto& servers = qos.wire_protocol().builtin.discovery_config.m_DiscoveryServers;
+    servers.clear();
+    for (const auto& server : udpServers)
     {
         Locator locator;  // 默认 kind=LOCATOR_KIND_UDPv4
         IPLocator::setIPv4(locator, server.address);
         locator.port = server.port;
-        qos.wire_protocol().builtin.discovery_config.m_DiscoveryServers.push_back(locator);
+        servers.push_back(locator);
+    }
+    for (const auto& server : tcpServers)
+    {
+        Locator locator;
+        locator.kind = LOCATOR_KIND_TCPv4;  // kind 是 Locator 公有成员，IPLocator 无 setKind
+        IPLocator::setIPv4(locator, server.address);
+        locator.port = server.port;
+        servers.push_back(locator);
+    }
+    if (!tcpServers.empty())
+    {
+        bool hasTcpTransport = false;
+        for (const auto& transport : qos.transport().user_transports)
+        {
+            // 描述符基类无 kind() 元数据，用 dynamic_pointer_cast 识别 TCPv4 描述符（含派生）
+            if (std::dynamic_pointer_cast<TCPv4TransportDescriptor>(transport))
+            {
+                hasTcpTransport = true;
+                break;
+            }
+        }
+        if (!hasTcpTransport)
+        {
+            qos.transport().user_transports.push_back(std::make_shared<TCPv4TransportDescriptor>());
+        }
     }
     return true;
 }
