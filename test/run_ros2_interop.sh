@@ -17,7 +17,8 @@
 #
 # 两项判定（以数据到达为准；两侧收发消息流逐条一行展示再判 PASS/FAIL）：
 #   方向 1：TestRos2InteropPub（set_name 新名 + 1Hz 发 30 条 "hello ros2 N" 后自退）→ ros2 topic echo（6s 窗口）收到多条
-#   方向 2：ros2 topic pub 三路各 -r 1 发 "hello yomkrpc N"（N=1..3，VOLATILE 不回放故 Sub 先行匹配）→ TestRos2InteropSub 收满 3 条 [RECV] 即退
+#   方向 2：ros2 topic pub 三路各 -r 1 发 "hello yomkrpc N"（N=1..3，VOLATILE 不回放
+#   故 Sub 先行匹配）→ TestRos2InteropSub 收满 3 条 [RECV] 即退
 #
 # 退出码：0 = 两项全过；1 = 某方向失败；2 = 参数错误/ROS2 环境不可用
 # =============================================================================

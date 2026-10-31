@@ -1,20 +1,9 @@
 /**
  * @file ExampleRos2InteropSub.cpp
- * @brief 闭环 6：set_name 类型名直改与 ROS2 互通的订阅端示例（run_ros2_interop.sh
- *        方向 2/3：YomkRpc↔YomkRpc 同主题互通与 ROS2→YomkRpc）
- *
- * 机制（README 5.6 同源）：MStringPubSubType 构造后、移交服务端前 set_name 成 ROS2
- * 约定名（std_msgs::msg::dds_::String_），链路内 register_type 以新名注册，ROS2 侧
- * 同名匹配即通（Humble 无 XTypes 类型匹配，退化为 type_name 字符串比较）。
- *
- * 行为：域 0 创建节点 + set_name 新名订阅 rt/chatter_interop（ros2DefaultSubscriber
- * 底座，BEST_EFFORT requested 对任意 offered——含 ros2 topic pub 与 YomkRpc pub 的
- * RELIABLE——均可匹配），逐条打印 "[RECV] ..." 持续监听，Ctrl+C/SIGTERM 优雅退出
- * （退出时打印总收条数）。
- *
- * 话题名口径（互通三要素之一，逐字节一致）：rmw_fastrtps 对 ROS2 语义话题名加
- *   "rt/" 前缀生成实际 DDS 话题名（ros2 topic pub /chatter_interop 的 DDS 名为
- *   rt/chatter_interop），YomkRpc 端直接用 rt/ 形态注册——无前缀名与 ROS2 端永不匹配。
+ * @brief ROS2 互通订阅端示例（run_ros2_interop.sh 方向 2/3）：set_name 直改类型名为 ROS2
+ *       约定名 std_msgs::msg::dds_::String_ + "rt/" 话题前缀 + ros2DefaultSubscriber 底座，
+ *       逐条打印直至 Ctrl+C/SIGTERM（退出打印总收条数）；机制详见
+ *       docs/manual/ros2-interop-tutorial.md。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>

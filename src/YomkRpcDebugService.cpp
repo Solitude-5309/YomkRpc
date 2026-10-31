@@ -9,7 +9,8 @@
 #include "YomkRpcDebugService.h"
 
 #include "FastDDSDebugNode.h"
-#include "FastDDSXmlHelper.h"  // yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSDebugNode.h 传递亦可得）
+// 引 yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSDebugNode.h 传递亦可得）
+#include "FastDDSXmlHelper.h"
 
 #include <set>
 #include <utility>

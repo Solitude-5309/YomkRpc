@@ -25,7 +25,9 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcService.h" // 服务 + DDSQosProfile + DDSTopic/DDSSubRequest/DDSPublish + String + YOMK_* 宏
+// 引服务头：YomkRpcService + DDSQosProfile + DDSTopic/DDSSubRequest/DDSPublish +
+// String + YOMK_* 宏
+#include "YomkRpcService.h"
 #include "YomkRpcDebugService.h" // YomkRpcDebugService + DDSDebugNode/DDSDebugInfo（QoS-B4 读回链路）
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MString / MInt32 数据类
@@ -247,7 +249,8 @@ namespace
         }
         CHECK(pubOk == N, "MC8 publish ecb_topic 5 条 → 全部 eOk（数据到达空回调 sub）");
 
-        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待投递触发 on_data_available（callback_ 空跳过）
+        // 等待投递触发 on_data_available（callback_ 空跳过）
+        std::this_thread::sleep_for(std::chrono::seconds(1));
 
         CHECK(svc->invoke("/delete_node", YomkMkPtr(String, "ecb_node")).m_status == YomkResponse::eOk,
               "删除 ecb_node → eOk（空回调路径无崩溃/UAF，析构 reader 停止回调）");

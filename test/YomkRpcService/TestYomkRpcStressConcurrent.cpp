@@ -40,7 +40,9 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcService.h" // 服务 + DDSNode/DDSTopic/DDSSubRequest/DDSPublish/DDSLoan/DDSLoanResult + String + YOMK_* 宏
+// 引服务头：YomkRpcService + DDSNode/DDSTopic/DDSSubRequest/DDSPublish/DDSLoan/
+// DDSLoanResult/String + YOMK_* 宏
+#include "YomkRpcService.h"
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MInt32
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MInt32PubSubType
@@ -76,7 +78,7 @@ namespace
         return YomkMkPtr(DDSNode, DDSNode{nodeName, domainId});
     }
 
-    // ============================ 资源采样器（Linux /proc，零第三方依赖；与 serial exe 各自独立）============================
+    // 资源采样器（Linux /proc，零第三方依赖；与 serial exe 各自独立）
     struct ResSnapshot
     {
         long rssKB = -1;
@@ -281,7 +283,8 @@ namespace
         // 单线程单轮 churn：create → register pub+sub → loan/publish/discard 数次 → delete（自名 node）
         auto churnThread = [&](int t, int cycles)
         {
-            const std::string name = "c2_node_" + std::to_string(t); // 各线程自名 node，并发创建/销毁独立 participant
+            // 各线程自名 node，并发创建/销毁独立 participant
+            const std::string name = "c2_node_" + std::to_string(t);
             for (int c = 0; c < cycles; ++c)
             {
                 if (svc->invoke("/create_node", mkNode(TEST_DOMAIN, name)).m_status == YomkResponse::eOk)
@@ -405,7 +408,8 @@ namespace
         std::atomic<long> received{0}, invalid{0};
         auto cb = [&](const void *d)
         {
-            // 通用 take()：reader 线程 take()+return_loan 借出交付；MInt32 alignof≤4，base+4 仍 4 字节对齐，可安全 deref
+            // 通用 take()：reader 线程 take()+return_loan 借出交付；MInt32 alignof≤4，
+            // base+4 仍 4 字节对齐，可安全 deref
             auto *m = static_cast<const YomkRpc::MInt32 *>(d);
             const int32_t v = m->data();
             const long tid = v / 1000000;

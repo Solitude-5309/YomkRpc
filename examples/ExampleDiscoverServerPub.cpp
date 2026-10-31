@@ -1,3 +1,9 @@
+/**
+ * @file ExampleDiscoverServerPub.cpp
+ * @brief 发现服务器直配发布端示例：ds_pub_node 发布 ds_hello_world（MString，1Hz），
+ *       配合 LaunchDiscoverServer.sh 与发现服务器环境变量实现多播受限场景互通；
+ *       步骤详见 docs/manual/discovery-server-tutorial.md。
+ */
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 

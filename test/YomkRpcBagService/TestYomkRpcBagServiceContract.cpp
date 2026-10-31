@@ -31,7 +31,8 @@
  *      直透节点层（无锁外校验，清单对账在服务端预扫完成）。
  * DDS-free 保证：T5 的越界校验在锁外返回；T6 的 topics 校验在锁外、node_ 空检查在触达节点层前返回；
  *   T10 的空目录校验在锁外、node_ 空检查在文件触达前返回；
- *   T7/T8/T9 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
+ *   T7/T8/T9 为纯文件读/写（静态函数直调，不触 node_ 与 DDS）；/version 不碰 DDS；
+ *   本测试绝不传合法 DDSBagNode{0..232}（那会创建真实 participant）。
  *
  * 风格：纯 main() + CHECK 宏 + 失败计数（零第三方依赖），返回非 0 表示存在失败用例。
  */

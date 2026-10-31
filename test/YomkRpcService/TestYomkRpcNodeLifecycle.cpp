@@ -45,9 +45,11 @@
 #include "TestCheck.h"
 #include "YomkRpcService.h" // 服务/DDSNode/String/YOMK_* 宏
 #include "FastDDSNode.h"    // Part B 直接单元测试 setDomainId
-#include "YomkRpcDebugService.h" // C-2d：DDSDebugNode 无参全缺省聚合初始化 env 读回（闭环 2）
-#include "YomkRpcBagService.h"   // C-2d：DDSBagNode 无参全缺省聚合初始化 env 读回（闭环 2）
-#include "FastDDSXmlHelper.h" // Part C-E 白盒：yomkrpc_xml 三件套（parseServerLocator/applyDiscoveryServers/participantQosFromXml）
+#include "YomkRpcDebugService.h" // C-2d：DDSDebugNode 无参全缺省聚合初始化 env 读回
+#include "YomkRpcBagService.h"   // C-2d：DDSBagNode 无参全缺省聚合初始化 env 读回
+// Part C-E 白盒：yomkrpc_xml 三件套（parseServerLocator/applyDiscoveryServers/
+// participantQosFromXml）
+#include "FastDDSXmlHelper.h"
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // Part F 收发类型
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType
@@ -152,7 +154,8 @@ namespace
             // node 栈对象在此离开作用域析构，清理 participant（DomainParticipantFactory 仍存活）
 
             // O1 后服务层已短路非法域，setDomainId 的 participant==null 分支（create_participant 返回 null）改由此直接覆盖：
-            // UINT32_MAX→(int32_t)-1 非法域，create_participant 返回 null，participant_ 保持 null、析构早退，不建 participant
+            // UINT32_MAX→(int32_t)-1 非法域，create_participant 返回 null，
+            // participant_ 保持 null、析构早退，不建 participant
             FastDDSNode badNode;
             CHECK(!badNode.setDomainId(UINT32_MAX, "test-lifecycle-bad"),
                   "Part B: setDomainId(UINT32_MAX) → false（非法域 create_participant 返回 null，覆盖 participant==null 分支）");
@@ -350,15 +353,15 @@ namespace
                           qosMulti.transport().user_transports[0]) != nullptr,
                   "Part C: 多 TCP server → TCPv4 描述符仍只注入一个");
 
-            // C-2d 环境变量直配 helper 白盒（闭环 1）：开关门控 + 大小写/1 兼容 + server 串
+            // C-2d 环境变量直配 helper 白盒：开关门控 + 大小写/1 兼容 + server 串
             // 原样透传（解析校验在节点层）+ DDSNode 缺省尾参聚合初始化器读回。
             // setenv/unsetenv 直接驱动，收尾全清避免 env 残留影响后续 Part
             {
-                // 三变量全未设置 → 开关 false、双 server 串恒空（=不直配，现状行为）
+                // 三变量全未设置 → 开关 false、双 server 串恒空（=不直配）
                 unsetenv("YOMKRPC_USE_DISCOVER_SERVER");
                 unsetenv("YOMKRPC_UDP_DISCOVER_SERVERS");
                 unsetenv("YOMKRPC_TCP_DISCOVER_SERVERS");
-                unsetenv("YOMKRPC_DDS_DOMAIN_ID");  // 闭环 2：域号一并隔离（收尾同清）
+                unsetenv("YOMKRPC_DDS_DOMAIN_ID");  // 域号一并隔离（收尾同清）
                 CHECK(!YomkRpcUseDiscoverServer() && YomkRpcDefaultUdpDiscoverServers().empty() &&
                           YomkRpcDefaultTcpDiscoverServers().empty(),
                       "Part C: 三 env 全未设置 → 开关 false + 双 server 串空（不直配=现状行为）");

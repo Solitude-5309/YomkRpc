@@ -1,3 +1,9 @@
+/**
+ * @file ExampleDiscoverServerSub.cpp
+ * @brief 发现服务器直配订阅端示例：ds_sub_node 订阅 ds_hello_world（MString，回调打印），
+ *       配合 LaunchDiscoverServer.sh 与发现服务器环境变量实现多播受限场景互通；
+ *       步骤详见 docs/manual/discovery-server-tutorial.md。
+ */
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 

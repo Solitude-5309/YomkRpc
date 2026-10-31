@@ -5,7 +5,9 @@
 // FastDDSBagNode 提供（类型无关：透传原始 CDR 字节直写 mcap，schema_id=0 无 schema 通道，
 // 零消息类型依赖）；回放能力同节点（读 mcap 分片重建透传 writer，按录制时间轴发布）。
 #include <YomkServer/YomkAPI.h>
-#include "YomkRpcService.h" // DDSBagNode 三字段缺省初始化器 env helper（YomkRpcDefaultDomainId 等；平铺引号三环境命中：安装树同目录/测试树平铺/主库平铺）
+// 引 DDSBagNode 三字段缺省初始化器 env helper（YomkRpcDefaultDomainId 等）；平铺引号
+// 三环境命中：安装树同目录/测试树平铺/主库平铺
+#include "YomkRpcService.h"
 
 #include <atomic>
 #include <memory>
@@ -135,7 +137,7 @@ struct DDSBagNode
     // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_BAG_NODE 无参形态）经类内缺省初始化器读
     // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0），语义同 DDSNode。
     uint32_t domainId = YomkRpcDefaultDomainId();
-    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配（现状行为）；格式 "ip[:port]"，
+    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配；格式 "ip[:port]"，
     // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
     // 缺省（YOMKRPC_BAG_NODE 省略该尾参）经类内缺省初始化器读环境变量：总开关
@@ -153,7 +155,7 @@ struct DDSBagRecord
     std::vector<std::string> topics;  // 待录制主题清单（至少 1 个，清单内重复/空名拒绝）
     std::string outputDir;            // bag 目录名/路径（相对/绝对均可，父目录自动创建，
                                       // 已存在报错）；空 = 缺省时间戳名 bag_<YYYY-MM-DD_HH-MM-SS_mmm>
-    uint64_t maxBagSize = 0;          // 单分片最大字节数；0=不分片（尾部缺省字段，旧调用方零改动）
+    uint64_t maxBagSize = 0;          // 单分片最大字节数；0=不分片（尾部缺省字段）
     uint64_t maxBagDurationSec = 0;   // 单分片最大时长秒；0=不分片（尾部缺省字段，同用先到先分）
     uint64_t maxCacheSize = 0;        // 写缓存双缓冲字节数；0=直写（尾部缺省字段，CLI 默认传 100MiB）
 };
@@ -189,30 +191,29 @@ struct DDSBagPlay
 {
     std::string bagDir;  // bag 目录名/路径（相对/绝对均可，须含 metadata.json）
     double playbackRate = 1.0;  // 回放速率倍率（>0；2.0 两倍速，0.5 半倍速，对齐 ros2 --rate；
-                                // 尾部缺省字段，旧调用方零改动）
+                                // 尾部缺省字段）
     std::vector<std::string> topics;  // 只回放清单内主题（空=全部，对齐 ros2 --topics 缺省；
                                       // 精确项须在 bag 清单否则报错；元素含一个 '*' 为通配，
                                       // 按 bag 内主题清单匹配展开，对齐 convert topics 语义）
     bool loop = false;  // 循环回放（对齐 ros2 -l/--loop：到尾即回开头无限播放，Ctrl+C 终止；
-                        // 尾部缺省字段，旧调用方零改动）
+                        // 尾部缺省字段）
     double startOffset = 0.0;  // 起始偏移秒（对齐 ros2 --start-offset：从 bag 开始第 SEC 秒
-                               // 起播，读侧跳过前段消息不入队不计收尾统计；负值非法；尾部
-                               // 缺省字段，旧调用方零改动）
+                               // 起播，读侧跳过前段消息不入队不计收尾统计；负值非法；
+                               // 尾部缺省字段）
     double delay = 0.0;  // 开播延迟秒（对齐 ros2 -d/--delay "Will delay at the beginning of
                          // each loop"：每次开播含每轮回卷前先睡 SEC 秒等订阅端匹配就绪；
-                         // 负值非法；尾部缺省字段，旧调用方零改动）
+                         // 负值非法；尾部缺省字段）
     int64_t waitForAllAckedMs = -1;  // 退出前等全部 RELIABLE 订阅端确认收齐毫秒（对齐 ros2
-                                     // --wait-for-all-acked MS：-1 不等待缺省恒等现行为，0 永等，
-                                     // >0 超时毫秒逐主题各计；尾部缺省字段，旧调用方零改动）
+                                     // --wait-for-all-acked MS：-1 不等待（缺省），0 永等，
+                                     // >0 超时毫秒逐主题各计；尾部缺省字段）
     std::vector<std::string> topicRemaps;  // 主题重映射规则（"old:=new" 原始串，对齐 ros2
                                            // --remap old:=new ...：发布主题名精确映射，QoS/类型
-                                           // 按 bag 快照照旧，--topics 过滤按原名；尾部缺省字段，
-                                           // 旧调用方零改动）
+                                           // 按 bag 快照照旧，--topics 过滤按原名；尾部缺省字段）
     size_t readAheadQueueSize = kBagPlayReadAheadQueueSize;  // 预读内存队列深度（尾部缺省
-                                           // 字段，旧调用方零改动；深度语义见常量注释）
+                                           // 字段；深度语义见常量注释）
     std::string qosOverridesPath;  // QoS 覆盖文件路径（JSON，键=bag 原主题名，值={reliability,
                                    // durability} 枚举名可独立给——文件命中>快照>回退三档优先
-                                   // 级；空=缺省不加载恒等现行为；尾部缺省字段，旧调用方零改动）
+                                   // 级；空=缺省不加载；尾部缺省字段）
 };
 
 // clang-format off

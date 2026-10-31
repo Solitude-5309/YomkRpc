@@ -1,3 +1,9 @@
+/**
+ * @file ExampleYomkRpcSub.cpp
+ * @brief 最小订阅端示例：sub_node 注册订阅主题 hello_world（MString），回调逐条打印直至
+ *       Ctrl+C 退出（退出前 DEL_NODE 清理）；与 ExampleYomkRpcPub 或 yomkrpc topic pub
+ *       配对验证。
+ */
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 

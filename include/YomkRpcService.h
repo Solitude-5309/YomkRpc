@@ -199,12 +199,14 @@ struct DDSQosProfile
     int64_t livelinessLeaseNs = -1;  // liveliness 租约纳秒
 
     // ROS2 底座工厂（8 项全非哨兵 = 等价整包替换为 ROS2 底座）。分端点裁定依据
-    // requested≤offered 匹配方向：publisher RELIABLE offered 对任意 ROS2 侧 requested
-    // 可匹配；subscriber BEST_EFFORT requested 对任意 offered 可匹配（RELIABLE 版
-    // 订阅 BEST_EFFORT 话题不匹配收不到）。
-    static DDSQosProfile ros2DefaultPublisher();   // KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3
-    static DDSQosProfile ros2DefaultSubscriber();  // KEEP_LAST(10)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3
-    static DDSQosProfile ros2SensorData();         // KEEP_LAST(5)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3（两端通用）
+    // requested≤offered 匹配方向：
+    // publisher=KEEP_LAST(10)+RELIABLE+VOLATILE+AUTOMATIC+∞×3（offered 对任意 ROS2 侧
+    // requested 可匹配）；subscriber=KEEP_LAST(10)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3
+    // （requested 对任意 offered 可匹配，RELIABLE 版订阅 BEST_EFFORT 话题收不到）；
+    // sensorData=KEEP_LAST(5)+BEST_EFFORT+VOLATILE+AUTOMATIC+∞×3（两端通用）。
+    static DDSQosProfile ros2DefaultPublisher();
+    static DDSQosProfile ros2DefaultSubscriber();
+    static DDSQosProfile ros2SensorData();
 };
 
 // fastdds discovery 默认监听端口（server 侧 -p 缺省值；serverLocator 串缺省 port 同源）
@@ -226,7 +228,7 @@ struct DDSNode
     // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_NODE 单参形态）经类内缺省初始化器读
     // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0）。
     uint32_t domainId = YomkRpcDefaultDomainId();
-    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配（现状行为）；格式 "ip[:port]"，
+    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配；格式 "ip[:port]"，
     // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
     // 缺省（YOMKRPC_NODE 省略该尾参）经类内缺省初始化器读环境变量：总开关
@@ -244,7 +246,7 @@ struct DDSXmlLoad
 {
     // Fast DDS XML profiles 文件路径（相对/绝对均可）。缺省（YOMKRPC_LOAD_XML 无参形态）
     // 经类内缺省初始化器读环境变量：总开关 YOMKRPC_USE_XML_PROFILE=true 时取
-    // YOMKRPC_XML_PROFILE_PATH，否则空串（服务端报 "xml path is empty"）；显式传参完全兼容。
+    // YOMKRPC_XML_PROFILE_PATH，否则空串（服务端报 "xml path is empty"）。
     std::string xmlPath = YomkRpcDefaultXmlProfilePath();
 };
 
@@ -254,7 +256,7 @@ struct DDSTopic
     std::string nodeName;
     std::string topicName;
     void* type;  // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
-    // 端点 QoS 描述（缺省全哨兵=Fast DDS 默认底座，与既有三参聚合初始化调用兼容）
+    // 端点 QoS 描述（缺省全哨兵=Fast DDS 默认底座；尾部缺省字段）
     DDSQosProfile qos;
 };
 
@@ -265,7 +267,7 @@ struct DDSSubRequest
     std::string topicName;
     void* type;  // TopicDataType*；所有权移交服务端：无论成功或失败，调用后 caller 不再持有/释放
     DDSCallbackFunc callback;  // 收到消息时回调
-    // 端点 QoS 描述（缺省全哨兵=Fast DDS 默认底座，与既有四参聚合初始化调用兼容）
+    // 端点 QoS 描述（缺省全哨兵=Fast DDS 默认底座；尾部缺省字段）
     DDSQosProfile qos;
 };
 

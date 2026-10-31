@@ -22,7 +22,7 @@ namespace yomkrpc_xml
 {
 
 // participant 级配置来源：服务层从 YomkRpcService::xmlCache()（已成功加载的 XML raw 串）与
-// 负载发现服务器直配聚合串组装后传入 setDomainId；各字段均可为空（=现状行为，零改动兼容）。
+// 负载发现服务器直配聚合串组装后传入 setDomainId；各字段均可为空（空=跳过该项配置）。
 struct ParticipantQosSpec
 {
     std::string xml;            // 已成功 load 的 XML profiles raw 串；空=未加载，跳过提取
@@ -153,9 +153,9 @@ inline bool applyDiscoveryServers(eprosima::fastdds::dds::DomainParticipantQos& 
 // participant 三级提取链（qos 入参须已置 PARTICIPANT_QOS_DEFAULT）：
 // ①按节点名 profile（profile_name 逐字全等无通配，配套约定 profile 名 = YomkRpc 节点名）
 // → ②默认档（is_default_profile=true 兜底，factory 单值槽位语义，建议至多一个默认档）
-// → ③两级全落空保持 DEFAULT 底座（回退现状，非错误）。节点名下沉由调用点既有逻辑在
+// → ③两级全落空保持 DEFAULT 底座（非错误）。节点名下沉由调用点既有逻辑在
 // 提取后执行（XML 提取会整体填充 qos 含 name，节点名必须最终覆盖，不可被 XML 顶掉；
-// xml 为空=未加载现状直接返回）。Debug/Bag 节点无用户名：按名 profile 无意义且 Fast DDS
+// xml 为空=未加载直接返回）。Debug/Bag 节点无用户名：按名 profile 无意义且 Fast DDS
 // 对空 profile 名固定打错误日志后拒绝（必然失败），空名直接跳过第①级仅默认档兜底。
 inline void participantQosFromXml(eprosima::fastdds::dds::DomainParticipantQos& qos,
         const std::string& nodeName, const std::string& xml)

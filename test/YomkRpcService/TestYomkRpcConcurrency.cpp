@@ -40,7 +40,9 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcService.h" // 服务 + DDSNode/DDSTopic/DDSSubRequest/DDSPublish/DDSLoan/DDSLoanResult + String + YOMK_* 宏
+// 引服务头：YomkRpcService + DDSNode/DDSTopic/DDSSubRequest/DDSPublish/DDSLoan/
+// DDSLoanResult/String + YOMK_* 宏
+#include "YomkRpcService.h"
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MInt32
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MInt32PubSubType
@@ -235,7 +237,8 @@ namespace
         std::vector<int32_t> got; // 收集所有收到值，供事后解码校验
         auto cb = [&](const void *d)
         {
-            // 通用 take()：reader 线程 take()+return_loan 借出交付；MInt32 alignof≤4，base+4 仍 4 字节对齐，可安全 deref
+            // 通用 take()：reader 线程 take()+return_loan 借出交付；MInt32 alignof≤4，
+            // base+4 仍 4 字节对齐，可安全 deref
             auto *m = static_cast<const YomkRpc::MInt32 *>(d);
             const int32_t v = m->data();
             std::lock_guard<std::mutex> lk(mtx);
@@ -376,7 +379,8 @@ namespace
         }
         CHECK(receivedSnapshot > 0, "C 回调在 teardown 前确有触发（竞态窗口被实际命中，非空跑）");
         std::cout << "[OBSERVE] C totalReceived=" << receivedSnapshot << " over " << R << " rounds" << std::endl;
-        // asan：无 UAF（reader 未在 delete_data 后触碰 data_）；tsan：无 race（delete_datareader drain 建立 happens-before）
+        // asan：无 UAF（reader 未在 delete_data 后触碰 data_）；tsan：无 race
+        //（delete_datareader drain 建立 happens-before）
     }
 } // namespace
 

@@ -9,7 +9,9 @@
 #include "YomkRpcService.h"
 
 #include "FastDDSNode.h"
-#include "FastDDSXmlHelper.h"  // yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSNode.h 传递亦可得，显式引入对齐 IWYU）
+// 引 yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSNode.h 传递亦可得，
+// 显式引入对齐 IWYU）
+#include "FastDDSXmlHelper.h"
 
 #include <fstream>
 #include <sstream>

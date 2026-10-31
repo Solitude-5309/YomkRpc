@@ -1,22 +1,9 @@
 /**
  * @file ExampleRos2InteropPub.cpp
- * @brief 闭环 6：set_name 类型名直改与 ROS2 互通的发布端示例（run_ros2_interop.sh 方向 1）
- *
- * 机制（README 5.6 同源）：MStringPubSubType 构造后、移交服务端前 set_name 成 ROS2
- * 约定名（std_msgs::msg::dds_::String_），链路内 register_type 以新名注册、发现数据
- * type_name 即新名，ROS2 侧同名匹配即通（Humble 无 XTypes 类型匹配，退化为 type_name
- * 字符串比较）。CDR 布局前提成立：MString 与 std_msgs/msg/String 同为单 string 字段。
- *
- * 行为：域 0 创建节点 + set_name 新名注册 rt/chatter_interop（ros2DefaultPublisher
- * 底座，RELIABLE offered 对 ros2 topic echo 任意 requested 可匹配），1Hz 持续发布
- * 直至 Ctrl+C/SIGTERM（g_stop 置位后清理退出）。
- *
- * 话题名口径（互通三要素之一，逐字节一致）：rmw_fastrtps 对 ROS2 语义话题名加
- *   "rt/" 前缀生成实际 DDS 话题名（ros2 topic echo /chatter_interop 的 DDS 名为
- *   rt/chatter_interop），YomkRpc 端直接用 rt/ 形态注册——无前缀名与 ROS2 端永不匹配。
- *
- * ROS2 侧验证（test/run_ros2_interop.sh 方向 1）：
- *   ros2 topic echo /chatter_interop std_msgs/msg/String --once
+ * @brief ROS2 互通发布端示例（run_ros2_interop.sh 方向 1，ros2 topic echo 验收）：set_name
+ *       直改类型名为 ROS2 约定名 std_msgs::msg::dds_::String_ + "rt/" 话题前缀 +
+ *       ros2DefaultPublisher 底座 1Hz 发布；机制与互通三要素详见
+ *       docs/manual/ros2-interop-tutorial.md。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>

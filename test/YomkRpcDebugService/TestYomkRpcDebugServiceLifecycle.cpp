@@ -35,9 +35,10 @@
 
 #include "TestCheck.h"
 #include "YomkRpcDebugService.h" // 服务/DDSDebugNode/DDSDebugTopic/DDSDebugInfo/YOMK_* 宏
-#include "FastDDSDebugNode.h"    // qos 下传用例的直连 observer（发现 QoS 行读回，闭环 2）
+#include "FastDDSDebugNode.h"    // qos 下传用例的直连 observer（发现 QoS 行读回）
 
-#include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MStringPubSubType（仅 topic_info/node_info 命中用例的最小远端发布端）
+// 引 MStringPubSubType（仅 topic_info/node_info 命中用例的最小远端发布端）
+#include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp>
 
 #include <fastdds/dds/domain/DomainParticipant.hpp>        // 直连 FastDDS API 搭建远端发布端/订阅端（命中用例）
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp> // participant 创建/删除

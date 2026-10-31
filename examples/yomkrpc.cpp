@@ -1,164 +1,20 @@
 /**
  * @file yomkrpc.cpp
  * @brief yomkrpc 命令行工具：观察任意 DDS 主题（持续打印消息）、列出域内主题或节点、
- *       查询单个主题或单个节点的详情
+ *       查询单个主题或单个节点的详情；bag 录制/信息/重建/转换/回放
  *
- * 用法：
- *   yomkrpc topic print <topic-name>
- *   yomkrpc topic list [-t | --types]
- *   yomkrpc topic info [-v | --verbose] <topic-name>
- *   yomkrpc topic type <topic-name>
- *   yomkrpc topic find <type-name>
- *   yomkrpc topic hz [--window N] <topic-name>
- *   yomkrpc interface show <type-name>
- *   yomkrpc interface list
- *   yomkrpc topic pub -e | --example <topic-name>
- *   yomkrpc topic pub -ef | --example-file
- *           [-o <dir> | --output <dir>] <topic-name>
- *   yomkrpc node list
- *   yomkrpc node info <node-name>
- *   yomkrpc bag record [-o <dir> | --output <dir>] [-b <bytes> | --max-bag-size <bytes>]
- *           [-d <sec> | --max-bag-duration <sec>] [-c <bytes> | --max-cache-size <bytes>]
- *           [--start-paused] <topic-name|pattern> [<topic-name|pattern> ...]
- *           交互键（tty 下生效）：SPACE 从暂停态开始录制，p 暂停，r 继续，Ctrl+C 停止
- *   yomkrpc bag info <bag-path>
- *   yomkrpc bag reindex <bag-path>
- *   yomkrpc bag convert -i <bag-dir> [-i <bag-dir> ...] -o <cfg.json> | --output <cfg.json>
- *   yomkrpc bag play [-r <rate> | --rate <rate>] [--topics T1 T2 ...] [--start-paused]
- *           [-l | --loop] [--start-offset SEC] [-d <sec> | --delay <sec>]
- *           [--wait-for-all-acked MS] [--remap old:=new ...]
- *           [--read-ahead-queue-size N] [--qos-profile-overrides-path FILE]
- *           <bag-path>
- *           交互键（tty 下生效）：SPACE 从暂停态开始回放，p 暂停，r 继续，+/- 调节回放
- *           速率（±10%），Ctrl+C 停止
- *   yomkrpc -h | --help
+ * 子命令语法、示例、QoS 选项、环境变量与各子命令行为语义的完整手册见 docs/manual/
+ * （README.md 有目录导航）：cli-observe-handbook（topic print/list/info/type/find/hz、
+ * interface show/list、node list/info）、cli-publish-handbook（topic pub/-e/-ef）、
+ * bag-handbook（bag record/info/reindex/convert/play）、qos-tutorial（--qos-ros、
+ * --qos-* 与 --qos-file）、env-vars-reference（YOMKRPC_DDS_DOMAIN_ID、
+ * YOMKRPC_DDS_DISCOVER_ROUNDS、发现服务器直配与 XML profiles 环境变量——启动时无则
+ * 创建并幂等写入 ~/.bashrc，使新开终端可查看继承）、discovery-server-tutorial 与
+ * xml-profiles-tutorial；--help 输出为即用速查。
  *
- * 示例（与 ExampleYomkRpcPub 配合，默认域 0 即开即用）：
- *   yomkrpc topic print hello_world
- *   yomkrpc topic list
- *   yomkrpc topic list -t
- *   yomkrpc topic info hello_world
- *   yomkrpc topic info -v hello_world
- *   yomkrpc topic type hello_world
- *   yomkrpc topic find YomkRpc::MString
- *   yomkrpc topic hz hello_world
- *   yomkrpc interface show YomkRpc::MString
- *   yomkrpc interface list
- *   yomkrpc topic pub -e hello_world
- *   yomkrpc topic pub -ef hello_world
- *   yomkrpc node list
- *   yomkrpc node info my_node
- *   yomkrpc bag record hello_world
- *   yomkrpc bag record rt/chatter rt/tf
- *   yomkrpc bag record 'hello_*' '*_world'   # 通配模式（单个 *，引号防 shell 展开）
- *   yomkrpc bag info bag_2026-01-01_12-00-00_000
- *   yomkrpc bag reindex bag_2026-01-01_12-00-00_000
- *   yomkrpc bag convert -i bag_2026-01-01_12-00-00_000 -o convert_cfg.json
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000
-  *   yomkrpc bag play -r 2.0 bag_2026-01-01_12-00-00_000   # 2 倍速回放
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --topics hello_world   # 只回放指定主题
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-paused   # 暂停态启动，SPACE 开始回放
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --loop   # 循环回放，到尾回开头无限播放
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --start-offset 5   # 从第 5 秒起播，跳过前段
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000 -d 3   # 开播前先等 3 秒，等订阅端就绪
- *   yomkrpc bag play bag_2026-01-01_12-00-00_000 --wait-for-all-acked 0   # 播毕等订阅端确认收齐再退出
- *   yomkrpc bag play bag_in --remap /chatter:=hello_world   # 旧数据喂新主题名
- *   yomkrpc bag play bag_in --read-ahead-queue-size 5000   # 加大预读队列防 IO 抖动致播放延迟
- *   yomkrpc bag play bag_in --qos-profile-overrides-path qos.json   # 按主题覆盖发布 QoS（文件命中>快照>回退）
- *   yomkrpc topic print --qos-ros hello_world   # ROS2 底座订阅（KEEP_LAST(10) 防 ROS2 高频流丢样本）
- *   yomkrpc topic pub --qos-file qos.json hello_world '{"data":"hi"}'   # 文件逐项覆盖发布 QoS
- *
- * QoS 选项（仅 topic pub 发布模式与 topic print/hz 生效，详见 --help）：
- *   --qos-ros 整体切 ROS2 底座（pub 端 RELIABLE+VOLATILE+depth10，print/hz 端
- *   BEST_EFFORT+VOLATILE+depth10）；8 项 --qos-* 逐项覆盖（reliability/durability/
- *   history/depth/deadline/lifespan/liveliness/liveliness-lease-duration）；--qos-file
- *   从 JSON 文件加载逐项覆盖；优先级：命令行逐项 > 文件逐项 > --qos-ros 底座 >
- *   Fast DDS 默认（无任何 QoS 选项即现状行为：writer RELIABLE+TRANSIENT_LOCAL，
- *   reader BEST_EFFORT+VOLATILE，depth 1）。
- * 实现经 YomkRpcDebugService 调试服务（YOMKRPC_DEBUG_* 宏）驱动内部调试节点——
- * topic print：登记主题后远端 DataWriter 经 DDS 发现自动解析类型建立订阅，消息文本
- * 逐条经回调直出 stdout（输出权在调用方，工具侧不落日志），Ctrl+C 退出；订阅端 reader
- * QoS 经 --qos-ros、--qos-* 与 --qos-file 可调（缺省 BEST_EFFORT+VOLATILE depth 1）；
- * topic list：创建节点后一次性收敛查询并逐行打印 topicName——自适应收敛：
- * 节点内部每 ~200ms 轮询一次发现缓存快照，连续 waitRounds 次（默认 5，环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS 可调）集合不变
- * 即认为发现收敛、立即输出，无需固定等待窗口；-t/--types 类型名模式：每行改输出
- * "主题名 [类型名]"（单空格 + 方括号，对齐 ros2 topic list -t，类型名原样输出）；
- * topic info：创建节点后独立收敛查询单个目标主题的发现详情（节点内部轮询该主题快照，
- * 连续 waitRounds 次不变即返回），输出三行：Type（原始 DDS 类型名，无风格转换）、
- * Publisher count、Subscription count；-v/--verbose 端点详情模式：追加逐端点 Node name
- * （归属参与者名）、Endpoint type（PUBLISHER/SUBSCRIPTION）、GUID（FastDDS 原生格式）与
- * QoS profile（ROS2 风格键值行）详情段（段间空行，count 为 0 的端点类型无清单段）；
- * 未发现主题报错退出。
- * topic type：topic info 的单值快捷方式（复用 /topic_info 非 verbose 端点），输出单行裸类型名
- * （去 "Type: " 前缀，对齐 ros2 topic type，便于脚本 $() 取用）；未发现主题报错退出。
- * topic find：按数据类型名反查域内主题列表（类型名精确匹配，对齐 ros2 topic find），命中
- * 每行输出一个主题名（按主题名排序）；无匹配主题报错退出（可发现类型名拼写错误）。
- * interface show：按数据类型名输出该类型的 IDL 结构描述（类型名精确匹配，FastDDS
- * 无原生类型文本化能力，自设计对齐主流 schema 源语法形态：struct 头 + 四空格缩进字段行
- * + 结尾 };）；未发现类型报错退出（可发现类型名拼写错误）。
- * interface list：列出发现缓存中出现的全部数据类型名（去重字典序排序，每行一个，
- * interface show 的配套导航）；域内无任何类型报错退出（find 族语义）。
- * topic pub -e：按主题名输出发布示例三段行集（Type 类型名 / IDL 结构描述 / example
- * 可复制发布命令——同类型重建 DynamicType 取默认值样本，与发布输入格式对称，改命令里
- * JSON 字段值即可发布）；未发现主题报错退出。
- * topic pub：按主题名发布 JSON 载荷消息（缺省 1Hz 持续发送，Ctrl+C 停止并输出统计
- * total/failed；-w/--wait N 期望建匹配订阅端数：matched 计数达到 N 才开始发布，否则一直
- * 等待并打印等待进度日志，Ctrl+C 中断报错退出；-r/--rate N 调整持续发布频率：首轮完整
- * 校验后按 N Hz 周期重发，尽力而为；-t/--times N 条数上限：发满 N 条自动停止，排空
- * 200ms 后退出；-w/-r/-t 独立识别可任意顺序叠加：先等匹配达标再首轮发布进入持续循环，
- * 发满上限即停）：节点层先
- * 发现收敛（类型名 + 订阅者数快照稳定）再类型重建 + JSON 解析（失败报错不发布，不建任何
- * 发布实体），临时 writer（QoS 经 --qos-ros、--qos-* 与 --qos-file 可调，缺省
- * RELIABLE+TRANSIENT_LOCAL）匹配收敛后 write；存在 RELIABLE 订阅
- * 者时以 ack 确认送达（未全部确认报错退出），全 BEST_EFFORT 或无订阅者退化尽力而为；
- * 未发现主题报错退出。载荷直接给 JSON 参数，或经 -f/--file 从文件整体读取（文件不存在/
- * 为空报错退出，与 topic pub -ef 导出文件对接形成导出→改值→发布闭环）。
- * topic pub -ef：按主题名导出消息描述 JSON 文件（查完即退，不发布）：文件内容即默认值
- * 模板 JSON 本身（展开多行缩进，整体就是一份合法发布载荷，可直接 "$(cat 文件)" 填进
- * topic pub 发布命令），文件名 <主题名>_msg_<年-月-日-时-分-秒-毫秒>.json；无 -o 在
- * 当前目录生成，-o 指定目录（相对/绝对均可，目录不存在报错退出，不自动创建）；未发现
- * 主题报错退出。
- * topic hz：订阅主题测量接收频率（复用 topic print 的登记订阅链路，回调只记时间戳不打印
- * 消息，reader QoS 同样经 --qos-ros、--qos-* 与 --qos-file 可调——深度不足丢帧偏频，对接
- * 高频流建议 --qos-ros），输出对齐 ros2 topic hz：主循环每秒打印一次滚动窗口统计（average rate 为窗口内
- * 相邻消息间隔均值倒数，Hz；min/max 为间隔极值，秒；std dev 为间隔总体标准差，秒；
- * window 为间隔样本数，上限 --window 默认 10000）；无新消息不重复打印，首条消息前静默；
- * Ctrl+C 退出。
- * node list：创建节点后独立收敛查询域内已发现的命名参与者（每 ~200ms 轮询一次参与者
- * 发现缓存快照，连续 waitRounds 次不变即返回），每行一个节点名（participant_name 非空
- * 才列出，空名参与者跳过），按名称排序；调试节点自身不在自身发现回调中，天然不列出。
- * node info：创建节点后独立收敛查询指定节点名参与者的发布/订阅主题清单（归属判定基于
- * RTPS 规范保证的"端点 GUID 前缀 == 所属参与者 GUID 前缀"），输出对齐 ros2 node info
- * 形态：节点名行 + "  Subscribers:" 段 + 每行 "    topic: type" + "  Publishers:" 段同
- * 形态（类型名原样输出；空段仅打段头）；未发现节点名报错退出。
- * 各子命令退出前均 YOMKRPC_DEBUG_QUIT() 显式清理，规避 FastDDS 静态析构期段错误
- * （同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
- *
- * 域 id 由环境变量 YOMKRPC_DDS_DOMAIN_ID 唯一指定（默认 0）：
- *   启动时无则创建并设默认值 0，同时幂等写入 ~/.bashrc（仅当其中无该变量时），
- *   使新开任意终端可查看并继承；无命令行覆盖途径。
- *
- * 收敛判定次数（环境变量为唯一配置入口）：
- *   环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS：查询类命令收敛判定次数（连续 N 次 200ms
- *   快照不变即输出，默认 5）；启动时无则创建并设默认值 5，同时幂等写入 ~/.bashrc
- *   （仅当其中无该变量时）；值须为 >=1 的整数，非法报错退出。生效命令：topic list、
- *   topic info、topic type、topic find、interface show、interface list、topic pub -e、
- *   topic pub -ef、topic pub、node list、node info（topic print/topic hz 不用）。
- *
- * 发现服务器直配三环境变量（与域 id 同机制对齐）：
- *   YOMKRPC_USE_DISCOVER_SERVER（默认 false，大小写不敏感 true/1 视为开启）、
- *   YOMKRPC_UDP_DISCOVER_SERVERS（默认空，UDP 直配聚合串，分号分隔多 server）、
- *   YOMKRPC_TCP_DISCOVER_SERVERS（默认空，TCP 直配聚合串，分号分隔多 server）；
- *   启动时无则分别创建并设默认值，同时幂等写入 ~/.bashrc（仅当其中无该变量时），
- *   使新开任意终端可 echo 查看并继承。默认值与未设置行为完全一致（回落多播发现），
- *   仅保证可见性；接 DS 时 export 开关为 true 并填 server 串即可（见 README 5.7）。
- *
- * XML profiles 自动加载双环境变量（与发现服务器同机制对齐）：
- *   YOMKRPC_USE_XML_PROFILE（默认 false，大小写不敏感 true/1 视为开启）、
- *   YOMKRPC_XML_PROFILE_PATH（默认空，Fast DDS XML profiles 文件路径，相对/绝对均可）；
- *   启动时无则分别创建并设默认值，同时幂等写入 ~/.bashrc（仅当其中无该变量时）。
- *   开关开启且路径非空时各子命令创建调试/bag 节点前先自动加载该 profiles（空路径
- *   静默跳过，加载失败报错退出），participant 发现/传输/QoS 配置经三级提取链叠加生效。
+ * 实现经 YomkRpcDebugService（YOMKRPC_DEBUG_*）与 YomkRpcBagService（YOMKRPC_BAG_*）
+ * 驱动内部调试/录制节点；各子命令退出前 YOMKRPC_DEBUG_QUIT() 显式清理，规避
+ * FastDDS 静态析构期段错误（同 ExampleYomkRpcSub 退出前 DEL_NODE 模式）。
  */
 
 #include <YomkRpc/YomkRpcAPI.h>
@@ -526,10 +382,10 @@ static bool parseDiscoverRounds(const char *text, uint32_t &rounds)
     return true;
 }
 
-// ---- topic pub（发布模式）/topic print/topic hz 的 QoS 选项解析辅助 ----
+// topic pub（发布模式）/topic print/topic hz 的 QoS 选项解析辅助
 // 优先级链：命令行 --qos-* 逐项 > --qos-file 逐项 > --qos-ros 底座 > Fast DDS 默认。
 // 实现为底座 + 两份逐项 profile 顺序合并（不可按 argv 出现顺序写同一份——--qos-file 与
-// --qos-* 顺序任意）；全哨兵=Fast DDS 默认底座（现状行为），--qos-ros 分端点取 ROS2 底座。
+// --qos-* 顺序任意）；全哨兵=Fast DDS 默认底座，--qos-ros 分端点取 ROS2 底座。
 
 // 枚举值大小写不敏感归一（ros2 CLI 风格小写与 DDS 大写拼写均收）
 static std::string qosEnumLower(std::string text)
@@ -2239,17 +2095,17 @@ static int runNodeInfo(uint32_t domainId, const std::string &nodeName, uint32_t 
 
 int main(int argc, char *argv[])
 {
-    // ---- 环境变量：无 YOMKRPC_DDS_DOMAIN_ID 则创建并设默认值 0（进程内生效），并幂等
-    // 持久化到 ~/.bashrc 使新开终端可见可继承；用户已 export 时不写 ----
+    // 环境变量：无 YOMKRPC_DDS_DOMAIN_ID 则创建并设默认值 0（进程内生效），并幂等
+    // 持久化到 ~/.bashrc 使新开终端可见可继承；用户已 export 时不写
     if (std::getenv(kDomainEnv) == nullptr)
     {
         ::setenv(kDomainEnv, "0", 1);
         persistDefaultEnv(kDomainEnv, "0", "default DDS domain id (env YOMKRPC_DDS_DOMAIN_ID, default 0)");
     }
 
-    // ---- 收敛次数环境变量：无 YOMKRPC_DDS_DISCOVER_ROUNDS 则创建并设默认值 5（进程内
+    // 收敛次数环境变量：无 YOMKRPC_DDS_DISCOVER_ROUNDS 则创建并设默认值 5（进程内
     // 生效），并幂等持久化到 ~/.bashrc 使新开终端可见可继承；该变量为查询类命令
-    // 收敛次数的唯一配置入口 ----
+    // 收敛次数的唯一配置入口
     if (std::getenv(kDiscoverRoundsEnv) == nullptr)
     {
         ::setenv(kDiscoverRoundsEnv, "5", 1);
@@ -2257,10 +2113,10 @@ int main(int argc, char *argv[])
                           "discovery stable rounds for query commands (default 5)");
     }
 
-    // ---- 发现服务器三环境变量：无则创建并设默认值（总开关 false、UDP/TCP server 串空，
+    // 发现服务器三环境变量：无则创建并设默认值（总开关 false、UDP/TCP server 串空，
     // 进程内生效），并幂等持久化到 ~/.bashrc 使新开终端可见可继承；默认值与"未设置"
     // 行为完全一致（开关非 true/1、串空均回落多播发现），仅保证可见性不改行为；
-    // 用户 export YOMKRPC_USE_DISCOVER_SERVER=true 且填 server 串后即切 DS 直配 ----
+    // 用户 export YOMKRPC_USE_DISCOVER_SERVER=true 且填 server 串后即切 DS 直配
     if (std::getenv(kUseDiscoverServerEnv) == nullptr)
     {
         ::setenv(kUseDiscoverServerEnv, "false", 1);
@@ -2280,10 +2136,10 @@ int main(int argc, char *argv[])
                           "TCP discover server locators, semicolon separated (default empty)");
     }
 
-    // ---- XML profiles 双环境变量：无则创建并设默认值（总开关 false、路径空，进程内
+    // XML profiles 双环境变量：无则创建并设默认值（总开关 false、路径空，进程内
     // 生效），并幂等持久化到 ~/.bashrc 使新开终端可见可继承；默认值与"未设置"行为
     // 完全一致（开关非 true/1 即不加载），仅保证可见性不改行为；用户 export
-    // YOMKRPC_USE_XML_PROFILE=true 且填 profiles 路径后各子命令创建节点前即自动加载 ----
+    // YOMKRPC_USE_XML_PROFILE=true 且填 profiles 路径后各子命令创建节点前即自动加载
     if (std::getenv(kUseXmlProfileEnv) == nullptr)
     {
         ::setenv(kUseXmlProfileEnv, "false", 1);
@@ -2297,8 +2153,8 @@ int main(int argc, char *argv[])
                           "Fast DDS XML profiles file path (default empty)");
     }
 
-    // ---- 参数解析：-h/--help 即刻退出；位置参数（收敛次数无 CLI 选项恒读环境变量；
-    //      域号另有 -D/--domain 显式选项，未给时恒读环境变量） ----
+    // 参数解析：-h/--help 即刻退出；位置参数（收敛次数无 CLI 选项恒读环境变量；
+    //      域号另有 -D/--domain 显式选项，未给时恒读环境变量）
     uint32_t domainId = 0;
     bool hasDomainArg = false;  // 显式 --domain/-D 在场：域号解析跳过 env 恒读（显式优先）
     uint32_t waitRounds = 5; // 收敛判定次数（从环境变量 YOMKRPC_DDS_DISCOVER_ROUNDS 读取；查询类命令生效）
@@ -2318,7 +2174,9 @@ int main(int argc, char *argv[])
     uint64_t maxCacheSize = 100 * 1024 * 1024;  // 写缓存双缓冲字节数（-c/--max-cache-size；仅
                                                 // bag record 生效，0=直写；默认 100 MiB 对齐参考实现）
     size_t windowSize = 10000; // 频率统计窗口大小（--window；仅 topic hz 生效，对齐 ros2 默认）
-    std::string msgOutDir;   // 输出目录（-o/--output；topic pub -ef=消息描述文件位置，bag record=bag 目录名/路径，bag convert=输出配置文件路径）
+    // 输出目录（-o/--output；topic pub -ef=消息描述文件位置，bag record=bag 目录名/路径，
+    // bag convert=输出配置文件路径）
+    std::string msgOutDir;
     std::vector<std::string> convertInputs; // 输入 bag 目录清单（-i/--input；仅 bag convert 生效，可重复）
     std::string pubJsonFile; // 发布载荷文件（-f/--file；仅 topic pub <主题名> -f 生效）
     double pubRateHz = 1.0;  // 持续发布频率 Hz（-r/--rate；仅 topic pub 发布模式生效，缺省 1Hz 持续发送，Ctrl+C 停止）
@@ -2967,8 +2825,8 @@ int main(int argc, char *argv[])
         pos.push_back(arg);
     }
 
-    // ---- 域 id 解析：显式 --domain/-D 优先；未给时恒从环境变量 YOMKRPC_DDS_DOMAIN_ID
-    //      读取（无则默认 0，现状语义不变） ----
+    // 域 id 解析：显式 --domain/-D 优先；未给时恒从环境变量 YOMKRPC_DDS_DOMAIN_ID
+    //      读取（无则默认 0，语义不变）
     if (!hasDomainArg)
     {
         const char *envVal = std::getenv(kDomainEnv);
@@ -2980,7 +2838,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // ---- 收敛次数解析：恒从环境变量读取（默认 5，无 CLI 覆盖途径） ----
+    // 收敛次数解析：恒从环境变量读取（默认 5，无 CLI 覆盖途径）
     const char *roundsEnv = std::getenv(kDiscoverRoundsEnv);
     if (!parseDiscoverRounds(roundsEnv, waitRounds))
     {
@@ -2990,8 +2848,8 @@ int main(int argc, char *argv[])
         return 2;
     }
 
-    // ---- 子命令分派：topic print <topic-name> / topic list / topic info <topic-name> /
-    //      node list / node info <node-name> / bag record <topic-name> ... ----
+    // 子命令分派：topic print <topic-name> / topic list / topic info <topic-name> /
+    //      node list / node info <node-name> / bag record <topic-name> ...
     if (pos.size() == 3 && pos[0] == "topic" && pos[1] == "print" && !pos[2].empty())
     {
         return runPrint(domainId, pos[2], qosArgs.resolve(false));

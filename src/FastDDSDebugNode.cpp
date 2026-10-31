@@ -344,7 +344,7 @@ Duration_t toDuration(int64_t ns)
 }
 
 // DDSQosProfile 翻译到 Fast DDS 端点 QoS：起点为调用方已拷贝的 *_QOS_DEFAULT 底座，
-// 非哨兵项（枚举非 Unset / 数值 >= 0）逐项覆盖，哨兵项保持底座默认（现状行为）；
+// 非哨兵项（枚举非 Unset / 数值 >= 0）逐项覆盖，哨兵项保持底座默认；
 // 枚举到 policy 的映射在此显式完成（不做数值直译，公共头枚举与 Fast DDS 内部枚举解耦）。
 void toWriterQos(const DDSQosProfile& p, DataWriterQos& qos)
 {

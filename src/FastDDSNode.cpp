@@ -43,7 +43,7 @@ Duration_t toDuration(int64_t ns)
 }
 
 // DDSQosProfile 翻译到 Fast DDS 端点 QoS：起点为调用方已拷贝的 *_QOS_DEFAULT 底座，
-// 非哨兵项（枚举非 Unset / 数值 >= 0）逐项覆盖，哨兵项保持底座默认（现状行为）；
+// 非哨兵项（枚举非 Unset / 数值 >= 0）逐项覆盖，哨兵项保持底座默认；
 // 枚举到 policy 的映射在此显式完成（不做数值直译，公共头枚举与 Fast DDS 内部枚举解耦）。
 void toWriterQos(const DDSQosProfile& p, DataWriterQos& qos)
 {
@@ -185,8 +185,9 @@ public:
                     {
                         if (infoSeq[i].valid_data && infoSeq[i].instance_state == ALIVE_INSTANCE_STATE && callback_)
                         {
-                            // buffer()[i] 是 LoanableCollection 唯一元素访问方式（无 operator[]/span），FastDDS 官方惯用法；
-                            // i 受 infoSeq.length() 界定 → 指针算术安全，抑制 clang-tidy 误报。
+                            // buffer()[i] 是 LoanableCollection 唯一元素访问方式（无 operator[]/span）
+                            // ——FastDDS 官方惯用法；i 受 infoSeq.length() 界定 → 指针算术安全，
+                            // 抑制 clang-tidy 误报。
                             callback_(dataSeq.buffer()[i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
                         }
                     }

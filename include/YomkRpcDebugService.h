@@ -4,7 +4,9 @@
 // YomkRpcDebugService 的声明。调试能力由内部的 FastDDSDebugNode 提供（类型无关：经 DDS 发现
 // 机制取回远端 TypeObject 动态建订阅，消息以 JSON 文本投递给用户回调，零消息类型依赖）。
 #include <YomkServer/YomkAPI.h>
-#include "YomkRpcService.h" // DDSQosProfile（DDSDebugTopic/DDSDebugTopicPub 的 qos 尾参；平铺引号三环境命中：安装树同目录/测试树平铺/主库平铺）
+// 引 DDSQosProfile（DDSDebugTopic/DDSDebugTopicPub 的 qos 尾参）；平铺引号三环境命中：
+// 安装树同目录/测试树平铺/主库平铺
+#include "YomkRpcService.h"
 
 #include <atomic>
 #include <functional>
@@ -71,7 +73,7 @@ struct DDSDebugNode
     // DDS 域号，合法范围 [0,232]；缺省（YOMKRPC_DEBUG_NODE 无参形态）经类内缺省初始化器读
     // 环境变量 YOMKRPC_DDS_DOMAIN_ID（无/非法/超范围回落 0），语义同 DDSNode。
     uint32_t domainId = YomkRpcDefaultDomainId();
-    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配（现状行为）；格式 "ip[:port]"，
+    // 发现服务器直配聚合串（可缺省尾参，UDP 通道）：空串=不直配；格式 "ip[:port]"，
     // 多 server 分号分隔，port 缺省 11811。非空时 participant 以 CLIENT 发现协议直配
     // （覆盖 XML discoveryServersList）；非法串（空项/空 ip/越界 port）创建失败回显。
     // 缺省（YOMKRPC_DEBUG_NODE 省略该尾参）经类内缺省初始化器读环境变量：总开关
@@ -89,7 +91,7 @@ struct DDSDebugTopic
     std::string topicName;      // 待调试主题
     DDSDebugOutputFunc output;  // 用户自定义输出回调；空回调拒绝
     DDSQosProfile qos;          // 动态订阅 reader QoS（可缺省尾参）；全哨兵=Fast DDS reader 默认底座
-                                // （KEEP_LAST(1)+BEST_EFFORT+VOLATILE，现状行为）；对接 ROS2 高频流
+                                // （KEEP_LAST(1)+BEST_EFFORT+VOLATILE）；对接 ROS2 高频流
                                 // 建议 DDSQosProfile::ros2DefaultSubscriber()（KEEP_LAST(10) 防丢样本）
 };
 
@@ -185,11 +187,11 @@ struct DDSDebugTopicPub
     std::string json;       // 发布载荷（JSON 格式，与 topic_example 输出模板同构）
     uint32_t stableRounds;  // 连续不变快照次数阈值；1 即单次快照免等待
     uint32_t intervalMs;    // 快照轮询间隔毫秒
-    uint32_t repeatIntervalMs = 0;  // 持续发布间隔毫秒；0=仅发一次（缺省兼容旧 4 字段聚合初始化）
-    uint32_t requiredSubscribers = 0;  // 期望建匹配订阅端数门槛；0=自动收敛（缺省兼容旧 5 字段聚合初始化）
-    uint32_t maxTimes = 0;  // 发布条数上限（含首轮）；0=不限（缺省兼容旧 6 字段聚合初始化）
+    uint32_t repeatIntervalMs = 0;  // 持续发布间隔毫秒；0=仅发一次（尾部缺省字段）
+    uint32_t requiredSubscribers = 0;  // 期望建匹配订阅端数门槛；0=自动收敛（尾部缺省字段）
+    uint32_t maxTimes = 0;  // 发布条数上限（含首轮）；0=不限（尾部缺省字段）
     DDSQosProfile qos;  // 临时发布 writer QoS（可缺省尾参）；全哨兵=Fast DDS writer 默认底座
-                        // （KEEP_LAST(1)+RELIABLE+TRANSIENT_LOCAL，≡既有写死值，现状行为）；
+                        // （KEEP_LAST(1)+RELIABLE+TRANSIENT_LOCAL）；
                         // ROS2 底座建议 DDSQosProfile::ros2DefaultPublisher()
 };
 

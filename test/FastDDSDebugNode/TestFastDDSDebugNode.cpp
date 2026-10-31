@@ -134,7 +134,8 @@ namespace
         PlainNoTypeObjectPubSubType()
         {
             set_name("Plain::NoTypeObject");
-            max_serialized_type_size = 4 + static_cast<uint32_t>(sizeof(PlainSample)); /*encapsulation*/
+            // +4：CDR encapsulation header
+            max_serialized_type_size = 4 + static_cast<uint32_t>(sizeof(PlainSample));
             is_compute_key_provided = false;
         }
         ~PlainNoTypeObjectPubSubType() override = default;

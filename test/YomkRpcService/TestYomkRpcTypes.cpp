@@ -33,7 +33,8 @@
 #include "TestCheck.h"
 #include "YomkRpcService.h" // 服务 + DDSTopic/DDSSubRequest/DDSPublish + String + YOMK_* 宏
 
-#include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MFloat32/MFloat64/MInt64/MBool/MString/MByteArray 数据类
+// 引消息类型：YomkRpc::MFloat32/MFloat64/MInt64/MBool/MString/MByteArray 数据类
+#include <YomkRpcMsg/YomkRpcMsg.hpp>
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // 对应 PubSubType
 
 #include <atomic>
@@ -173,13 +174,16 @@ namespace
                           << std::endl;
                 std::lock_guard<std::mutex> lk(mtx);
                 // 借出指针可能仅 4 字节对齐(base+4)。闸门用 ValueT 而非 MsgT：FastDDS 生成的 MsgT 有用户定义拷贝赋值/
-                // 析构 → 非平凡可拷贝(is_trivially_copyable_v<MsgT>==false)，若以其为闸门会漏掉 MFloat64/MInt64 致欠对齐 deref；
-                // 且 memcpy 进非平凡可拷贝的 MsgT 会触发 -Wclass-memaccess。故 memcpy 目标取 ValueT(double/int64_t，平凡可拷贝)。
-                //   · ValueT 平凡可拷贝 且 alignof(MsgT)>4(MFloat64/MInt64)：plain 单标量，CDR body(base+4)即标量裸字节(偏移0)；
-                //     运行期指针未按 alignof 对齐(真零拷贝借出)→ memcpy 到对齐 ValueT 读值(UBSan 清洁、严格对齐 ARM 安全、
-                //     等价 msg.data())；已对齐(data-sharing 关时反序列化实例)→直接 deref。
-                //   · 其余(alignof≤4：MFloat32/MBool 借出 base+4 天然对齐；ValueT 非平凡可拷贝：MString/MByteArray 非 plain、
-                //     反序列化进对齐实例 mod8==0)→直接 deref 安全。
+                // 析构 → 非平凡可拷贝(is_trivially_copyable_v<MsgT>==false)，若以其为闸门会漏掉
+                // MFloat64/MInt64 致欠对齐 deref；且 memcpy 进非平凡可拷贝的 MsgT 会触发 -Wclass-memaccess。
+                // 故 memcpy 目标取 ValueT(double/int64_t，平凡可拷贝)。
+                //   · ValueT 平凡可拷贝 且 alignof(MsgT)>4(MFloat64/MInt64)：plain 单标量，
+                //     CDR body(base+4)即标量裸字节(偏移0)；运行期指针未按 alignof 对齐(真零拷贝借出)
+                //     → memcpy 到对齐 ValueT 读值(UBSan 清洁、严格对齐 ARM 安全、等价 msg.data())；
+                //     已对齐(data-sharing 关时反序列化实例)→直接 deref。
+                //   · 其余(alignof≤4：MFloat32/MBool 借出 base+4 天然对齐；
+                //     ValueT 非平凡可拷贝：MString/MByteArray 非 plain、反序列化进对齐实例 mod8==0)
+                //     →直接 deref 安全。
                 if constexpr (std::is_trivially_copyable_v<ValueT> && alignof(MsgT) > 4)
                 {
                     if ((p % alignof(MsgT)) != 0)

@@ -43,7 +43,9 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcService.h" // 服务 + DDSNode/DDSTopic/DDSSubRequest/DDSPublish/DDSLoan/DDSLoanResult + String + YOMK_* 宏
+// 引服务头：YomkRpcService + DDSNode/DDSTopic/DDSSubRequest/DDSPublish/DDSLoan/
+// DDSLoanResult/String + YOMK_* 宏
+#include "YomkRpcService.h"
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MInt32
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MInt32PubSubType
@@ -193,7 +195,8 @@ namespace
 
         int createOk = 0, regPubOk = 0, regSubOk = 0, loanOk = 0, pubOk = 0, discOk = 0, delOk = 0;
 
-        // 单轮 churn：create → register 1 pub(MInt32)+1 sub(callback) → loan/publish/discard 数次 → delete
+        // 单轮 churn：create → register 1 pub(MInt32)+1 sub(callback) →
+        // loan/publish/discard 数次 → delete
         auto oneCycle = [&](const std::string &name)
         {
             if (svc->invoke("/create_node", mkNode(TEST_DOMAIN, name)).m_status == YomkResponse::eOk)
@@ -280,7 +283,7 @@ namespace
                   << " rssKB " << base.rssKB << "->" << after.rssKB << std::endl;
     }
 
-    // ============================ S2：持续 publish + loan/discard（writer-only）============================
+    // S2：持续 publish + loan/discard（writer-only）
     void s2_continuousPublishLoan(YomkRpcService *svc)
     {
         const std::string node = "s2_node";

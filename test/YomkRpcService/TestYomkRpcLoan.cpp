@@ -28,7 +28,8 @@
  */
 
 #include "TestCheck.h"
-#include "YomkRpcService.h" // DDSLoan/DDSLoanResult/DDSTopic/DDSSubRequest/DDSPublish + String + YOMK_* 宏
+// 引服务头：DDSLoan/DDSLoanResult/DDSTopic/DDSSubRequest/DDSPublish + String + YOMK_* 宏
+#include "YomkRpcService.h"
 
 #include <YomkRpcMsg/YomkRpcMsg.hpp>            // YomkRpc::MInt32 / MString
 #include <YomkRpcMsg/YomkRpcMsgPubSubTypes.hpp> // MInt32PubSubType / MStringPubSubType

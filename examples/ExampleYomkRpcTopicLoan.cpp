@@ -1,3 +1,9 @@
+/**
+ * @file ExampleYomkRpcTopicLoan.cpp
+ * @brief loan 零拷贝发布示例：loan_topic（MInt32，plain 类型）经 YOMKRPC_LOAN 借出池内
+ *       样本填值后发布 5 条并演示 discard 归还；fallback_topic（MString，非 plain）对照
+ *       展示借出返回空指针的回退路径。详见 docs/manual/loan-tutorial.md。
+ */
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 

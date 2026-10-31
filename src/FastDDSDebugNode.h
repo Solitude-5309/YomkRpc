@@ -1,8 +1,11 @@
 #ifndef FASTDDSDEBUGNODE_H
 #define FASTDDSDEBUGNODE_H
 
-#include "YomkRpcService.h"  // DDSQosProfile（端点 QoS 描述，公共头零 fastdds 依赖；平铺引号形式命中 include/，安装树经 YomkRpc/ 前缀提供同一头）
-#include "FastDDSXmlHelper.h"  // ParticipantQosSpec（XML 配置通道 + serverLocator 直配 spec；缺省实参需完整类型，自身引公共头与 fastdds）
+// 引 DDSQosProfile（端点 QoS 描述，公共头零 fastdds 依赖；平铺引号形式命中 include/，
+// 安装树经 YomkRpc/ 前缀提供同一头）与 ParticipantQosSpec（XML 配置通道 + serverLocator
+// 直配 spec；缺省实参需完整类型，自身引公共头与 fastdds）
+#include "YomkRpcService.h"
+#include "FastDDSXmlHelper.h"
 
 #include <chrono>
 #include <cstdint>
@@ -34,7 +37,8 @@
 // 析构按停工作线程 → DataReader → Topic → Subscriber → Participant 顺序清理。
 class FastDDSDebugNode
 {
-    class DebugParticipantListener;  // 参与者监听器：writer/reader 发现回调 → onWriterDiscovered/onReaderDiscovered
+    // 参与者监听器：writer/reader 发现回调 → onWriterDiscovered/onReaderDiscovered
+    class DebugParticipantListener;
     class DebugSubListener;          // 数据监听器：take 动态样本 → json_serialize 结构化输出
     // 订阅登记项。
     struct DebugSub
@@ -84,7 +88,7 @@ public:
     // writer 时由工作线程打一次性等待提示（登记本身不阻塞、不改返回值——订阅建立
     // 本就是发现驱动的延迟行为）。
     // qos 为动态订阅 reader 的 QoS 描述（可缺省尾参）：全哨兵=Fast DDS reader 默认底座
-    // （KEEP_LAST(1)+BEST_EFFORT+VOLATILE，即现状行为）；对接 ROS2 高频流建议
+    // （KEEP_LAST(1)+BEST_EFFORT+VOLATILE）；对接 ROS2 高频流建议
     // DDSQosProfile::ros2DefaultSubscriber()（KEEP_LAST(10) 防丢样本）。qos 随登记写入
     // pendingQos_ 暂存，工作线程建订（tryStartSubscription）时取用：建订成功随 pending_
     // 一同清除，失败保留供重试。

@@ -1,3 +1,8 @@
+/**
+ * @file ExampleYomkRpcTopic.cpp
+ * @brief 同节点同主题自发自收示例（rpc_demo_topic，MString）：单进程单节点先注册发布主题
+ *       再注册订阅主题，等待发现后发布 5 条并打印接收统计，退出前 DEL_NODE 清理。
+ */
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 

@@ -15,7 +15,8 @@
 #include "YomkRpcService.h"  // YomkRpcService::xmlCache()（XML profiles raw 串单例访问；本头未 include 公共头）
 
 #include "FastDDSBagNode.h"
-#include "FastDDSXmlHelper.h"  // yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSBagNode.h 传递亦可得）
+// 引 yomkrpc_xml::ParticipantQosSpec（createNode 组 spec；FastDDSBagNode.h 传递亦可得）
+#include "FastDDSXmlHelper.h"
 
 #include <utility>
 

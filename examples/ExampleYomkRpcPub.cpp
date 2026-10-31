@@ -1,3 +1,9 @@
+/**
+ * @file ExampleYomkRpcPub.cpp
+ * @brief 最小发布端示例：pub_node 注册发布主题 hello_world（MString），1Hz 持续发布直至
+ *       Ctrl+C 退出（退出前 DEL_NODE 清理）；与 ExampleYomkRpcSub 或 yomkrpc topic print
+ *       配对验证。
+ */
 #include <YomkRpc/YomkRpcAPI.h>
 #include <YomkServer/YomkAPI.h>
 
